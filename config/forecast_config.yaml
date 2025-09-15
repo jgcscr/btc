@@ -1,0 +1,48 @@
+# Configuration file for BTC forecasting system
+paths:
+  data_parquet: data/processed/btcusdt_1m_ml_ready.parquet
+  output_dir: data/forecasts
+  arima_output_dir: data/arima_garch_forecasts
+  backtest_dir: data/backtests
+
+# Forecast horizons in minutes (4h, 8h, 12h)
+horizons: [240, 480, 720]
+
+# Prophet model configuration
+prophet:
+  changepoint_prior_scale: 0.2
+  changepoint_range: 0.98
+  seasonality_mode: additive
+  interval_width: 0.9
+  intraday_fourier: 20
+  use_log_price: true
+
+# ARIMA+GARCH model configuration
+arima:
+  max_p: 2
+  max_q: 2
+  garch_p: 1
+  garch_q: 1
+  dist: student_t
+  egarch_fallback: true
+  resample: null  # options: null, 5T, 15T
+  monte_carlo_paths: 1000
+
+# Backtesting configuration
+backtest:
+  enable_prophet: true
+  enable_arima_garch: false  # Disable for faster testing
+  train_window_minutes: 2880  # 2 days
+  step_minutes: 1440           # 1 day step
+  save_individual: false
+
+# Ensemble configuration
+ensemble:
+  method: inverse_rmse  # or static
+  static_weights:
+    prophet: 0.4
+    arima_garch: 0.6
+
+# Logging configuration
+logging:
+  level: INFO
