@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual envs
+.venv/
+.env/
+
+# Data / artifacts
+artifacts/
+data/spot_klines/
+data/futures_metrics/
+
+# VS Code
+.vscode/
