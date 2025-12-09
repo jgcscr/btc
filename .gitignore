@@ -119,3 +119,13 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Data and output files
+data/forecasts/*.parquet
+data/arima_garch_forecasts/*.parquet
+data/backtests/*.csv
+data/processed/*.parquet
+!data/processed/.gitkeep
+!data/forecasts/.gitkeep
+!data/arima_garch_forecasts/.gitkeep
+!data/backtests/.gitkeep

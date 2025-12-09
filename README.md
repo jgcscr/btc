@@ -24,7 +24,11 @@ pip install -r requirements.txt
 
 ### Usage
 
-1. **Prepare your data**: Place 1-minute OHLCV Bitcoin data in `data/processed/btcusdt_1m_ml_ready.parquet`
+1. **Generate sample data** (or prepare your own):
+   ```bash
+   python generate_sample_data.py
+   ```
+   This creates sample 1-minute OHLCV Bitcoin data in `data/processed/btcusdt_1m_ml_ready.parquet`
 
 2. **Configure parameters**: Edit `config/forecast_config.yaml`
 
@@ -44,11 +48,7 @@ python forecasting/ensemble_forecast.py --config config/forecast_config.yaml
 python forecasting/backtest_multi_horizon.py --config config/forecast_config.yaml
 ```
 
-### Generate Sample Data
-
-```bash
-python generate_sample_data.py
-```
+**Note:** Data files are not included in the repository. Use `generate_sample_data.py` to create sample data or provide your own.
 
 ## Configuration
 
