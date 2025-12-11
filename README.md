@@ -107,3 +107,81 @@ bq load \
 
 If these commands succeed, the raw BigQuery tables are populated and you can
 move on to curated feature tables and model training.
+
+## 5. Model Training, API Serving, and Cloud Run Deployment
+
+### 5.1 Train and save the model
+
+```bash
+cd /workspaces/btc
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Build dataset splits from BigQuery curated features
+python -m src.scripts.build_training_dataset --output-dir artifacts/datasets
+
+# Train baseline XGBoost model
+python -m src.scripts.train_baseline_model \
+	--dataset-path artifacts/datasets/btc_features_1h_splits.npz \
+	--output-dir artifacts/models/xgb_ret1h_v1
+```
+
+### 5.2 Prepare model artifacts for API serving
+
+```bash
+cd /workspaces/btc
+chmod +x scripts/prepare_model_for_api.sh
+./scripts/prepare_model_for_api.sh
+# This copies model files into src/api/model for Docker builds
+```
+
+### 5.3 Build and push Docker image to Artifact Registry
+
+```bash
+cd /workspaces/btc
+gcloud config set project jc-financial-466902
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com
+gcloud artifacts repositories create btc-forecast-repo \
+	--repository-format=docker \
+	--location=us-central1 \
+	--description="Docker images for BTC forecasting service"
+
+gcloud builds submit \
+	--tag us-central1-docker.pkg.dev/jc-financial-466902/btc-forecast-repo/btc-forecast-api:v1 \
+	.
+```
+
+### 5.4 Deploy to Cloud Run
+
+```bash
+gcloud run deploy btc-forecast-api \
+	--image=us-central1-docker.pkg.dev/jc-financial-466902/btc-forecast-repo/btc-forecast-api:v1 \
+	--platform=managed \
+	--region=us-central1 \
+	--allow-unauthenticated \
+	--memory=2Gi \
+	--cpu=2
+```
+
+### 5.5 Test the deployed API
+
+```bash
+SERVICE_URL="https://btc-forecast-api-<your-id>.us-central1.run.app"
+
+# Health check
+curl "$SERVICE_URL/health"
+
+# Prediction
+curl -X POST "$SERVICE_URL/predict" \
+	-H "Content-Type: application/json" \
+	-d '{
+		"instances": [
+			{
+				"close": 43000.0,
+				"volume": 123.45
+			}
+		]
+	}'
+```
+
+This completes the full pipeline: data ingestion → BigQuery → model training → API serving on Cloud Run.

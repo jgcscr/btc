@@ -38,7 +38,7 @@ def make_features_and_target(
 
     y = df[target_column].copy()
 
-    non_feature_cols = {"ts", target_column}
+    non_feature_cols = {"ts", target_column, "ret_fwd_3h"}
     feature_cols = [c for c in df.columns if c not in non_feature_cols]
 
     X = df[feature_cols].copy()

@@ -1,0 +1,42 @@
+{
+  "model_type": "xgboost",
+  "target": "ret_1h",
+  "feature_names": [
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+    "num_trades",
+    "fut_open",
+    "fut_high",
+    "fut_low",
+    "fut_close",
+    "fut_volume",
+    "open_interest",
+    "funding_rate",
+    "ret_fwd_3h",
+    "ma_close_7h",
+    "ma_close_24h",
+    "ma_ratio_7_24",
+    "vol_24h"
+  ],
+  "metrics": [
+    {
+      "split": "train",
+      "rmse": 0.0004217527415390744,
+      "mae": 0.00034263889620855803
+    },
+    {
+      "split": "val",
+      "rmse": 0.0005431833522550101,
+      "mae": 0.0005158684967589977
+    },
+    {
+      "split": "test",
+      "rmse": 0.0005182671887374661,
+      "mae": 0.00045357086987474204
+    }
+  ]
+}

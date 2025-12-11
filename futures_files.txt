@@ -1,0 +1,1 @@
+gs://jc-financial-466902-btc-forecast-data/raw/futures_metrics/interval=1h/yyyy=2025/mm=01/dd=01/btcusdt_futures_1h_2025-01-01.parquet
