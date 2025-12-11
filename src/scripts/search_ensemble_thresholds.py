@@ -1,7 +1,9 @@
 import argparse
 import json
 import os
-from typing import Any, Dict, List, Tuple
+import sys
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 from xgboost import Booster, DMatrix
@@ -82,7 +84,7 @@ def _align_features(X: np.ndarray, dataset_feature_names: List[str], model_featu
 
 
 def _compute_trade_stats(ret: np.ndarray, signal: np.ndarray) -> Dict[str, float]:
-    """Compute basic trade statistics for a given return series and signal."""
+    """Compute trade-level statistics for a given return series and signal."""
     mask = signal.astype(bool)
     n_trades = int(mask.sum())
 
@@ -92,19 +94,47 @@ def _compute_trade_stats(ret: np.ndarray, signal: np.ndarray) -> Dict[str, float
             "hit_rate": 0.0,
             "avg_ret_per_trade": 0.0,
             "cum_ret": 0.0,
+            "ret_std": 0.0,
+            "max_drawdown": 0.0,
         }
 
     ret_trades = ret[mask]
     hit_rate = float(np.mean(ret_trades > 0))
     avg_ret = float(np.mean(ret_trades))
     cum_ret = float(np.sum(ret_trades))
+    ret_std = float(np.std(ret_trades, ddof=0))
+
+    equity_curve = np.cumsum(ret_trades)
+    running_max = np.maximum.accumulate(equity_curve)
+    drawdowns = equity_curve - running_max
+    max_drawdown = float(drawdowns.min()) if drawdowns.size else 0.0
 
     return {
         "n_trades": float(n_trades),
         "hit_rate": hit_rate,
         "avg_ret_per_trade": avg_ret,
         "cum_ret": cum_ret,
+        "ret_std": ret_std,
+        "max_drawdown": max_drawdown,
     }
+
+
+@dataclass
+class ThresholdCandidate:
+    p_up_min: float
+    ret_min: float
+    n_trades_val: float
+    hit_rate_val: float
+    avg_ret_per_trade_val: float
+    cum_ret_val: float
+    ret_std_val: float
+    max_drawdown_val: float
+
+    @property
+    def sharpe_like_val(self) -> float:
+        if self.ret_std_val <= 0.0:
+            return float("-inf")
+        return self.cum_ret_val / self.ret_std_val
 
 
 def _parse_float_list(values: str, default: List[float]) -> List[float]:
@@ -132,6 +162,9 @@ def search_ensemble_thresholds(
     min_trades_preferred: int = 10,
     min_trades_fallback: int = 5,
     top_k: int = 5,
+    objective: str = "cumret",
+    max_dd: Optional[float] = None,
+    min_trades_constraint: Optional[int] = None,
 ) -> None:
     """Grid-search ensemble thresholds on validation and report test metrics."""
     data = _load_npz_dataset(dataset_path)
@@ -177,58 +210,120 @@ def search_ensemble_thresholds(
     ret_test = y_test.astype(float)
 
     # Evaluate all combinations on validation
-    results: List[Dict[str, Any]] = []
+    results: List[ThresholdCandidate] = []
     for p_up_min in p_up_min_list:
         for ret_min in ret_min_list:
             signal_val = ((p_up_val >= p_up_min) & (ret_pred_val >= ret_min)).astype(int)
             stats_val = _compute_trade_stats(ret_val, signal_val)
 
             results.append(
-                {
-                    "p_up_min": float(p_up_min),
-                    "ret_min": float(ret_min),
-                    "n_trades_val": float(stats_val["n_trades"]),
-                    "hit_rate_val": float(stats_val["hit_rate"]),
-                    "avg_ret_per_trade_val": float(stats_val["avg_ret_per_trade"]),
-                    "cum_ret_val": float(stats_val["cum_ret"]),
-                }
+                ThresholdCandidate(
+                    p_up_min=float(p_up_min),
+                    ret_min=float(ret_min),
+                    n_trades_val=float(stats_val["n_trades"]),
+                    hit_rate_val=float(stats_val["hit_rate"]),
+                    avg_ret_per_trade_val=float(stats_val["avg_ret_per_trade"]),
+                    cum_ret_val=float(stats_val["cum_ret"]),
+                    ret_std_val=float(stats_val["ret_std"]),
+                    max_drawdown_val=float(stats_val["max_drawdown"]),
+                )
             )
 
     # Sort all results for reporting (descending cum_ret, then hit_rate)
     results_sorted = sorted(
         results,
-        key=lambda r: (r["cum_ret_val"], r["hit_rate_val"]),
+        key=lambda r: (r.cum_ret_val, r.hit_rate_val),
         reverse=True,
     )
 
     # Filter candidates for recommended thresholds
-    candidates = [r for r in results_sorted if r["n_trades_val"] >= float(min_trades_preferred)]
-    if not candidates:
-        candidates = [r for r in results_sorted if r["n_trades_val"] >= float(min_trades_fallback)]
-    if not candidates:
-        candidates = [r for r in results_sorted if r["n_trades_val"] >= 1.0]
-    if not candidates:
-        # If still empty, fall back to the best overall (even if n_trades_val == 0)
-        candidates = list(results_sorted[:1]) if results_sorted else []
+    def apply_min_trade_filters(
+        entries: Iterable[ThresholdCandidate],
+        constraint: Optional[int],
+    ) -> List[ThresholdCandidate]:
+        if constraint is not None:
+            return [r for r in entries if r.n_trades_val >= float(constraint)]
 
-    if not candidates:
+        filtered = [r for r in entries if r.n_trades_val >= float(min_trades_preferred)]
+        if filtered:
+            return filtered
+        filtered = [r for r in entries if r.n_trades_val >= float(min_trades_fallback)]
+        if filtered:
+            return filtered
+        filtered = [r for r in entries if r.n_trades_val >= 1.0]
+        if filtered:
+            return filtered
+        return list(entries)
+
+    def select_candidate(
+        entries: List[ThresholdCandidate],
+        objective_name: str,
+        max_dd_constraint: Optional[float],
+    ) -> ThresholdCandidate:
+        # Apply objective-specific constraints
+        constrained = list(entries)
+
+        if objective_name == "cumret_with_dd_constraint" and max_dd_constraint is not None:
+            constrained = [r for r in constrained if r.max_drawdown_val >= float(max_dd_constraint)]
+            if not constrained:
+                print(
+                    "Warning: No candidates satisfy the max drawdown constraint. "
+                    "Falling back to candidates filtered only by trade count.",
+                    file=sys.stderr,
+                )
+                constrained = list(entries)
+
+        if objective_name == "sharpe_like":
+            constrained = [r for r in constrained if r.ret_std_val > 0.0]
+            if not constrained:
+                print(
+                    "Warning: No candidates have positive return std for Sharpe-like score. "
+                    "Falling back to trade-count filtered candidates.",
+                    file=sys.stderr,
+                )
+                constrained = list(entries)
+
+        if not constrained:
+            raise RuntimeError("No candidates available for selection.")
+
+        if objective_name == "sharpe_like":
+            return max(constrained, key=lambda r: (r.sharpe_like_val, r.cum_ret_val))
+
+        if objective_name == "cumret_with_dd_constraint":
+            return max(constrained, key=lambda r: (r.cum_ret_val, r.hit_rate_val))
+
+        return max(constrained, key=lambda r: (r.cum_ret_val, r.hit_rate_val))
+
+    filtered_candidates = apply_min_trade_filters(results_sorted, min_trades_constraint)
+
+    if not filtered_candidates and min_trades_constraint is not None:
+        print(
+            "Warning: No candidates satisfy the provided min-trades constraint. "
+            "Falling back to automatic trade-count fallback logic.",
+            file=sys.stderr,
+        )
+        filtered_candidates = apply_min_trade_filters(results_sorted, None)
+
+    if not filtered_candidates:
         print("No valid threshold combinations found on validation set.")
         return
 
-    recommended = candidates[0]
+    recommended = select_candidate(filtered_candidates, objective, max_dd)
 
     # Print top-K validation combinations (excluding pure zero-trade ones for readability)
     print("Top validation combos (p_up_min, ret_min):\n")
     shown = 0
     for r in results_sorted:
-        if r["n_trades_val"] <= 0.0:
+        if r.n_trades_val <= 0.0:
             continue
         print(
-            f"p_up_min={r['p_up_min']:.2f}, ret_min={r['ret_min']:.5f}:\n"
-            f"  n_trades_val: {int(r['n_trades_val'])}\n"
-            f"  hit_rate_val: {r['hit_rate_val']:.4f}\n"
-            f"  avg_ret_per_trade_val: {r['avg_ret_per_trade_val']:.6f}\n"
-            f"  cum_ret_val: {r['cum_ret_val']:.6f}\n"
+            f"p_up_min={r.p_up_min:.2f}, ret_min={r.ret_min:.5f}:\n"
+            f"  n_trades_val: {int(r.n_trades_val)}\n"
+            f"  hit_rate_val: {r.hit_rate_val:.4f}\n"
+            f"  avg_ret_per_trade_val: {r.avg_ret_per_trade_val:.6f}\n"
+            f"  cum_ret_val: {r.cum_ret_val:.6f}\n"
+            f"  max_drawdown_val: {r.max_drawdown_val:.6f}\n"
+            f"  ret_std_val: {r.ret_std_val:.6f}\n"
         )
         shown += 1
         if shown >= top_k:
@@ -237,8 +332,8 @@ def search_ensemble_thresholds(
         print("(No validation combinations produced any trades.)\n")
 
     # Recommended thresholds
-    p_up_star = recommended["p_up_min"]
-    ret_star = recommended["ret_min"]
+    p_up_star = recommended.p_up_min
+    ret_star = recommended.ret_min
 
     # Compute ensemble performance on test with recommended thresholds
     signal_test_ensemble = ((p_up_test >= p_up_star) & (ret_pred_test >= ret_star)).astype(int)
@@ -250,7 +345,19 @@ def search_ensemble_thresholds(
 
     print("Recommended thresholds based on validation:")
     print(f"  p_up_min*: {p_up_star:.2f}")
-    print(f"  ret_min*: {ret_star:.5f}\n")
+    print(f"  ret_min*: {ret_star:.5f}")
+    print(f"  n_trades_val*: {int(recommended.n_trades_val)}")
+    print(f"  cum_ret_val*: {recommended.cum_ret_val:.6f}")
+    print(f"  max_drawdown_val*: {recommended.max_drawdown_val:.6f}")
+    print(f"  ret_std_val*: {recommended.ret_std_val:.6f}")
+
+    if objective == "sharpe_like":
+        print(f"  sharpe_like_val*: {recommended.sharpe_like_val:.6f}")
+    if objective == "cumret_with_dd_constraint" and max_dd is not None:
+        constraint_ok = recommended.max_drawdown_val >= float(max_dd)
+        print(f"  satisfied_max_dd_constraint: {constraint_ok}")
+
+    print()
 
     print("Test performance (ensemble):")
     print(f"  n_trades_test: {int(stats_test_ensemble['n_trades'])}")
@@ -339,10 +446,39 @@ def main() -> None:
         help="Fallback minimum validation trades if preferred threshold is unmet.",
     )
     parser.add_argument(
+        "--min-trades",
+        type=int,
+        default=None,
+        help=(
+            "Optional hard minimum number of validation trades. When provided, only candidates meeting this "
+            "threshold are considered across all objectives."
+        ),
+    )
+    parser.add_argument(
         "--top-k",
         type=int,
         default=5,
         help="Number of top validation combos to print.",
+    )
+    parser.add_argument(
+        "--objective",
+        type=str,
+        choices=["cumret", "sharpe_like", "cumret_with_dd_constraint"],
+        default="cumret",
+        help=(
+            "Objective used for selecting thresholds. 'cumret' maximizes cumulative return (default). "
+            "'sharpe_like' maximizes return/std for active trades. 'cumret_with_dd_constraint' maximizes return "
+            "subject to an optional drawdown cap."
+        ),
+    )
+    parser.add_argument(
+        "--max-dd",
+        type=float,
+        default=None,
+        help=(
+            "Optional maximum allowed validation max drawdown (log space). "
+            "Only applied when --objective cumret_with_dd_constraint is selected."
+        ),
     )
 
     args = parser.parse_args()
@@ -371,6 +507,9 @@ def main() -> None:
         min_trades_preferred=args.min_trades_preferred,
         min_trades_fallback=args.min_trades_fallback,
         top_k=args.top_k,
+        objective=args.objective,
+        max_dd=args.max_dd,
+        min_trades_constraint=args.min_trades,
     )
 
 

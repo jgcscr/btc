@@ -46,6 +46,58 @@ python -m src.scripts.backtest_signals \
 - Output:
   - Per-bar CSV: `artifacts/analysis/backtest_signals_v1/backtest_signals.csv`.
 
+### 2.1 Advanced (v2): Risk-aware threshold search
+
+Run the enhanced grid search when you want risk-aware thresholds without changing the v1 defaults:
+
+```bash
+python -m src.scripts.search_ensemble_thresholds \
+  --dataset-path artifacts/datasets/btc_features_1h_splits.npz \
+  --reg-model-dir artifacts/models/xgb_ret1h_v1 \
+  --dir-model-dir artifacts/models/xgb_dir1h_v1 \
+  --objective cumret_with_dd_constraint \
+  --max-dd -0.10 \
+  --min-trades 300
+```
+
+This keeps the legacy v1 behavior by default but exposes Sharpe-like and drawdown-constrained selection for v2 experiments.
+
+### 2.2 v2 (multi-horizon) 4h evaluation add-ons
+
+The v1 scripts stay unchanged; when the multi-horizon dataset and 4h models are available you can run the optional 4h workflows:
+
+- Backtest (4h):
+
+  ```bash
+  python -m src.scripts.backtest_signals_4h \
+    --dataset-path artifacts/datasets/btc_features_multi_horizon_splits.npz \
+    --reg-model-dir artifacts/models/xgb_ret4h_v1 \
+    --dir-model-dir artifacts/models/xgb_dir4h_v1 \
+    --p-up-min 0.55 \
+    --ret-min 0.00000 \
+    --fee-bps 2.0 \
+    --slippage-bps 1.0 \
+    --use-test-split \
+    --output-dir artifacts/analysis/backtest_signals_4h_v1
+  ```
+
+- Paper trade (4h):
+
+  ```bash
+  python -m src.scripts.paper_trade_loop_4h \
+    --dataset-path artifacts/datasets/btc_features_multi_horizon_splits.npz \
+    --reg-model-dir artifacts/models/xgb_ret4h_v1 \
+    --dir-model-dir artifacts/models/xgb_dir4h_v1 \
+    --p-up-min 0.55 \
+    --ret-min 0.00000 \
+    --fee-bps 2.0 \
+    --slippage-bps 1.0 \
+    --use-test-split \
+    --output-dir artifacts/analysis/paper_trade_4h_v1
+  ```
+
+These commands mirror the v1 flows but operate on 4h targets; run them only when you want the v2 multi-horizon analysis.
+
 ## 3. Historical Paper Trading (Position-Aware)
 
 Script: `src/scripts/paper_trade_loop.py`
@@ -218,3 +270,57 @@ print("Any duplicate ts?", dup_ts)
 - **Realtime (`paper_trade_realtime.csv`)**:
   - `ts` is strictly increasing with no duplicates.
   - The pattern of `p_up` / `ret_pred` and thresholded signals is broadly consistent with the historical backtest/paper-trade behavior around overlapping dates.
+
+### 6.5 Comparing historical vs realtime signals
+
+Use the comparison helper to check that historical and live signals align where they overlap:
+
+```bash
+python -m src.scripts.compare_historical_vs_realtime
+```
+
+The script highlights overlapping bars, surface-level metric deltas, and flags any signal mismatches so you can investigate drift quickly.
+
+### 6.6 Monitoring live signal behavior
+
+Use the monitoring helper to sanity-check recent live signal characteristics:
+
+```bash
+python -m src.scripts.monitor_live_signals \
+  --live-path artifacts/live/paper_trade_realtime.csv \
+  --window-trades 300
+```
+
+This prints basic activity metrics (fraction of long signals, direction-vs-ensemble overlap, and p_up/ret_pred distribution) and compares the recent window to expected v1 behavior so you can spot potential drift.
+
+## 7. v2 Realtime Fallbacks
+
+### 7.1 (v2) Running 1h realtime predictions directly from Binance
+
+When the curated BigQuery table is lagging, you can pull recent candles straight from Binance, rebuild the v1 feature vector locally, and log predictions in the same realtime CSV:
+
+```bash
+python -m src.scripts.run_signal_realtime_from_binance \
+  --symbol BTCUSDT \
+  --interval 1h \
+  --n-bars 500 \
+  --reg-model-dir artifacts/models/xgb_ret1h_v1 \
+  --dir-model-dir artifacts/models/xgb_dir1h_v1 \
+  --log-path artifacts/live/paper_trade_realtime.csv
+```
+
+Notes:
+
+- The helper rebuilds the feature set using spot, futures, open-interest, and funding endpoints; make sure at least 24 hours of history are requested so rolling features are defined.
+- Scaling is re-fit on the pulled window, so results may differ slightly from the canonical BigQuery path; prefer the original `src/scripts/run_signal_realtime.py` whenever the curated table is current.
+
+### 7.2 Describing the latest live signal
+
+To print a human-readable summary of the most recent logged signal (1h, and 4h if present):
+
+```bash
+python -m src.scripts.describe_latest_signal \
+  --log-path artifacts/live/paper_trade_realtime.csv
+```
+
+This reads the last row of the realtime log and reports the predicted direction, probabilities, log-return estimate, and source tag so you can sanity-check what the live scripts just produced.
