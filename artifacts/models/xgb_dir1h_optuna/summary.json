@@ -1,0 +1,43 @@
+{
+  "model_type": "xgboost_classifier",
+  "target": "direction_1h",
+  "dataset_path": "artifacts/datasets/btc_features_1h_splits.npz",
+  "threshold": 0.0,
+  "params": {
+    "n_estimators": 736,
+    "max_depth": 6,
+    "learning_rate": 0.1376171234192946,
+    "subsample": 0.681466603865563,
+    "colsample_bytree": 0.9774025117017211,
+    "objective": "binary:logistic",
+    "n_jobs": -1,
+    "random_state": 42,
+    "eval_metric": "logloss",
+    "min_child_weight": 1.3607702616443438,
+    "gamma": 3.476238280592246,
+    "lambda": 1.3044156234251667,
+    "alpha": 0.003632829757098474,
+    "scale_pos_weight": 1.768774100579782
+  },
+  "metrics": {
+    "train": {
+      "accuracy": 0.8557944415312009,
+      "precision": 0.7811969439728353,
+      "recall": 0.9816,
+      "f1": 0.8700070905223352
+    },
+    "val": {
+      "accuracy": 0.5850673194614443,
+      "precision": 0.5728395061728395,
+      "recall": 0.5829145728643216,
+      "f1": 0.5778331257783312
+    },
+    "test": {
+      "accuracy": 0.6589242053789731,
+      "precision": 0.6,
+      "recall": 0.8565941101152369,
+      "f1": 0.7056962025316456
+    }
+  },
+  "model_path": "artifacts/models/xgb_dir1h_optuna/xgb_dir1h_model.json"
+}

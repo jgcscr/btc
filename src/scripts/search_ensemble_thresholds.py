@@ -8,7 +8,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 from xgboost import Booster, DMatrix
 
-from src.config_trading import DEFAULT_P_UP_MIN, DEFAULT_RET_MIN
+from src.config_trading import (
+    DEFAULT_FEE_BPS,
+    DEFAULT_P_UP_MIN,
+    DEFAULT_RET_MIN,
+    DEFAULT_SLIPPAGE_BPS,
+)
 
 
 def _load_npz_dataset(path: str) -> Dict[str, Any]:
@@ -83,6 +88,24 @@ def _align_features(X: np.ndarray, dataset_feature_names: List[str], model_featu
     return X[:, indices]
 
 
+def _apply_costs(ret: np.ndarray, signal: np.ndarray, fee_bps: float, slippage_bps: float) -> np.ndarray:
+    ret = np.asarray(ret, dtype=float)
+    signal = np.asarray(signal).astype(bool)
+    if ret.shape != signal.shape:
+        raise ValueError("Return and signal arrays must share the same shape for cost adjustments.")
+
+    if fee_bps < 0 or slippage_bps < 0:
+        raise ValueError("fee_bps and slippage_bps must be non-negative.")
+
+    cost_per_trade = (fee_bps + slippage_bps) / 10_000.0
+    if cost_per_trade == 0:
+        return ret
+
+    ret_adj = ret.copy()
+    ret_adj[signal] = ret_adj[signal] - cost_per_trade
+    return ret_adj
+
+
 def _compute_trade_stats(ret: np.ndarray, signal: np.ndarray) -> Dict[str, float]:
     """Compute trade-level statistics for a given return series and signal."""
     mask = signal.astype(bool)
@@ -137,11 +160,25 @@ class ThresholdCandidate:
         return self.cum_ret_val / self.ret_std_val
 
 
-def _parse_float_list(values: str, default: List[float]) -> List[float]:
+def _normalize_grid_arg(value: Optional[Any]) -> Optional[str]:
+    """Normalize argparse inputs that may be strings or lists into a comma-separated string."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        if not value:
+            return ""
+        return ",".join(str(v) for v in value)
+    return str(value)
+
+
+def _parse_float_list(values: Optional[str], default: List[float]) -> List[float]:
     """Parse a comma-separated list of floats from CLI, with a default."""
-    if values is None or values.strip() == "":
+    if values is None:
         return list(default)
-    parts = [v.strip() for v in values.split(",") if v.strip() != ""]
+    values_str = values.strip()
+    if values_str == "":
+        return list(default)
+    parts = [v.strip() for v in values_str.split(",") if v.strip() != ""]
     if not parts:
         return list(default)
     out: List[float] = []
@@ -159,6 +196,9 @@ def search_ensemble_thresholds(
     dir_model_dir: str,
     p_up_min_list: List[float],
     ret_min_list: List[float],
+    fee_bps: float,
+    slippage_bps: float,
+    output_dir: Optional[str],
     min_trades_preferred: int = 10,
     min_trades_fallback: int = 5,
     top_k: int = 5,
@@ -214,7 +254,8 @@ def search_ensemble_thresholds(
     for p_up_min in p_up_min_list:
         for ret_min in ret_min_list:
             signal_val = ((p_up_val >= p_up_min) & (ret_pred_val >= ret_min)).astype(int)
-            stats_val = _compute_trade_stats(ret_val, signal_val)
+            ret_val_net = _apply_costs(ret_val, signal_val, fee_bps, slippage_bps)
+            stats_val = _compute_trade_stats(ret_val_net, signal_val)
 
             results.append(
                 ThresholdCandidate(
@@ -337,11 +378,13 @@ def search_ensemble_thresholds(
 
     # Compute ensemble performance on test with recommended thresholds
     signal_test_ensemble = ((p_up_test >= p_up_star) & (ret_pred_test >= ret_star)).astype(int)
-    stats_test_ensemble = _compute_trade_stats(ret_test, signal_test_ensemble)
+    ret_test_net_ensemble = _apply_costs(ret_test, signal_test_ensemble, fee_bps, slippage_bps)
+    stats_test_ensemble = _compute_trade_stats(ret_test_net_ensemble, signal_test_ensemble)
 
     # Direction-only baseline on test (p_up >= 0.5)
     signal_test_dir_only = (p_up_test >= 0.5).astype(int)
-    stats_test_dir_only = _compute_trade_stats(ret_test, signal_test_dir_only)
+    ret_test_net_dir = _apply_costs(ret_test, signal_test_dir_only, fee_bps, slippage_bps)
+    stats_test_dir_only = _compute_trade_stats(ret_test_net_dir, signal_test_dir_only)
 
     print("Recommended thresholds based on validation:")
     print(f"  p_up_min*: {p_up_star:.2f}")
@@ -371,6 +414,57 @@ def search_ensemble_thresholds(
     print(f"  avg_ret_per_trade_test: {stats_test_dir_only['avg_ret_per_trade']:.6f}")
     print(f"  cum_ret_test: {stats_test_dir_only['cum_ret']:.6f}")
 
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+        best_config = {
+            "p_up_min": float(p_up_star),
+            "ret_min": float(ret_star),
+            "objective": objective,
+            "fee_bps": float(fee_bps),
+            "slippage_bps": float(slippage_bps),
+            "validation": {
+                "n_trades": float(recommended.n_trades_val),
+                "hit_rate": float(recommended.hit_rate_val),
+                "avg_ret_per_trade": float(recommended.avg_ret_per_trade_val),
+                "cum_ret": float(recommended.cum_ret_val),
+                "ret_std": float(recommended.ret_std_val),
+                "max_drawdown": float(recommended.max_drawdown_val),
+            },
+            "test_ensemble": stats_test_ensemble,
+            "test_direction_baseline": stats_test_dir_only,
+        }
+
+        best_config_path = os.path.join(output_dir, "best_config.json")
+        with open(best_config_path, "w", encoding="utf-8") as handle:
+            json.dump(best_config, handle, indent=2)
+
+        summary_lines = [
+            "Threshold Search Summary",
+            "==========================",
+            f"p_up_min*: {p_up_star:.2f}",
+            f"ret_min*: {ret_star:.5f}",
+            f"Validation trades: {int(recommended.n_trades_val)}",
+            f"Validation cum_ret (net): {recommended.cum_ret_val:.6f}",
+            f"Validation hit_rate: {recommended.hit_rate_val:.4f}",
+            "",
+            "Test Ensemble (net):",
+            f"  n_trades: {int(stats_test_ensemble['n_trades'])}",
+            f"  hit_rate: {stats_test_ensemble['hit_rate']:.4f}",
+            f"  avg_ret_per_trade: {stats_test_ensemble['avg_ret_per_trade']:.6f}",
+            f"  cum_ret: {stats_test_ensemble['cum_ret']:.6f}",
+            "",
+            "Test Direction Baseline (net):",
+            f"  n_trades: {int(stats_test_dir_only['n_trades'])}",
+            f"  hit_rate: {stats_test_dir_only['hit_rate']:.4f}",
+            f"  avg_ret_per_trade: {stats_test_dir_only['avg_ret_per_trade']:.6f}",
+            f"  cum_ret: {stats_test_dir_only['cum_ret']:.6f}",
+        ]
+
+        summary_path = os.path.join(output_dir, "summary.txt")
+        with open(summary_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(summary_lines))
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -399,6 +493,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--p-up-grid",
+        "--p-up-min-grid",
+        nargs="+",
         type=str,
         default=None,
         help=(
@@ -408,6 +504,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--ret-min-grid",
+        "--ret-min-grid-values",
+        nargs="+",
         type=str,
         default=None,
         help=(
@@ -481,6 +579,25 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--fee-bps",
+        type=float,
+        default=DEFAULT_FEE_BPS,
+        help="Per-trade fee assumption in basis points (applied when a trade is taken).",
+    )
+    parser.add_argument(
+        "--slippage-bps",
+        type=float,
+        default=DEFAULT_SLIPPAGE_BPS,
+        help="Per-trade slippage assumption in basis points (applied when a trade is taken).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Optional directory to write search artifacts (best_config.json, summary.txt).",
+    )
+
     args = parser.parse_args()
 
     # Default grids if none provided, centered around v1 defaults
@@ -488,15 +605,18 @@ def main() -> None:
     default_ret_min = [DEFAULT_RET_MIN, DEFAULT_RET_MIN + 0.00025, DEFAULT_RET_MIN + 0.0005]
 
     # Determine grids with override precedence: *-grid > *-min-list > default
-    if args.p_up_grid is not None and args.p_up_grid.strip() != "":
-        p_up_min_list = _parse_float_list(args.p_up_grid, default_p_up)
-    else:
-        p_up_min_list = _parse_float_list(args.p_up_min_list, default_p_up)
+    p_up_grid_normalized = _normalize_grid_arg(args.p_up_grid)
+    ret_min_grid_normalized = _normalize_grid_arg(args.ret_min_grid)
 
-    if args.ret_min_grid is not None and args.ret_min_grid.strip() != "":
-        ret_min_list = _parse_float_list(args.ret_min_grid, default_ret_min)
+    if p_up_grid_normalized is not None and p_up_grid_normalized.strip() != "":
+        p_up_min_list = _parse_float_list(p_up_grid_normalized, default_p_up)
     else:
-        ret_min_list = _parse_float_list(args.ret_min_list, default_ret_min)
+        p_up_min_list = _parse_float_list(_normalize_grid_arg(args.p_up_min_list), default_p_up)
+
+    if ret_min_grid_normalized is not None and ret_min_grid_normalized.strip() != "":
+        ret_min_list = _parse_float_list(ret_min_grid_normalized, default_ret_min)
+    else:
+        ret_min_list = _parse_float_list(_normalize_grid_arg(args.ret_min_list), default_ret_min)
 
     search_ensemble_thresholds(
         dataset_path=args.dataset_path,
@@ -504,6 +624,9 @@ def main() -> None:
         dir_model_dir=args.dir_model_dir,
         p_up_min_list=p_up_min_list,
         ret_min_list=ret_min_list,
+        fee_bps=args.fee_bps,
+        slippage_bps=args.slippage_bps,
+        output_dir=args.output_dir,
         min_trades_preferred=args.min_trades_preferred,
         min_trades_fallback=args.min_trades_fallback,
         top_k=args.top_k,
