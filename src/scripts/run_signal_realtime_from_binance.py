@@ -1,9 +1,10 @@
 import argparse
+import csv
 import json
 import os
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -30,6 +31,28 @@ DEFAULT_N_BARS = 500
 DEFAULT_LOG_PATH = "artifacts/live/paper_trade_realtime.csv"
 DEFAULT_REG_MODEL_DIR = "artifacts/models/xgb_ret1h_v1"
 DEFAULT_DIR_MODEL_DIR = "artifacts/models/xgb_dir1h_v1"
+DEFAULT_P_UP_MIN_4H_CONFIRM = 0.55
+LEGACY_LOG_COLUMNS = [
+    "ts",
+    "p_up",
+    "ret_pred",
+    "signal_ensemble",
+    "signal_dir_only",
+    "created_at",
+    "notes",
+]
+LOG_COLUMNS = [
+    "ts",
+    "p_up",
+    "ret_pred",
+    "signal_ensemble",
+    "signal_dir_only",
+    "p_up_4h",
+    "ret_pred_4h",
+    "signal_1h4h_confirm",
+    "created_at",
+    "notes",
+]
 DEFAULT_FEATURE_LIST = [
     "open",
     "high",
@@ -102,6 +125,30 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_RET_MIN,
         help="Ensemble threshold for predicted ret_1h.",
+    )
+    parser.add_argument(
+        "--p-up-min-4h-confirm",
+        type=float,
+        default=DEFAULT_P_UP_MIN_4H_CONFIRM,
+        help="4h p_up threshold for 1h+4h confirmation (signal_1h4h_confirm).",
+    )
+    parser.add_argument(
+        "--dataset-path-4h",
+        type=str,
+        default=None,
+        help="Optional NPZ dataset path (multi-horizon splits) for 4h scaling.",
+    )
+    parser.add_argument(
+        "--reg-model-dir-4h",
+        type=str,
+        default=None,
+        help="Optional directory containing xgb_ret4h_model.json.",
+    )
+    parser.add_argument(
+        "--dir-model-dir-4h",
+        type=str,
+        default=None,
+        help="Optional directory containing xgb_dir4h_model.json.",
     )
     return parser.parse_args()
 
@@ -192,6 +239,29 @@ def _compute_feature_frame(df: pd.DataFrame, feature_names: List[str]) -> pd.Dat
     return df
 
 
+def _load_feature_config_for_4h(dataset_path: str) -> tuple[List[str], np.ndarray, np.ndarray]:
+    if not dataset_path:
+        raise ValueError("dataset_path_4h must be provided for 4h inference.")
+
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"4h dataset not found: {dataset_path}")
+
+    with np.load(dataset_path, allow_pickle=True) as data:
+        feature_names = data.get("feature_names")
+        x_train = data.get("X_train")
+
+    if feature_names is None or x_train is None:
+        raise KeyError("multi-horizon dataset missing feature_names or X_train")
+
+    feature_names_list = feature_names.tolist()
+    x_train_arr = np.asarray(x_train, dtype=np.float64)
+    mean = x_train_arr.mean(axis=0)
+    std = x_train_arr.std(axis=0)
+    std[std == 0.0] = 1.0
+
+    return feature_names_list, mean, std
+
+
 def _now_utc_iso() -> str:
     dt = datetime.now(timezone.utc)
     iso = dt.isoformat()
@@ -215,13 +285,84 @@ def _load_last_logged_ts(log_path: str) -> str | None:
     return str(df["ts"].iloc[-1])
 
 
-def _append_to_log(log_path: str, row: Dict[str, Any]) -> None:
+def _load_log_with_fallback(log_path: str, columns: List[str]) -> Optional[pd.DataFrame]:
+    rows: List[Dict[str, Any]] = []
+
+    try:
+        with open(log_path, newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            for raw in reader:
+                if not raw:
+                    continue
+
+                if len(raw) == len(columns):
+                    mapping = {columns[idx]: raw[idx] for idx in range(len(columns))}
+                elif len(raw) == len(LEGACY_LOG_COLUMNS):
+                    mapping = {
+                        LEGACY_LOG_COLUMNS[idx]: raw[idx]
+                        for idx in range(len(LEGACY_LOG_COLUMNS))
+                    }
+                else:
+                    padded = list(raw)
+                    if len(padded) < len(columns):
+                        padded.extend([""] * (len(columns) - len(padded)))
+                    mapping = {columns[idx]: padded[idx] for idx in range(len(columns))}
+
+                rows.append(mapping)
+    except OSError:
+        return None
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(rows)
+    for column in columns:
+        if column not in df.columns:
+            df[column] = ""
+    df = df[columns]
+    return df
+
+
+def _ensure_log_schema(log_path: str, columns: List[str]) -> None:
+    if not os.path.exists(log_path):
+        return
+
+    try:
+        existing_columns = pd.read_csv(log_path, nrows=0).columns.tolist()
+    except Exception:
+        existing_columns = []
+
+    if existing_columns == columns:
+        return
+
+    try:
+        df_existing = pd.read_csv(log_path)
+    except Exception:
+        df_existing = _load_log_with_fallback(log_path, columns)
+        if df_existing is None:
+            return
+    else:
+        for column in columns:
+            if column not in df_existing.columns:
+                df_existing[column] = ""
+        df_existing = df_existing[columns]
+
+    df_existing.to_csv(log_path, index=False)
+
+
+def _append_to_log(log_path: str, row: Dict[str, Any], columns: List[str]) -> None:
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-    df_row = pd.DataFrame([row])
+    defaults = {column: "" for column in columns}
+    defaults.update(row)
+    df_row = pd.DataFrame([defaults])[columns]
+
     if not os.path.exists(log_path):
         df_row.to_csv(log_path, index=False)
         return
+
+    _ensure_log_schema(log_path, columns)
 
     df_row.to_csv(log_path, mode="a", header=False, index=False)
 
@@ -263,6 +404,51 @@ def run_realtime_from_binance(args: argparse.Namespace) -> None:
         ret_min=args.ret_min,
     )
 
+    if (
+        args.dataset_path_4h
+        and args.reg_model_dir_4h
+        and args.dir_model_dir_4h
+    ):
+        try:
+            feature_names_4h, feature_mean_4h, feature_std_4h = _load_feature_config_for_4h(args.dataset_path_4h)
+            ordered_features = prepared.X_all_ordered
+            missing_cols = [column for column in feature_names_4h if column not in ordered_features.columns]
+            if missing_cols:
+                raise KeyError(f"Missing required 4h feature columns: {missing_cols}")
+
+            live_features = ordered_features.iloc[[last_index]][feature_names_4h].to_numpy(dtype=np.float64)
+            live_scaled = (live_features - feature_mean_4h) / feature_std_4h
+
+            reg_model_path_4h = os.path.join(args.reg_model_dir_4h, "xgb_ret4h_model.json")
+            dir_model_path_4h = os.path.join(args.dir_model_dir_4h, "xgb_dir4h_model.json")
+            if not os.path.exists(reg_model_path_4h):
+                raise FileNotFoundError(f"Regression model not found: {reg_model_path_4h}")
+            if not os.path.exists(dir_model_path_4h):
+                raise FileNotFoundError(f"Direction model not found: {dir_model_path_4h}")
+
+            models_4h = load_models(reg_model_path=reg_model_path_4h, dir_model_path=dir_model_path_4h)
+            ret_pred_4h = float(models_4h["reg"].predict(live_scaled)[0])
+            p_up_4h = float(models_4h["dir"].predict_proba(live_scaled)[:, 1][0])
+
+            signal["p_up_4h"] = p_up_4h
+            signal["ret_pred_4h"] = ret_pred_4h
+        except Exception as exc:
+            print(
+                f"Warning: failed to compute 4h prediction ({exc}); proceeding without 4h confirmation.",
+                file=sys.stderr,
+            )
+
+    signal_1h4h_confirm: Optional[int] = None
+    p_up_4h = signal.get("p_up_4h")
+    if p_up_4h is not None:
+        try:
+            p_up_4h_float = float(p_up_4h)
+        except (TypeError, ValueError):
+            p_up_4h_float = None
+        if p_up_4h_float is not None:
+            filter_4h = p_up_4h_float >= args.p_up_min_4h_confirm
+            signal_1h4h_confirm = int(int(signal["signal_ensemble"]) == 1 and filter_4h)
+
     summary = {
         "ts": signal["ts"],
         "p_up": signal["p_up"],
@@ -271,6 +457,13 @@ def run_realtime_from_binance(args: argparse.Namespace) -> None:
         "signal_dir_only": int(signal["signal_dir_only"]),
         "source": "binance_direct_v1",
     }
+
+    if "p_up_4h" in signal:
+        summary["p_up_4h"] = signal["p_up_4h"]
+    if "ret_pred_4h" in signal:
+        summary["ret_pred_4h"] = signal["ret_pred_4h"]
+    if signal_1h4h_confirm is not None:
+        summary["signal_1h4h_confirm"] = signal_1h4h_confirm
 
     print(json.dumps(summary, indent=2))
 
@@ -285,11 +478,14 @@ def run_realtime_from_binance(args: argparse.Namespace) -> None:
         "ret_pred": signal["ret_pred"],
         "signal_ensemble": int(signal["signal_ensemble"]),
         "signal_dir_only": int(signal["signal_dir_only"]),
+        "p_up_4h": signal.get("p_up_4h", ""),
+        "ret_pred_4h": signal.get("ret_pred_4h", ""),
+        "signal_1h4h_confirm": signal_1h4h_confirm if signal_1h4h_confirm is not None else "",
         "created_at": _now_utc_iso(),
         "notes": "binance_direct_v1",
     }
 
-    _append_to_log(args.log_path, log_row)
+    _append_to_log(args.log_path, log_row, LOG_COLUMNS)
     print(f"Appended signal for ts={signal['ts']} to {args.log_path}")
 
 
