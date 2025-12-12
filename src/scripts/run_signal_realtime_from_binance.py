@@ -11,10 +11,12 @@ import pandas as pd
 
 from src.config_trading import (
     DEFAULT_DIR_MODEL_DIR_1H,
+    DEFAULT_LSTM_MODEL_DIR_1H,
     DEFAULT_P_UP_MIN,
     DEFAULT_REG_MODEL_DIR_1H,
     DEFAULT_RET_MIN,
     OPTUNA_DIR_MODEL_DIR_1H,
+    OPTUNA_LSTM_MODEL_DIR_1H,
     OPTUNA_P_UP_MIN_1H,
     OPTUNA_REG_MODEL_DIR_1H,
     OPTUNA_RET_MIN_1H,
@@ -30,6 +32,7 @@ from src.trading.signals import (
     PreparedData,
     compute_signal_for_index,
     load_models,
+    populate_lstm_cache_from_prepared,
     prepare_data_for_signals_from_ohlcv,
 )
 
@@ -112,6 +115,24 @@ def _parse_args() -> argparse.Namespace:
         help="Directory containing xgb_dir1h_model.json.",
     )
     parser.add_argument(
+        "--lstm-model-dir",
+        type=str,
+        default=DEFAULT_LSTM_MODEL_DIR_1H,
+        help="Optional directory containing an LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--lstm-device",
+        type=str,
+        default=None,
+        help="Optional torch device override for LSTM inference (e.g. cpu, cuda:0).",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=None,
+        help="Optional minimum sequence length to validate against the loaded LSTM model.",
+    )
+    parser.add_argument(
         "--log-path",
         type=str,
         default=DEFAULT_LOG_PATH,
@@ -176,6 +197,9 @@ def _apply_optuna_profile(args: argparse.Namespace) -> None:
 
     if args.dir_model_dir == DEFAULT_DIR_MODEL_DIR:
         args.dir_model_dir = OPTUNA_DIR_MODEL_DIR_1H
+
+    if args.lstm_model_dir in (None, DEFAULT_LSTM_MODEL_DIR_1H):
+        args.lstm_model_dir = OPTUNA_LSTM_MODEL_DIR_1H
 
     if args.p_up_min == DEFAULT_P_UP_MIN:
         args.p_up_min = OPTUNA_P_UP_MIN_1H
@@ -406,16 +430,29 @@ def _append_to_log(log_path: str, row: Dict[str, Any], columns: List[str]) -> No
     df_row.to_csv(log_path, mode="a", header=False, index=False)
 
 
-def _load_models(reg_dir: str, dir_dir: str) -> Dict[str, Any]:
+def _load_models(
+    reg_dir: str,
+    dir_dir: Optional[str],
+    lstm_dir: Optional[str],
+    lstm_device: Optional[str],
+) -> Dict[str, Any]:
     reg_model_path = os.path.join(reg_dir, "xgb_ret1h_model.json")
-    dir_model_path = os.path.join(dir_dir, "xgb_dir1h_model.json")
-
     if not os.path.exists(reg_model_path):
         raise FileNotFoundError(f"Regression model not found: {reg_model_path}")
-    if not os.path.exists(dir_model_path):
-        raise FileNotFoundError(f"Direction model not found: {dir_model_path}")
 
-    return load_models(reg_model_path=reg_model_path, dir_model_path=dir_model_path)
+    dir_model_path: Optional[str] = None
+    if dir_dir:
+        candidate = os.path.join(dir_dir, "xgb_dir1h_model.json")
+        if not os.path.exists(candidate):
+            raise FileNotFoundError(f"Direction model not found: {candidate}")
+        dir_model_path = candidate
+
+    return load_models(
+        reg_model_path=reg_model_path,
+        dir_model_path=dir_model_path,
+        lstm_model_dir=lstm_dir,
+        device=lstm_device,
+    )
 
 
 def run_realtime_from_binance(args: argparse.Namespace) -> None:
@@ -431,7 +468,31 @@ def run_realtime_from_binance(args: argparse.Namespace) -> None:
     df_features = _compute_feature_frame(raw_df, feature_names)
     prepared: PreparedData = prepare_data_for_signals_from_ohlcv(df_features, feature_names=feature_names)
 
-    models = _load_models(args.reg_model_dir, args.dir_model_dir)
+    models = _load_models(
+        reg_dir=args.reg_model_dir,
+        dir_dir=args.dir_model_dir,
+        lstm_dir=args.lstm_model_dir,
+        lstm_device=args.lstm_device,
+    )
+
+    populate_lstm_cache_from_prepared(prepared, models)
+
+    lstm_info = models.get("dir_lstm")
+    if args.seq_len is not None:
+        if len(prepared.df_all) < args.seq_len:
+            raise SystemExit(
+                f"Insufficient rows after preprocessing ({len(prepared.df_all)}) for seq-len={args.seq_len}.",
+            )
+        if lstm_info is not None:
+            model_seq_len = int(lstm_info.get("seq_len", args.seq_len))
+            if model_seq_len != int(args.seq_len):
+                print(
+                    (
+                        "Warning: requested seq_len="
+                        f"{args.seq_len} but LSTM model expects {model_seq_len}; proceeding with model setting."
+                    ),
+                    file=sys.stderr,
+                )
 
     last_index = len(prepared.df_all) - 1
     if last_index < 0:

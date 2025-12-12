@@ -11,15 +11,24 @@ import numpy as np
 
 from src.config_trading import (
     DEFAULT_DIR_MODEL_DIR_1H,
+    DEFAULT_LSTM_MODEL_DIR_1H,
     DEFAULT_P_UP_MIN,
     DEFAULT_REG_MODEL_DIR_1H,
     DEFAULT_RET_MIN,
     OPTUNA_DIR_MODEL_DIR_1H,
+    OPTUNA_LSTM_MODEL_DIR_1H,
     OPTUNA_P_UP_MIN_1H,
     OPTUNA_REG_MODEL_DIR_1H,
     OPTUNA_RET_MIN_1H,
 )
-from src.trading.signals import PreparedData, compute_signal_for_index, find_row_index_for_ts, load_models, prepare_data_for_signals
+from src.trading.signals import (
+    PreparedData,
+    compute_signal_for_index,
+    find_row_index_for_ts,
+    load_models,
+    populate_lstm_cache_from_prepared,
+    prepare_data_for_signals,
+)
 
 DEFAULT_REG_MODEL_DIR = DEFAULT_REG_MODEL_DIR_1H
 DEFAULT_DIR_MODEL_DIR = DEFAULT_DIR_MODEL_DIR_1H
@@ -96,6 +105,24 @@ def _parse_args() -> argparse.Namespace:
         help="Directory containing direction model JSON (xgb_dir1h_model.json).",
     )
     parser.add_argument(
+        "--lstm-model-dir",
+        type=str,
+        default=DEFAULT_LSTM_MODEL_DIR_1H,
+        help="Optional directory containing an LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--lstm-device",
+        type=str,
+        default=None,
+        help="Optional torch device override for LSTM inference (e.g. cpu, cuda:0).",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=None,
+        help="Optional minimum sequence length to validate against the loaded LSTM model.",
+    )
+    parser.add_argument(
         "--p-up-min",
         type=float,
         default=DEFAULT_P_UP_MIN,
@@ -163,6 +190,9 @@ def _apply_optuna_profile(args: argparse.Namespace) -> None:
 
     if args.dir_model_dir == DEFAULT_DIR_MODEL_DIR:
         args.dir_model_dir = OPTUNA_DIR_MODEL_DIR_1H
+
+    if args.lstm_model_dir in (None, DEFAULT_LSTM_MODEL_DIR_1H):
+        args.lstm_model_dir = OPTUNA_LSTM_MODEL_DIR_1H
 
     if args.p_up_min == DEFAULT_P_UP_MIN:
         args.p_up_min = OPTUNA_P_UP_MIN_1H
@@ -297,10 +327,36 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
     else:
         index = find_row_index_for_ts(prepared.df_all, args.ts)
 
+    reg_model_path = os.path.join(args.reg_model_dir, "xgb_ret1h_model.json")
+    dir_model_path: Optional[str] = None
+    if args.dir_model_dir:
+        dir_model_path = os.path.join(args.dir_model_dir, "xgb_dir1h_model.json")
+
     models = load_models(
-        reg_model_path=os.path.join(args.reg_model_dir, "xgb_ret1h_model.json"),
-        dir_model_path=os.path.join(args.dir_model_dir, "xgb_dir1h_model.json"),
+        reg_model_path=reg_model_path,
+        dir_model_path=dir_model_path,
+        lstm_model_dir=args.lstm_model_dir,
+        device=args.lstm_device,
     )
+
+    populate_lstm_cache_from_prepared(prepared, models)
+
+    lstm_info = models.get("dir_lstm")
+    if args.seq_len is not None:
+        if len(prepared.df_all) < args.seq_len:
+            raise RuntimeError(
+                f"Prepared dataset has insufficient rows ({len(prepared.df_all)}) for seq-len={args.seq_len}.",
+            )
+        if lstm_info is not None:
+            model_seq_len = int(lstm_info.get("seq_len", args.seq_len))
+            if model_seq_len != int(args.seq_len):
+                print(
+                    (
+                        "Warning: requested seq_len="
+                        f"{args.seq_len} but LSTM model expects {model_seq_len}; proceeding with model setting."
+                    ),
+                    file=sys.stderr,
+                )
 
     sig = compute_signal_for_index(
         prepared=prepared,

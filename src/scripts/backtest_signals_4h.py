@@ -74,6 +74,18 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT_DIR,
         help="Directory to write the per-bar 4h backtest CSV (created if missing).",
     )
+    parser.add_argument(
+        "--features-path",
+        type=str,
+        default=None,
+        help="Optional CSV with 1h features for offline backtests.",
+    )
+    parser.add_argument(
+        "--onchain-path",
+        type=str,
+        default=None,
+        help="Optional cached on-chain metrics to merge with --features-path.",
+    )
     return parser.parse_args()
 
 
@@ -144,7 +156,12 @@ def _build_equity_curve(ret_net: np.ndarray, signal: np.ndarray) -> np.ndarray:
 
 
 def backtest_signals_4h(args: argparse.Namespace) -> None:
-    prepared: PreparedData = prepare_data_for_signals(args.dataset_path, target_column="ret_1h")
+    prepared: PreparedData = prepare_data_for_signals(
+        args.dataset_path,
+        target_column="ret_1h",
+        features_path=args.features_path,
+        onchain_path=args.onchain_path,
+    )
 
     models = load_models(
         reg_model_path=os.path.join(args.reg_model_dir, "xgb_ret4h_model.json"),

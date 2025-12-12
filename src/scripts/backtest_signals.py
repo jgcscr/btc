@@ -18,7 +18,13 @@ from src.config_trading import (
     OPTUNA_REG_MODEL_DIR_1H,
     OPTUNA_RET_MIN_1H,
 )
-from src.trading.signals import PreparedData, compute_signal_for_index, load_models, prepare_data_for_signals
+from src.trading.signals import (
+    PreparedData,
+    compute_signal_for_index,
+    load_models,
+    populate_lstm_cache_from_prepared,
+    prepare_data_for_signals,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -45,6 +51,12 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=DEFAULT_DIR_MODEL_DIR_1H,
         help="Directory containing direction model JSON (xgb_dir1h_model.json).",
+    )
+    parser.add_argument(
+        "--lstm-dir-model",
+        type=str,
+        default=None,
+        help="Optional directory containing an LSTM direction model (model.pt, summary.json).",
     )
     parser.add_argument(
         "--p-up-min",
@@ -203,8 +215,11 @@ def backtest_signals(args: argparse.Namespace) -> None:
     prepared: PreparedData = prepare_data_for_signals(args.dataset_path, target_column="ret_1h")
     models = load_models(
         reg_model_path=os.path.join(args.reg_model_dir, "xgb_ret1h_model.json"),
-        dir_model_path=os.path.join(args.dir_model_dir, "xgb_dir1h_model.json"),
+        dir_model_path=os.path.join(args.dir_model_dir, "xgb_dir1h_model.json") if args.dir_model_dir else None,
+        lstm_model_dir=args.lstm_dir_model,
     )
+
+    populate_lstm_cache_from_prepared(prepared, models)
 
     # Realized returns series (ret_1h) reconstructed from the NPZ splits
     ret_series = _load_ret_series_from_npz(args.dataset_path)

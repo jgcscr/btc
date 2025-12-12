@@ -1,12 +1,18 @@
 import argparse
 import os
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import numpy as np
+import pandas as pd
 
-from src.config import PROJECT_ID, BQ_DATASET_CURATED, BQ_TABLE_FEATURES_1H
+from src.config import (
+    BQ_DATASET_CURATED,
+    BQ_TABLE_FEATURES_1H,
+    PROJECT_ID,
+)
 from src.data.bq_loader import load_btc_features_1h
 from src.data.dataset_preparation import make_features_and_target, time_series_train_val_test_split
+from src.data.onchain_loader import fetch_onchain_metrics, load_onchain_cached, OnchainAPIError
 from src.data.targets_multi_horizon import add_multi_horizon_targets
 
 
@@ -20,23 +26,57 @@ def _split_array(values: np.ndarray, n_train: int, n_val: int) -> tuple[np.ndarr
         values[n_train + n_val :],
     )
 
-
 def build_multi_horizon_dataset(
     output_dir: str,
     horizons: Iterable[int] = DEFAULT_HORIZONS,
     train_frac: float = 0.7,
     val_frac: float = 0.15,
+    onchain_path: Optional[str] = None,
+    fetch_onchain: bool = False,
+    onchain_interval: str = "1h",
+    features_path: Optional[str] = None,
+    output_path: Optional[str] = None,
 ) -> str:
+    if output_path:
+        output_dir = os.path.dirname(output_path) or "."
     os.makedirs(output_dir, exist_ok=True)
 
-    df = load_btc_features_1h(
-        project_id=PROJECT_ID,
-        dataset_id=BQ_DATASET_CURATED,
-        table_id=BQ_TABLE_FEATURES_1H,
-    )
+    if features_path:
+        if not os.path.exists(features_path):
+            raise FileNotFoundError(f"Features CSV not found at {features_path}")
+        df = pd.read_csv(features_path, parse_dates=["ts"])
+    else:
+        df = load_btc_features_1h(
+            project_id=PROJECT_ID,
+            dataset_id=BQ_DATASET_CURATED,
+            table_id=BQ_TABLE_FEATURES_1H,
+        )
 
     if df.empty:
         raise RuntimeError("Loaded empty DataFrame from BigQuery; check curated features table content.")
+
+    df = df.sort_values("ts").reset_index(drop=True)
+
+    df_onchain = None
+    if fetch_onchain:
+        start_ts = df["ts"].iloc[0]
+        end_ts = df["ts"].iloc[-1]
+        try:
+            df_onchain = fetch_onchain_metrics(start_ts=start_ts, end_ts=end_ts, interval=onchain_interval)
+        except OnchainAPIError as exc:
+            if onchain_path:
+                print(f"Warning: API fetch failed ({exc}); falling back to cached CSV {onchain_path}.")
+            else:
+                raise
+
+    if df_onchain is None and onchain_path:
+        df_onchain = load_onchain_cached(onchain_path)
+
+    if df_onchain is not None:
+        df_onchain = df_onchain.set_index("ts").reindex(df["ts"]).ffill().bfill().reset_index()
+        metric_cols = [col for col in df_onchain.columns if col != "ts"]
+        print(f"Merging on-chain metrics: {metric_cols}")
+        df = df.merge(df_onchain, on="ts", how="left")
 
     df_targets = add_multi_horizon_targets(df, horizons=horizons, price_col="close")
 
@@ -58,7 +98,8 @@ def build_multi_horizon_dataset(
     data_ret4h = {h: df_targets[f"ret_{h}h"].to_numpy(dtype=np.float32) for h in horizons if h != 1}
     data_dir = {h: df_targets[f"dir_{h}h"].to_numpy(dtype=np.int8) for h in horizons}
 
-    output_path = os.path.join(output_dir, "btc_features_multi_horizon_splits.npz")
+    if output_path is None:
+        output_path = os.path.join(output_dir, "btc_features_multi_horizon_splits.npz")
 
     save_kwargs = {
         "X_train": splits.X_train,
@@ -104,6 +145,12 @@ def main() -> None:
         help="Directory to save the prepared dataset splits.",
     )
     parser.add_argument(
+        "--output-path",
+        type=str,
+        default=None,
+        help="Optional explicit path for the NPZ file (overrides --output-dir filename).",
+    )
+    parser.add_argument(
         "--horizons",
         type=int,
         nargs="+",
@@ -122,6 +169,29 @@ def main() -> None:
         default=0.15,
         help="Fraction of samples allocated to the validation split (default: 0.15).",
     )
+    parser.add_argument(
+        "--onchain-path",
+        type=str,
+        default=None,
+        help="Optional CSV containing cached on-chain metrics with ts column.",
+    )
+    parser.add_argument(
+        "--fetch-onchain",
+        action="store_true",
+        help="Fetch on-chain metrics from the configured API instead of relying solely on cache.",
+    )
+    parser.add_argument(
+        "--onchain-interval",
+        type=str,
+        default="1h",
+        help="Interval for on-chain metrics when fetched via API (default: 1h).",
+    )
+    parser.add_argument(
+        "--features-path",
+        type=str,
+        default=None,
+        help="Optional CSV with curated 1h features to bypass BigQuery (expects ts column).",
+    )
     args = parser.parse_args()
 
     build_multi_horizon_dataset(
@@ -129,6 +199,11 @@ def main() -> None:
         horizons=args.horizons,
         train_frac=args.train_frac,
         val_frac=args.val_frac,
+        onchain_path=args.onchain_path,
+        fetch_onchain=args.fetch_onchain,
+        onchain_interval=args.onchain_interval,
+        features_path=args.features_path,
+        output_path=args.output_path,
     )
 
 
