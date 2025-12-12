@@ -9,7 +9,16 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from src.config_trading import DEFAULT_P_UP_MIN, DEFAULT_RET_MIN
+from src.config_trading import (
+    DEFAULT_DIR_MODEL_DIR_1H,
+    DEFAULT_P_UP_MIN,
+    DEFAULT_REG_MODEL_DIR_1H,
+    DEFAULT_RET_MIN,
+    OPTUNA_DIR_MODEL_DIR_1H,
+    OPTUNA_P_UP_MIN_1H,
+    OPTUNA_REG_MODEL_DIR_1H,
+    OPTUNA_RET_MIN_1H,
+)
 from src.data.binance_klines import (
     BinanceAPIError,
     fetch_funding_rates,
@@ -29,8 +38,8 @@ DEFAULT_SYMBOL = "BTCUSDT"
 DEFAULT_INTERVAL = "1h"
 DEFAULT_N_BARS = 500
 DEFAULT_LOG_PATH = "artifacts/live/paper_trade_realtime.csv"
-DEFAULT_REG_MODEL_DIR = "artifacts/models/xgb_ret1h_v1"
-DEFAULT_DIR_MODEL_DIR = "artifacts/models/xgb_dir1h_v1"
+DEFAULT_REG_MODEL_DIR = DEFAULT_REG_MODEL_DIR_1H
+DEFAULT_DIR_MODEL_DIR = DEFAULT_DIR_MODEL_DIR_1H
 DEFAULT_P_UP_MIN_4H_CONFIRM = 0.55
 LEGACY_LOG_COLUMNS = [
     "ts",
@@ -127,6 +136,11 @@ def _parse_args() -> argparse.Namespace:
         help="Ensemble threshold for predicted ret_1h.",
     )
     parser.add_argument(
+        "--use-optuna-profile",
+        action="store_true",
+        help="Override default 1h model dirs and thresholds with the Optuna-tuned profile.",
+    )
+    parser.add_argument(
         "--p-up-min-4h-confirm",
         type=float,
         default=DEFAULT_P_UP_MIN_4H_CONFIRM,
@@ -151,6 +165,31 @@ def _parse_args() -> argparse.Namespace:
         help="Optional directory containing xgb_dir4h_model.json.",
     )
     return parser.parse_args()
+
+
+def _apply_optuna_profile(args: argparse.Namespace) -> None:
+    if not getattr(args, "use_optuna_profile", False):
+        return
+
+    if args.reg_model_dir == DEFAULT_REG_MODEL_DIR:
+        args.reg_model_dir = OPTUNA_REG_MODEL_DIR_1H
+
+    if args.dir_model_dir == DEFAULT_DIR_MODEL_DIR:
+        args.dir_model_dir = OPTUNA_DIR_MODEL_DIR_1H
+
+    if args.p_up_min == DEFAULT_P_UP_MIN:
+        args.p_up_min = OPTUNA_P_UP_MIN_1H
+
+    if args.ret_min == DEFAULT_RET_MIN:
+        args.ret_min = OPTUNA_RET_MIN_1H
+
+    print(
+        (
+            "Optuna profile active (reg_model_dir="
+            f"{args.reg_model_dir}, dir_model_dir={args.dir_model_dir}, "
+            f"p_up_min={args.p_up_min}, ret_min={args.ret_min})"
+        ),
+    )
 
 
 def _load_feature_names(dataset_path: str) -> List[str]:
@@ -380,6 +419,8 @@ def _load_models(reg_dir: str, dir_dir: str) -> Dict[str, Any]:
 
 
 def run_realtime_from_binance(args: argparse.Namespace) -> None:
+    _apply_optuna_profile(args)
+
     try:
         raw_df = _merge_market_data(symbol=args.symbol, interval=args.interval, limit=args.n_bars)
     except BinanceAPIError as exc:

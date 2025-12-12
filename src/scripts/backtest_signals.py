@@ -7,10 +7,16 @@ import numpy as np
 import pandas as pd
 
 from src.config_trading import (
+    DEFAULT_DIR_MODEL_DIR_1H,
     DEFAULT_FEE_BPS,
     DEFAULT_P_UP_MIN,
+    DEFAULT_REG_MODEL_DIR_1H,
     DEFAULT_RET_MIN,
     DEFAULT_SLIPPAGE_BPS,
+    OPTUNA_DIR_MODEL_DIR_1H,
+    OPTUNA_P_UP_MIN_1H,
+    OPTUNA_REG_MODEL_DIR_1H,
+    OPTUNA_RET_MIN_1H,
 )
 from src.trading.signals import PreparedData, compute_signal_for_index, load_models, prepare_data_for_signals
 
@@ -31,13 +37,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reg-model-dir",
         type=str,
-        default="artifacts/models/xgb_ret1h_v1",
+        default=DEFAULT_REG_MODEL_DIR_1H,
         help="Directory containing regression model JSON (xgb_ret1h_model.json).",
     )
     parser.add_argument(
         "--dir-model-dir",
         type=str,
-        default="artifacts/models/xgb_dir1h_v1",
+        default=DEFAULT_DIR_MODEL_DIR_1H,
         help="Directory containing direction model JSON (xgb_dir1h_model.json).",
     )
     parser.add_argument(
@@ -51,6 +57,11 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_RET_MIN,
         help="Ensemble threshold for predicted ret_1h.",
+    )
+    parser.add_argument(
+        "--use-optuna-profile",
+        action="store_true",
+        help="Override default 1h model dirs and thresholds with the Optuna-tuned profile.",
     )
     parser.add_argument(
         "--fee-bps",
@@ -79,6 +90,31 @@ def _parse_args() -> argparse.Namespace:
         help="Optional directory to write a per-bar CSV log of the backtest.",
     )
     return parser.parse_args()
+
+
+def _apply_optuna_profile(args: argparse.Namespace) -> None:
+    if not getattr(args, "use_optuna_profile", False):
+        return
+
+    if args.reg_model_dir == DEFAULT_REG_MODEL_DIR_1H:
+        args.reg_model_dir = OPTUNA_REG_MODEL_DIR_1H
+
+    if args.dir_model_dir == DEFAULT_DIR_MODEL_DIR_1H:
+        args.dir_model_dir = OPTUNA_DIR_MODEL_DIR_1H
+
+    if args.p_up_min == DEFAULT_P_UP_MIN:
+        args.p_up_min = OPTUNA_P_UP_MIN_1H
+
+    if args.ret_min == DEFAULT_RET_MIN:
+        args.ret_min = OPTUNA_RET_MIN_1H
+
+    print(
+        (
+            "Optuna profile active (reg_model_dir="
+            f"{args.reg_model_dir}, dir_model_dir={args.dir_model_dir}, "
+            f"p_up_min={args.p_up_min}, ret_min={args.ret_min})"
+        ),
+    )
 
 
 def _trading_metrics(ret: np.ndarray, signal: np.ndarray) -> Dict[str, Any]:
@@ -161,6 +197,8 @@ def _compute_index_range(n: int, use_test_split: bool) -> range:
 
 
 def backtest_signals(args: argparse.Namespace) -> None:
+    _apply_optuna_profile(args)
+
     # Prepare data and models shared with run_signal_once
     prepared: PreparedData = prepare_data_for_signals(args.dataset_path, target_column="ret_1h")
     models = load_models(
