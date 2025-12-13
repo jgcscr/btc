@@ -1,10 +1,14 @@
-# BTCUSDT Forecasting – Data & BigQuery Setup
 
-This repo sets up a simple pipeline to:
+# BTCUSDT Forecasting – Ingestion, Features, and BigQuery Setup
 
-- Generate BTCUSDT spot and futures kline data as Parquet.
-- Upload the Parquet files to Google Cloud Storage (GCS) in a partitioned layout.
-- Load the data into BigQuery raw tables in project `jc-financial-466902`.
+This repository provides a robust, multi-vendor pipeline for BTCUSDT forecasting, with premium macro, on-chain, and market data sources, resilient fallbacks, and transparent monitoring. It supports:
+
+- Ingestion of macro, spot, perp, and funding data from premium providers (Alpha Vantage, CoinAPI, CryptoQuant, FRED)
+- Feature engineering and monitoring with provenance and fallback logic
+- Partitioned Parquet output for all processed features
+- BigQuery integration for raw and processed tables
+- End-to-end model training and deployment
+
 
 ## 1. Python environment
 
@@ -13,102 +17,63 @@ cd /workspaces/btc
 python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt  # installs google-cloud-bigquery-storage for fast table reads
+pip install -r requirements.txt
 ```
 
-## 2. Generate and upload spot & futures data
+### Required environment variables
 
-### 2.1 Spot klines via binance.us
+Set the following environment variables for premium data access:
 
-We use the binance.us endpoint `https://api.binance.us/api/v3/klines` to fetch
-spot BTCUSDT OHLCV and write it to GCS in a partitioned layout.
+- `FRED_API_KEY` (required for FRED macro ingestion)
+- `ALPHA_VANTAGE_API_KEY` (required for Alpha Vantage macro)
+- `COINAPI_KEY` (required for CoinAPI spot, perp, and funding)
+- `CQ_TOKEN` (required for CryptoQuant daily metrics)
 
-```bash
-cd /workspaces/btc
-source .venv/bin/activate
+These providers are now in active use. Free endpoints are no longer sufficient for full feature coverage.
 
-export DATA_BUCKET=jc-financial-466902-btc-forecast-data
 
-# Ingest one UTC day of 1h BTCUSDT spot klines
-python -m data.ingestors.binance_spot_klines \
-	--symbol BTCUSDT \
-	--interval 1h \
-	--date 2025-01-01 \
-	--bucket "$DATA_BUCKET"
-```
+## 2. Ingestion and Feature Engineering Overview
 
-This will:
-- fetch 1h candles for that UTC day, using close time as `ts` in UTC.
-- write a local parquet file under `data/spot_klines/`.
-- upload it to:
-	`gs://$DATA_BUCKET/raw/spot_klines/interval=1h/yyyy=2025/mm=01/dd=01/...parquet`.
+### Active Data Loaders
 
-### 2.2 Futures metrics via Binance futures
+- **Alpha Vantage macro**: Ingests macroeconomic series (e.g., SPX, DXY) using premium Alpha Vantage endpoints. Requires `ALPHA_VANTAGE_API_KEY`.
+- **CoinAPI spot/perp/funding**: Loads spot and perpetual BTCUSDT market data, plus funding rates. Funding endpoint is premium and currently under vendor investigation (see status below). Requires `COINAPI_KEY`.
+- **CryptoQuant daily fallback**: Ingests daily on-chain metrics (exchange flows, reserves, whale counts) using `CQ_TOKEN`. Hourly access is pending (see status below). Synthetic data is used for fallback if API is unavailable.
+- **FRED macro**: Loads macroeconomic indicators (e.g., trade-weighted USD) using `FRED_API_KEY`.
 
-For BTCUSDT perpetual futures we use `https://fapi.binance.com/fapi/v1/continuousKlines`.
-The first version writes OHLCV and leaves `open_interest` and `funding_rate` as NaN
-so the schema matches the planned `btc_forecast_raw.futures_metrics` table.
+### Feature Processors and Monitoring
+
+After raw ingestion, run the feature processors to generate hourly/daily Parquet and monitoring summaries:
 
 ```bash
-cd /workspaces/btc
-source .venv/bin/activate
-
-export DATA_BUCKET=jc-financial-466902-btc-forecast-data
-
-# Ingest one UTC day of 1h BTCUSDT futures klines
-python -m data.ingestors.binance_futures_metrics \
-	--pair BTCUSDT \
-	--interval 1h \
-	--date 2025-01-01 \
-	--bucket "$DATA_BUCKET"
-```
-
-This will upload parquet to:
-`gs://$DATA_BUCKET/raw/futures_metrics/interval=1h/yyyy=2025/mm=01/dd=01/...parquet`.
-
-> If the Binance endpoints are geo-blocked, you can still use `src/ingest_spot_klines.py --dummy`
-> to generate synthetic spot data locally for testing the rest of the pipeline.
-
-### 2.3 Macro, on-chain, and funding scaffolding
-
-Phase 1 macros use free endpoints. Export API keys before calling the loaders:
-
-```bash
-export FRED_API_KEY="..."
-export ALPHA_VANTAGE_API_KEY="..."
-```
-
-Fetch macroeconomic series into `data/raw/macro/`:
-
-```bash
-# FRED broad trade-weighted USD index
-python -m data.ingestors.fred_macro DTWEXBGS --start 2019-01-01
-
-# Alpha Vantage daily SPX close (uses TIME_SERIES_DAILY JSON)
-python -m data.ingestors.alpha_vantage_macro TIME_SERIES_DAILY SPX
-```
-
-Fetch on-chain metrics into `data/raw/onchain/`:
-
-```bash
-# Active Bitcoin addresses, trailing year
-python -m data.ingestors.blockchain_onchain activeaddresses --timespan 1year
-```
-
-Convert raw tidy rows into hourly feature Parquet and monitoring summaries:
-
-```bash
-# Writes data/processed/*/hourly_features.parquet and artifacts/monitoring/*_summary.json
+# Macro features
 python -m data.processed.compute_macro_features
+# CoinAPI features (spot, perp, funding, realized vol, basis, deltas)
+python -m data.processed.compute_coinapi_features
+# CryptoQuant features (daily fallback, resampled to hourly)
+python -m data.processed.compute_cryptoquant_resampled
+# On-chain features (if needed)
 python -m data.processed.compute_onchain_features
-python -m data.processed.compute_funding_features --pair BTCUSDT --fetch --limit 500
 ```
 
-Funding features depend on Binance endpoints. The `--fetch` flag hydrates `data/raw/funding/binance/`
-before the hourly aggregation runs. If live API access is restricted, copy historical Parquet into that
-directory and run the processor without `--fetch`.
+Each processor emits:
+- `data/processed/*/hourly_features.parquet` (or daily)
+- `artifacts/monitoring/*_summary.json` (coverage, nulls, diagnostics)
+- All dataset builders now pull from these processed Parquet files
 
-## 3. Create BigQuery dataset (once)
+
+## 3. Vendor Status & Escalations
+
+**CryptoQuant**: Hourly API access is pending (ticket CQ-2025-1213). Daily fallback and synthetic data are in use for now.
+
+**CoinAPI**: Funding endpoint returns 404 for BTCUSDT perpetual (vendor escalation ongoing). Symbol resolution and diagnostics are logged for support.
+
+**Instructions when access is restored:**
+- Rerun the relevant ingestors (e.g., `data.ingestors.cryptoquant_daily`, `data.ingestors.coinapi_exchange`)
+- Rerun the processors (`compute_cryptoquant_resampled.py`, `compute_coinapi_features.py`)
+- Rebuild all dataset splits using the scripts in `src/scripts/` (e.g., `build_training_dataset.py`)
+
+## 4. Create BigQuery dataset (once)
 
 ```bash
 gcloud config set project jc-financial-466902
@@ -120,7 +85,8 @@ bq --location=us-central1 mk -d \
 
 If the dataset already exists, BigQuery will return an "Already exists" error, which is safe to ignore.
 
-## 4. Load Parquet into BigQuery raw tables
+
+## 5. Load Parquet into BigQuery raw tables
 
 ### 4.1 Spot klines
 
@@ -147,7 +113,8 @@ bq load \
 If these commands succeed, the raw BigQuery tables are populated and you can
 move on to curated feature tables and model training.
 
-## 5. Model Training, API Serving, and Cloud Run Deployment
+
+## 6. Model Training, API Serving, and Cloud Run Deployment
 
 ### 5.1 Train and save the model
 
@@ -156,7 +123,8 @@ cd /workspaces/btc
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Build dataset splits from BigQuery curated features
+
+# Build dataset splits from processed Parquet features
 python -m src.scripts.build_training_dataset --output-dir artifacts/datasets
 
 # Train baseline XGBoost model
@@ -223,4 +191,9 @@ curl -X POST "$SERVICE_URL/predict" \
 	}'
 ```
 
-This completes the full pipeline: data ingestion → BigQuery → model training → API serving on Cloud Run.
+
+---
+
+**Experiment history and detailed status:** See `docs/experiment_2024-10_to-2025-12_v1.md` for a full log of ingestion, feature, and vendor status.
+
+This completes the full pipeline: multi-vendor data ingestion → feature engineering → BigQuery → model training → API serving on Cloud Run.
