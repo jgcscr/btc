@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
+import torch
 from xgboost import Booster, DMatrix
 
 from src.config_trading import (
@@ -14,6 +15,8 @@ from src.config_trading import (
     DEFAULT_RET_MIN,
     DEFAULT_SLIPPAGE_BPS,
 )
+from src.training.lstm_data import build_sequence_splits, estimate_feature_stats
+from src.trading.signals import _load_transformer_direction_model
 
 
 def _load_npz_dataset(path: str) -> Dict[str, Any]:
@@ -142,6 +145,109 @@ def _compute_trade_stats(ret: np.ndarray, signal: np.ndarray) -> Dict[str, float
     }
 
 
+def _prepare_transformer_predictions(
+    transformer_model_dir: str,
+    ret_pred_val: np.ndarray,
+    ret_pred_test: np.ndarray,
+    ret_val: np.ndarray,
+    ret_test: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    summary_path = os.path.join(transformer_model_dir, "summary.json")
+    if not os.path.exists(summary_path):
+        raise FileNotFoundError(f"Transformer summary not found: {summary_path}")
+
+    with open(summary_path, "r", encoding="utf-8") as handle:
+        summary = json.load(handle)
+
+    dataset_path = summary.get("dataset_path")
+    if not dataset_path:
+        raise ValueError("Transformer summary missing dataset_path")
+
+    seq_len = int(summary.get("seq_len", 0))
+    if seq_len <= 0:
+        raise ValueError("Transformer summary missing valid seq_len")
+
+    model_info = _load_transformer_direction_model(transformer_model_dir, device=None)
+    feature_names = list(model_info.get("feature_names", []))
+
+    splits = build_sequence_splits(dataset_path, seq_len)
+    dataset_feature_names = list(splits.feature_names)
+
+    if feature_names:
+        name_to_idx = {name: idx for idx, name in enumerate(dataset_feature_names)}
+
+        def _reindex(arr: np.ndarray) -> np.ndarray:
+            try:
+                indices = [name_to_idx[name] for name in feature_names]
+            except KeyError as exc:
+                missing = exc.args[0]
+                raise RuntimeError(f"Sequence data missing feature required by transformer: {missing}") from exc
+            return arr[:, :, indices]
+
+        X_val_seq = _reindex(splits.X_val_seq)
+        X_test_seq = _reindex(splits.X_test_seq)
+        X_train_seq = _reindex(splits.X_train_seq)
+    else:
+        X_val_seq = splits.X_val_seq
+        X_test_seq = splits.X_test_seq
+        X_train_seq = splits.X_train_seq
+
+    scaler_mean = model_info.get("scaler_mean")
+    scaler_std = model_info.get("scaler_std")
+    if scaler_mean is None or scaler_std is None:
+        train_flat = X_train_seq.reshape(-1, X_train_seq.shape[-1])
+        scaler_mean, scaler_std = estimate_feature_stats(train_flat)
+    else:
+        scaler_mean = np.asarray(scaler_mean, dtype=np.float32)
+        scaler_std = np.asarray(scaler_std, dtype=np.float32)
+
+    scaler_std = np.where(scaler_std == 0.0, 1.0, scaler_std)
+
+    def _scale(seq: np.ndarray) -> np.ndarray:
+        reshaped = seq.reshape(-1, seq.shape[-1]).astype(np.float32)
+        scaled = (reshaped - scaler_mean) / scaler_std
+        return scaled.reshape(seq.shape)
+
+    X_val_scaled = _scale(X_val_seq)
+    X_test_scaled = _scale(X_test_seq)
+
+    model = model_info["model"]
+    model.eval()
+    device = model_info["device"]
+
+    def _infer(seq: np.ndarray) -> np.ndarray:
+        tensor = torch.from_numpy(seq.astype(np.float32))
+        if device.type != "cpu":
+            tensor = tensor.to(device)
+        with torch.no_grad():
+            logits = model(tensor)
+            probs = torch.sigmoid(logits).cpu().numpy().astype(np.float64)
+        return probs.reshape(-1)
+
+    p_up_val = _infer(X_val_scaled)
+    p_up_test = _infer(X_test_scaled)
+
+    seq_offset = seq_len - 1
+    ret_pred_val_eff = ret_pred_val[seq_offset:]
+    ret_pred_test_eff = ret_pred_test[seq_offset:]
+    ret_val_eff = ret_val[seq_offset:]
+    ret_test_eff = ret_test[seq_offset:]
+
+    if not (len(p_up_val) == len(ret_pred_val_eff) == len(ret_val_eff)):
+        raise RuntimeError("Transformer validation predictions are misaligned with returns.")
+    if not (len(p_up_test) == len(ret_pred_test_eff) == len(ret_test_eff)):
+        raise RuntimeError("Transformer test predictions are misaligned with returns.")
+
+    return (
+        ret_pred_val_eff,
+        ret_pred_test_eff,
+        ret_val_eff,
+        ret_test_eff,
+        p_up_val,
+        p_up_test,
+    )
+
+
 @dataclass
 class ThresholdCandidate:
     p_up_min: float
@@ -193,7 +299,8 @@ def _parse_float_list(values: Optional[str], default: List[float]) -> List[float
 def search_ensemble_thresholds(
     dataset_path: str,
     reg_model_dir: str,
-    dir_model_dir: str,
+    dir_model_dir: Optional[str],
+    transformer_model_dir: Optional[str],
     p_up_min_list: List[float],
     ret_min_list: List[float],
     fee_bps: float,
@@ -207,6 +314,18 @@ def search_ensemble_thresholds(
     min_trades_constraint: Optional[int] = None,
 ) -> None:
     """Grid-search ensemble thresholds on validation and report test metrics."""
+    if dir_model_dir:
+        dir_model_dir = dir_model_dir.strip() or None
+
+    if transformer_model_dir:
+        transformer_model_dir = transformer_model_dir.strip() or None
+
+    if dir_model_dir and transformer_model_dir:
+        raise ValueError("Provide only one of dir_model_dir or transformer_model_dir.")
+
+    if not dir_model_dir and not transformer_model_dir:
+        raise ValueError("At least one direction model must be provided.")
+
     data = _load_npz_dataset(dataset_path)
     X_val = data["X_val"]
     y_val = data["y_val"]
@@ -221,40 +340,63 @@ def search_ensemble_thresholds(
         meta_filename="model_metadata.json",
     )
 
-    # Load direction model
-    dir_booster, dir_feature_names = _load_xgb_booster(
-        model_dir=dir_model_dir,
-        model_filename="xgb_dir1h_model.json",
-        meta_filename="model_metadata_direction.json",
-    )
-
     # Align features for each model separately (validation and test)
     X_val_reg = _align_features(X_val, dataset_feature_names, reg_feature_names)
-    X_val_dir = _align_features(X_val, dataset_feature_names, dir_feature_names)
     X_test_reg = _align_features(X_test, dataset_feature_names, reg_feature_names)
-    X_test_dir = _align_features(X_test, dataset_feature_names, dir_feature_names)
 
     # Predictions on validation
     dmat_val_reg = DMatrix(X_val_reg, feature_names=reg_feature_names)
-    dmat_val_dir = DMatrix(X_val_dir, feature_names=dir_feature_names)
     ret_pred_val = reg_booster.predict(dmat_val_reg)
-    p_up_val = dir_booster.predict(dmat_val_dir)
 
     # Predictions on test (for the final recommended thresholds)
     dmat_test_reg = DMatrix(X_test_reg, feature_names=reg_feature_names)
-    dmat_test_dir = DMatrix(X_test_dir, feature_names=dir_feature_names)
     ret_pred_test = reg_booster.predict(dmat_test_reg)
-    p_up_test = dir_booster.predict(dmat_test_dir)
 
     ret_val = y_val.astype(float)
     ret_test = y_test.astype(float)
+
+    if transformer_model_dir:
+        (
+            ret_pred_val_eff,
+            ret_pred_test_eff,
+            ret_val_eff,
+            ret_test_eff,
+            p_up_val,
+            p_up_test,
+        ) = _prepare_transformer_predictions(
+            transformer_model_dir=transformer_model_dir,
+            ret_pred_val=ret_pred_val,
+            ret_pred_test=ret_pred_test,
+            ret_val=ret_val,
+            ret_test=ret_test,
+        )
+    else:
+        # Load direction model predictions using XGBoost classifier
+        dir_booster, dir_feature_names = _load_xgb_booster(
+            model_dir=dir_model_dir,
+            model_filename="xgb_dir1h_model.json",
+            meta_filename="model_metadata_direction.json",
+        )
+
+        X_val_dir = _align_features(X_val, dataset_feature_names, dir_feature_names)
+        X_test_dir = _align_features(X_test, dataset_feature_names, dir_feature_names)
+
+        dmat_val_dir = DMatrix(X_val_dir, feature_names=dir_feature_names)
+        dmat_test_dir = DMatrix(X_test_dir, feature_names=dir_feature_names)
+        p_up_val = dir_booster.predict(dmat_val_dir)
+        p_up_test = dir_booster.predict(dmat_test_dir)
+
+        ret_pred_val_eff = ret_pred_val
+        ret_pred_test_eff = ret_pred_test
+        ret_val_eff = ret_val
+        ret_test_eff = ret_test
 
     # Evaluate all combinations on validation
     results: List[ThresholdCandidate] = []
     for p_up_min in p_up_min_list:
         for ret_min in ret_min_list:
-            signal_val = ((p_up_val >= p_up_min) & (ret_pred_val >= ret_min)).astype(int)
-            ret_val_net = _apply_costs(ret_val, signal_val, fee_bps, slippage_bps)
+            signal_val = ((p_up_val >= p_up_min) & (ret_pred_val_eff >= ret_min)).astype(int)
+            ret_val_net = _apply_costs(ret_val_eff, signal_val, fee_bps, slippage_bps)
             stats_val = _compute_trade_stats(ret_val_net, signal_val)
 
             results.append(
@@ -377,13 +519,13 @@ def search_ensemble_thresholds(
     ret_star = recommended.ret_min
 
     # Compute ensemble performance on test with recommended thresholds
-    signal_test_ensemble = ((p_up_test >= p_up_star) & (ret_pred_test >= ret_star)).astype(int)
-    ret_test_net_ensemble = _apply_costs(ret_test, signal_test_ensemble, fee_bps, slippage_bps)
+    signal_test_ensemble = ((p_up_test >= p_up_star) & (ret_pred_test_eff >= ret_star)).astype(int)
+    ret_test_net_ensemble = _apply_costs(ret_test_eff, signal_test_ensemble, fee_bps, slippage_bps)
     stats_test_ensemble = _compute_trade_stats(ret_test_net_ensemble, signal_test_ensemble)
 
     # Direction-only baseline on test (p_up >= 0.5)
     signal_test_dir_only = (p_up_test >= 0.5).astype(int)
-    ret_test_net_dir = _apply_costs(ret_test, signal_test_dir_only, fee_bps, slippage_bps)
+    ret_test_net_dir = _apply_costs(ret_test_eff, signal_test_dir_only, fee_bps, slippage_bps)
     stats_test_dir_only = _compute_trade_stats(ret_test_net_dir, signal_test_dir_only)
 
     print("Recommended thresholds based on validation:")
@@ -490,6 +632,12 @@ def main() -> None:
         type=str,
         default="artifacts/models/xgb_dir1h_v1",
         help="Directory containing direction model and metadata.",
+    )
+    parser.add_argument(
+        "--transformer-dir-model",
+        type=str,
+        default=None,
+        help="Optional directory containing a transformer direction model (model.pt, summary.json).",
     )
     parser.add_argument(
         "--p-up-grid",
@@ -600,6 +748,19 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    dir_model_default = parser.get_default("dir_model_dir")
+    dir_model_dir = args.dir_model_dir
+    transformer_dir_model = args.transformer_dir_model
+
+    if dir_model_dir is not None and dir_model_dir.strip() == "":
+        dir_model_dir = None
+
+    if transformer_dir_model is not None and transformer_dir_model.strip() == "":
+        transformer_dir_model = None
+
+    if transformer_dir_model and dir_model_dir == dir_model_default:
+        dir_model_dir = None
+
     # Default grids if none provided, centered around v1 defaults
     default_p_up = [DEFAULT_P_UP_MIN - 0.05, DEFAULT_P_UP_MIN, DEFAULT_P_UP_MIN + 0.05]
     default_ret_min = [DEFAULT_RET_MIN, DEFAULT_RET_MIN + 0.00025, DEFAULT_RET_MIN + 0.0005]
@@ -621,7 +782,8 @@ def main() -> None:
     search_ensemble_thresholds(
         dataset_path=args.dataset_path,
         reg_model_dir=args.reg_model_dir,
-        dir_model_dir=args.dir_model_dir,
+        dir_model_dir=dir_model_dir,
+        transformer_model_dir=transformer_dir_model,
         p_up_min_list=p_up_min_list,
         ret_min_list=ret_min_list,
         fee_bps=args.fee_bps,

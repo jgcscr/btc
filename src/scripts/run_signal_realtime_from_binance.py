@@ -32,9 +32,10 @@ from src.trading.signals import (
     PreparedData,
     compute_signal_for_index,
     load_models,
-    populate_lstm_cache_from_prepared,
+    populate_sequence_cache_from_prepared,
     prepare_data_for_signals_from_ohlcv,
 )
+from src.trading.ensembles import parse_weight_spec
 
 
 DEFAULT_SYMBOL = "BTCUSDT"
@@ -119,6 +120,18 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=DEFAULT_LSTM_MODEL_DIR_1H,
         help="Optional directory containing an LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--transformer-dir-model",
+        type=str,
+        default=None,
+        help="Optional directory containing a transformer direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--dir-model-weights",
+        type=str,
+        default=None,
+        help="Optional comma-separated weights for direction models (e.g. transformer:2,lstm:1,xgb:1).",
     )
     parser.add_argument(
         "--lstm-device",
@@ -435,6 +448,7 @@ def _load_models(
     dir_dir: Optional[str],
     lstm_dir: Optional[str],
     lstm_device: Optional[str],
+    transformer_dir: Optional[str],
 ) -> Dict[str, Any]:
     reg_model_path = os.path.join(reg_dir, "xgb_ret1h_model.json")
     if not os.path.exists(reg_model_path):
@@ -451,6 +465,7 @@ def _load_models(
         reg_model_path=reg_model_path,
         dir_model_path=dir_model_path,
         lstm_model_dir=lstm_dir,
+        transformer_model_dir=transformer_dir,
         device=lstm_device,
     )
 
@@ -473,23 +488,30 @@ def run_realtime_from_binance(args: argparse.Namespace) -> None:
         dir_dir=args.dir_model_dir,
         lstm_dir=args.lstm_model_dir,
         lstm_device=args.lstm_device,
+        transformer_dir=args.transformer_dir_model,
     )
 
-    populate_lstm_cache_from_prepared(prepared, models)
+    populate_sequence_cache_from_prepared(prepared, models)
 
-    lstm_info = models.get("dir_lstm")
+    dir_model_weights = None
+    if args.dir_model_weights:
+        dir_model_weights = parse_weight_spec(args.dir_model_weights)
+
     if args.seq_len is not None:
         if len(prepared.df_all) < args.seq_len:
             raise SystemExit(
                 f"Insufficient rows after preprocessing ({len(prepared.df_all)}) for seq-len={args.seq_len}.",
             )
-        if lstm_info is not None:
-            model_seq_len = int(lstm_info.get("seq_len", args.seq_len))
+        for key in ("dir_lstm", "dir_transformer"):
+            model_info = models.get(key)
+            if model_info is None:
+                continue
+            model_seq_len = int(model_info.get("seq_len", args.seq_len))
             if model_seq_len != int(args.seq_len):
                 print(
                     (
                         "Warning: requested seq_len="
-                        f"{args.seq_len} but LSTM model expects {model_seq_len}; proceeding with model setting."
+                        f"{args.seq_len} but {key} expects {model_seq_len}; proceeding with model setting."
                     ),
                     file=sys.stderr,
                 )
@@ -504,6 +526,7 @@ def run_realtime_from_binance(args: argparse.Namespace) -> None:
         models=models,
         p_up_min=args.p_up_min,
         ret_min=args.ret_min,
+        dir_model_weights=dir_model_weights,
     )
 
     if (
@@ -559,6 +582,10 @@ def run_realtime_from_binance(args: argparse.Namespace) -> None:
         "signal_dir_only": int(signal["signal_dir_only"]),
         "source": "binance_direct_v1",
     }
+
+    direction_model_kind = signal.get("direction_model_kind")
+    if direction_model_kind is not None:
+        summary["direction_model_kind"] = direction_model_kind
 
     if "p_up_4h" in signal:
         summary["p_up_4h"] = signal["p_up_4h"]

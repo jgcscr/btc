@@ -18,11 +18,12 @@ from src.config_trading import (
     OPTUNA_REG_MODEL_DIR_1H,
     OPTUNA_RET_MIN_1H,
 )
+from src.trading.ensembles import parse_weight_spec
 from src.trading.signals import (
     PreparedData,
     compute_signal_for_index,
     load_models,
-    populate_lstm_cache_from_prepared,
+    populate_sequence_cache_from_prepared,
     prepare_data_for_signals,
 )
 
@@ -57,6 +58,21 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional directory containing an LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--transformer-dir-model",
+        type=str,
+        default=None,
+        help="Optional directory containing a transformer direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--dir-model-weights",
+        type=str,
+        default=None,
+        help=(
+            "Optional comma-separated weights for direction models, e.g. transformer:1,lstm:1,xgb:1. "
+            "Weights are normalized automatically; unspecified models default to equal weighting."
+        ),
     )
     parser.add_argument(
         "--p-up-min",
@@ -217,9 +233,12 @@ def backtest_signals(args: argparse.Namespace) -> None:
         reg_model_path=os.path.join(args.reg_model_dir, "xgb_ret1h_model.json"),
         dir_model_path=os.path.join(args.dir_model_dir, "xgb_dir1h_model.json") if args.dir_model_dir else None,
         lstm_model_dir=args.lstm_dir_model,
+        transformer_model_dir=args.transformer_dir_model,
     )
 
-    populate_lstm_cache_from_prepared(prepared, models)
+    dir_model_weights = parse_weight_spec(args.dir_model_weights)
+
+    populate_sequence_cache_from_prepared(prepared, models)
 
     # Realized returns series (ret_1h) reconstructed from the NPZ splits
     ret_series = _load_ret_series_from_npz(args.dataset_path)
@@ -244,6 +263,7 @@ def backtest_signals(args: argparse.Namespace) -> None:
             models=models,
             p_up_min=args.p_up_min,
             ret_min=args.ret_min,
+            dir_model_weights=dir_model_weights if dir_model_weights else None,
         )
 
         ts_list.append(sig["ts"])

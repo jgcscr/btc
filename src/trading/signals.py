@@ -17,6 +17,8 @@ from src.data.dataset_preparation import make_features_and_target
 from src.data.onchain_loader import load_onchain_cached
 from src.data.targets_multi_horizon import add_multi_horizon_targets
 from src.training.lstm_model import LSTMDirectionClassifier
+from src.models.transformer_classifier import TransformerDirectionClassifier
+from src.trading.ensembles import simple_average, weighted_average
 
 
 @dataclass
@@ -324,10 +326,73 @@ def _load_lstm_direction_model(model_dir: str, device: Optional[str]) -> Dict[st
     }
 
 
+def _load_transformer_direction_model(model_dir: str, device: Optional[str]) -> Dict[str, Any]:
+    resolved_dir = os.path.abspath(model_dir)
+    summary_path = os.path.join(resolved_dir, "summary.json")
+    if not os.path.exists(summary_path):
+        raise FileNotFoundError(f"Transformer summary not found at {summary_path}")
+
+    with open(summary_path, "r", encoding="utf-8") as handle:
+        summary = json.load(handle)
+
+    seq_len = int(summary.get("seq_len"))
+    feature_names = summary.get("feature_names", [])
+    if not feature_names:
+        raise ValueError("Transformer summary missing feature_names")
+    hyperparams = summary.get("hyperparams", {})
+
+    model_path = os.path.join(resolved_dir, "model.pt")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Transformer weights not found at {model_path}")
+
+    checkpoint = torch.load(model_path, map_location="cpu")
+    input_size = int(checkpoint.get("input_size"))
+    hidden_dim = int(checkpoint.get("hidden_dim", hyperparams.get("hidden_dim", 128)))
+    num_heads = int(checkpoint.get("num_heads", hyperparams.get("num_heads", 4)))
+    ffn_dim = int(checkpoint.get("ffn_dim", hyperparams.get("ffn_dim", hidden_dim * 2)))
+    num_layers = int(checkpoint.get("num_layers", hyperparams.get("num_layers", 2)))
+    dropout = float(checkpoint.get("dropout", hyperparams.get("dropout", 0.1)))
+    use_layer_norm = bool(checkpoint.get("use_layer_norm", hyperparams.get("use_layer_norm", True)))
+
+    torch_device = _resolve_device(device)
+    transformer_model = TransformerDirectionClassifier(
+        input_size=input_size,
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        ffn_dim=ffn_dim,
+        num_layers=num_layers,
+        dropout=dropout,
+        max_seq_len=seq_len,
+        use_layer_norm=use_layer_norm,
+    )
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    transformer_model.load_state_dict(state_dict)
+    transformer_model.to(torch_device)
+    transformer_model.eval()
+
+    scaler_mean = None
+    scaler_std = None
+    scaler_path = os.path.join(resolved_dir, "scaler.joblib")
+    if os.path.exists(scaler_path):
+        scaler_payload = joblib_load(scaler_path)
+        scaler_mean = scaler_payload.get("mean")
+        scaler_std = scaler_payload.get("std")
+
+    return {
+        "model": transformer_model,
+        "device": torch_device,
+        "seq_len": seq_len,
+        "feature_names": feature_names,
+        "scaler_mean": scaler_mean,
+        "scaler_std": scaler_std,
+    }
+
+
 def load_models(
     reg_model_path: str,
     dir_model_path: Optional[str] = None,
     lstm_model_dir: Optional[str] = None,
+    transformer_model_dir: Optional[str] = None,
     device: Optional[str] = None,
 ) -> Dict[str, Any]:
     models: Dict[str, Any] = {}
@@ -344,49 +409,71 @@ def load_models(
     if lstm_model_dir:
         models["dir_lstm"] = _load_lstm_direction_model(lstm_model_dir, device)
 
-    if "dir" not in models and "dir_lstm" not in models:
+    if transformer_model_dir:
+        models["dir_transformer"] = _load_transformer_direction_model(transformer_model_dir, device)
+
+    if "dir" not in models and "dir_lstm" not in models and "dir_transformer" not in models:
         raise ValueError("At least one direction model must be provided.")
 
     return models
 
 
-def populate_lstm_cache_from_prepared(prepared: PreparedData, models: Dict[str, Any]) -> None:
-    """Populate the cached scaled feature matrix required for LSTM inference.
+def populate_sequence_cache_from_prepared(prepared: PreparedData, models: Dict[str, Any]) -> None:
+    """Populate cached scaled feature matrices required for sequence models."""
 
-    The realtime scripts reuse :func:`compute_signal_for_index`, which expects
-    ``models["dir_lstm"]["scaled_features"]`` to contain the full scaled
-    feature matrix aligned to the prepared dataframe. This helper centralizes
-    that preparation so backtests and realtime pipelines stay consistent.
-    """
+    sequence_keys = ["dir_lstm", "dir_transformer"]
 
-    lstm_info = models.get("dir_lstm")
-    if lstm_info is None:
-        return
+    for key in sequence_keys:
+        model_info = models.get(key)
+        if model_info is None:
+            continue
 
-    lstm_feature_names = list(lstm_info.get("feature_names", []))
-    if lstm_feature_names and lstm_feature_names != list(prepared.feature_names):
-        raise RuntimeError("Feature names mismatch between LSTM model and prepared data.")
+        model_feature_names = list(model_info.get("feature_names", []))
+        if model_feature_names and model_feature_names != list(prepared.feature_names):
+            raise RuntimeError("Feature names mismatch between sequence model and prepared data.")
 
-    feature_frame = prepared.X_all_ordered
-    if lstm_feature_names:
-        missing = set(lstm_feature_names) - set(feature_frame.columns)
-        if missing:
-            raise RuntimeError(f"Prepared data missing required LSTM feature columns: {sorted(missing)}")
-        feature_frame = feature_frame[lstm_feature_names]
+        feature_frame = prepared.X_all_ordered
+        if model_feature_names:
+            missing = set(model_feature_names) - set(feature_frame.columns)
+            if missing:
+                raise RuntimeError(f"Prepared data missing required sequence feature columns: {sorted(missing)}")
+            feature_frame = feature_frame[model_feature_names]
 
-    scaler_mean = lstm_info.get("scaler_mean")
-    scaler_std = lstm_info.get("scaler_std")
+        scaler_mean = model_info.get("scaler_mean")
+        scaler_std = model_info.get("scaler_std")
 
-    if scaler_mean is not None and scaler_std is not None:
-        mean_arr = np.asarray(scaler_mean, dtype=np.float32)
-        std_arr = np.asarray(scaler_std, dtype=np.float32)
-        std_arr[std_arr == 0.0] = 1.0
-        matrix = feature_frame.to_numpy(dtype=np.float32, copy=False)
-        scaled_matrix = (matrix - mean_arr) / std_arr
-    else:
-        scaled_matrix = prepared.scaler.transform(feature_frame).astype(np.float32)
+        if scaler_mean is not None and scaler_std is not None:
+            mean_arr = np.asarray(scaler_mean, dtype=np.float32)
+            std_arr = np.asarray(scaler_std, dtype=np.float32)
+            std_arr[std_arr == 0.0] = 1.0
+            matrix = feature_frame.to_numpy(dtype=np.float32, copy=False)
+            scaled_matrix = (matrix - mean_arr) / std_arr
+        else:
+            scaled_matrix = prepared.scaler.transform(feature_frame).astype(np.float32)
 
-    lstm_info["scaled_features"] = scaled_matrix
+        model_info["scaled_features"] = scaled_matrix
+
+
+def _sequence_model_probability(model_info: Dict[str, Any], index: int) -> Optional[float]:
+    seq_len = int(model_info.get("seq_len", 0))
+    if seq_len <= 0:
+        return None
+
+    scaled_features = model_info.get("scaled_features")
+    if scaled_features is None:
+        raise RuntimeError("Sequence model missing precomputed feature matrix.")
+
+    if index + 1 < seq_len:
+        return None
+
+    start = index + 1 - seq_len
+    window = scaled_features[start : index + 1].astype(np.float32, copy=False)
+    tensor = torch.from_numpy(window).unsqueeze(0).to(model_info["device"])
+    model: torch.nn.Module = model_info["model"]
+    with torch.no_grad():
+        logits = model(tensor)
+        prob = torch.sigmoid(logits).item()
+    return float(prob)
 
 
 def compute_signal_for_index(
@@ -395,6 +482,7 @@ def compute_signal_for_index(
     models: Dict[str, Any],
     p_up_min: float,
     ret_min: float,
+    dir_model_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     if not (0 <= index < len(prepared.df_all)):
         raise IndexError("Index out of range for prepared data.")
@@ -406,43 +494,69 @@ def compute_signal_for_index(
     reg = models["reg"]
     dir_model = models.get("dir")
     lstm_info = models.get("dir_lstm")
+    transformer_info = models.get("dir_transformer")
 
     ret_pred_arr = reg.predict(X_scaled)
     ret_pred = float(ret_pred_arr[0])
 
-    p_up: Optional[float] = None
-    if lstm_info is not None:
-        seq_len = int(lstm_info["seq_len"])
-        scaled_features = lstm_info.get("scaled_features")
-        if scaled_features is None:
-            raise RuntimeError("LSTM model missing precomputed feature matrix.")
-        if index + 1 >= seq_len:
-            start = index + 1 - seq_len
-            window = scaled_features[start : index + 1].astype(np.float32, copy=False)
-            lstm_model: LSTMDirectionClassifier = lstm_info["model"]
-            torch_device: torch.device = lstm_info["device"]
-            with torch.no_grad():
-                tensor = torch.from_numpy(window).unsqueeze(0).to(torch_device)
-                logits = lstm_model(tensor)
-                prob = torch.sigmoid(logits).item()
-            p_up = float(prob)
-        elif dir_model is None:
-            # Insufficient history for the LSTM and no backup classifier; stay neutral.
-            p_up = 0.5
+    probabilities: Dict[str, float] = {}
+    display_labels = {"xgb": "xgboost", "lstm": "lstm", "transformer": "transformer"}
 
-    if p_up is None:
-        if dir_model is None:
-            raise RuntimeError("No direction model available to compute probabilities.")
+    if dir_model is not None:
         p_up_arr = dir_model.predict_proba(X_scaled)[:, 1]
-        p_up = float(p_up_arr[0])
+        probabilities["xgb"] = float(p_up_arr[0])
+
+    if lstm_info is not None:
+        seq_prob = _sequence_model_probability(lstm_info, index)
+        if seq_prob is not None:
+            probabilities["lstm"] = seq_prob
+
+    if transformer_info is not None:
+        seq_prob = _sequence_model_probability(transformer_info, index)
+        if seq_prob is not None:
+            probabilities["transformer"] = seq_prob
+
+    p_up: Optional[float]
+    direction_model_kind: Optional[str]
+
+    if probabilities:
+        if dir_model_weights:
+            applicable_weights = {k: v for k, v in dir_model_weights.items() if k in probabilities}
+        else:
+            applicable_weights = {}
+
+        if applicable_weights:
+            try:
+                p_up = weighted_average(probabilities, applicable_weights)
+            except ValueError:
+                p_up = simple_average(probabilities.values())
+        else:
+            p_up = simple_average(probabilities.values())
+
+        direction_model_kind = (
+            display_labels[next(iter(probabilities))]
+            if len(probabilities) == 1
+            else "ensemble"
+        )
+    else:
+        if dir_model is None and (lstm_info is not None or transformer_info is not None):
+            p_up = 0.5
+            direction_model_kind = "fallback"
+        else:
+            raise RuntimeError("No direction model available to compute probabilities.")
 
     signal_ensemble = int((p_up >= p_up_min) and (ret_pred >= ret_min))
     signal_dir_only = int(p_up >= 0.5)
 
-    return {
+    result = {
         "ts": format_ts_iso(ts_value),
         "p_up": p_up,
         "ret_pred": ret_pred,
         "signal_ensemble": signal_ensemble,
         "signal_dir_only": signal_dir_only,
     }
+
+    if direction_model_kind is not None:
+        result["direction_model_kind"] = direction_model_kind
+
+    return result
