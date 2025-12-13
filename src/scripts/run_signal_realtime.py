@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -43,15 +44,33 @@ LEGACY_LOG_COLUMNS = [
     "created_at",
     "notes",
 ]
+META_NET_COLUMNS = [
+    "meta_net_fee_20_10",
+    "meta_net_fee_25_12",
+    "meta_net_fee_30_15",
+]
+
+META_LABEL_TO_COLUMN = {
+    "fee_20_10": "meta_net_fee_20_10",
+    "fee_25_12": "meta_net_fee_25_12",
+    "fee_30_15": "meta_net_fee_30_15",
+}
+
 LOG_COLUMNS = [
     "ts",
     "p_up",
+    "p_up_xgb",
+    "p_up_lstm",
+    "p_up_transformer",
+    "p_up_meta",
     "ret_pred",
+    "signal_meta",
     "signal_ensemble",
     "signal_dir_only",
     "p_up_4h",
     "ret_pred_4h",
     "signal_1h4h_confirm",
+    *META_NET_COLUMNS,
     "created_at",
     "notes",
 ]
@@ -122,6 +141,12 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional comma-separated weights for direction models (e.g. transformer:2,lstm:1,xgb:1).",
+    )
+    parser.add_argument(
+        "--meta-ensemble-config",
+        type=str,
+        default="artifacts/backtests/meta_ensemble_config.json",
+        help="Optional path to logistic meta-ensemble coefficients for realtime blending.",
     )
     parser.add_argument(
         "--lstm-device",
@@ -329,8 +354,86 @@ def _append_to_log(log_path: str, row: Dict[str, Any], columns: List[str]) -> bo
     return True
 
 
+def _load_meta_config(path: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not path:
+        return None
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Warning: failed to load meta-ensemble config ({exc}); skipping meta blend.", file=sys.stderr)
+        return None
+
+
+def _compute_meta_outputs(sig: Dict[str, Any], meta_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    components = sig.get("p_up_components")
+    if not isinstance(components, dict) or not components:
+        return None
+
+    feature_columns = meta_config.get("feature_columns", [])
+    coefficients = meta_config.get("coefficients", [])
+    if not feature_columns or len(feature_columns) != len(coefficients):
+        return None
+
+    intercept = float(meta_config.get("intercept", 0.0))
+    threshold = float(meta_config.get("threshold", 0.5))
+
+    feature_values: List[float] = []
+    for column, coef in zip(feature_columns, coefficients):
+        key = column
+        if column.startswith("p_up_"):
+            key = column[len("p_up_") :]
+        value = components.get(key)
+        if value is None:
+            return None
+        feature_values.append(float(value))
+
+    linear_term = intercept
+    for value, coef in zip(feature_values, coefficients):
+        linear_term += float(coef) * value
+
+    try:
+        p_up_meta = 1.0 / (1.0 + math.exp(-linear_term))
+    except OverflowError:
+        p_up_meta = 0.0 if linear_term < 0 else 1.0
+
+    signal_meta = int(p_up_meta >= threshold)
+    try:
+        ret_pred = float(sig["ret_pred"])
+    except (KeyError, TypeError, ValueError):
+        ret_pred = 0.0
+
+    schedules = meta_config.get("schedules") or [
+        {"fee_bps": 2.0, "slippage_bps": 1.0, "label": "fee_20_10"},
+        {"fee_bps": 2.5, "slippage_bps": 1.2, "label": "fee_25_12"},
+        {"fee_bps": 3.0, "slippage_bps": 1.5, "label": "fee_30_15"},
+    ]
+
+    meta_net: Dict[str, float] = {}
+    for schedule in schedules:
+        try:
+            fee_bps = float(schedule["fee_bps"])
+            slippage_bps = float(schedule["slippage_bps"])
+            label = str(schedule["label"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        cost = (fee_bps + slippage_bps) / 10_000.0
+        meta_net[label] = (ret_pred - cost) * signal_meta
+
+    return {
+        "p_up_meta": p_up_meta,
+        "signal_meta": signal_meta,
+        "meta_net": meta_net,
+    }
+
+
 def run_signal_realtime(args: argparse.Namespace) -> None:
     _apply_optuna_profile(args)
+
+    meta_config = _load_meta_config(getattr(args, "meta_ensemble_config", None))
 
     # Prepare data and models using the same helpers as run_signal_once/backtest
     prepared: PreparedData = prepare_data_for_signals(args.dataset_path, target_column="ret_1h")
@@ -430,6 +533,21 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
         "ret_min": float(args.ret_min),
     }
 
+    if meta_config:
+        meta_outputs = _compute_meta_outputs(sig, meta_config)
+        if meta_outputs:
+            sig["p_up_meta"] = meta_outputs["p_up_meta"]
+            sig["signal_meta"] = meta_outputs["signal_meta"]
+            sig["meta_expected_net"] = meta_outputs["meta_net"]
+        else:
+            sig.setdefault("p_up_meta", None)
+            sig.setdefault("signal_meta", None)
+            sig.setdefault("meta_expected_net", {})
+    else:
+        sig.setdefault("p_up_meta", None)
+        sig.setdefault("signal_meta", None)
+        sig.setdefault("meta_expected_net", {})
+
     signal_1h4h_confirm: Optional[int] = None
     p_up_4h = sig.get("p_up_4h")
     if p_up_4h is not None:
@@ -455,18 +573,28 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
         )
         return
 
+    meta_net = sig.get("meta_expected_net") or {}
+
     log_row = {
         "ts": current_ts,
-        "p_up": sig["p_up"],
-        "ret_pred": sig["ret_pred"],
-        "signal_ensemble": sig["signal_ensemble"],
-        "signal_dir_only": sig["signal_dir_only"],
+        "p_up": sig.get("p_up", ""),
+        "p_up_xgb": sig.get("p_up_xgb", ""),
+        "p_up_lstm": sig.get("p_up_lstm", ""),
+        "p_up_transformer": sig.get("p_up_transformer", ""),
+        "p_up_meta": sig.get("p_up_meta", ""),
+        "ret_pred": sig.get("ret_pred", ""),
+        "signal_meta": sig.get("signal_meta", ""),
+        "signal_ensemble": sig.get("signal_ensemble", ""),
+        "signal_dir_only": sig.get("signal_dir_only", ""),
         "p_up_4h": sig.get("p_up_4h", ""),
         "ret_pred_4h": sig.get("ret_pred_4h", ""),
         "signal_1h4h_confirm": signal_1h4h_confirm if signal_1h4h_confirm is not None else "",
         "created_at": _now_utc_iso(),
         "notes": "",
     }
+
+    for label, column in META_LABEL_TO_COLUMN.items():
+        log_row[column] = meta_net.get(label, "")
 
     appended = _append_to_log(args.log_path, log_row, LOG_COLUMNS)
     if appended:

@@ -1,7 +1,7 @@
 from typing import Optional
 
 import pandas as pd
-from google.cloud import bigquery
+from google.cloud import bigquery, bigquery_storage
 
 from src.config import PROJECT_ID, BQ_DATASET_CURATED, BQ_TABLE_FEATURES_1H
 
@@ -31,5 +31,8 @@ def load_btc_features_1h(
     query += " ORDER BY ts"
 
     job = client.query(query)
-    df = job.to_dataframe()
+
+    with bigquery_storage.BigQueryReadClient() as bqstorage_client:
+        df = job.to_dataframe(bqstorage_client=bqstorage_client)
+
     return df

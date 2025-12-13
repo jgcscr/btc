@@ -111,10 +111,40 @@ def summary_stats(
     return stats
 
 
+def ensure_meta_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach meta-ensemble monitoring columns when source data permits."""
+
+    result = df.copy()
+
+    meta_net_candidates: list[str] = []
+
+    for column in list(result.columns):
+        if column.startswith("ret_net_fee_"):
+            alias = "meta_" + column[len("ret_") :]
+            if alias not in result.columns:
+                result[alias] = pd.to_numeric(result[column], errors="coerce")
+            meta_net_candidates.append(alias)
+        elif column.startswith("meta_net_fee_"):
+            meta_net_candidates.append(column)
+
+    if "signal_meta" in result.columns:
+        result["signal_meta"] = pd.to_numeric(result["signal_meta"], errors="coerce")
+
+    net_source = next((col for col in meta_net_candidates if col in result.columns), None)
+    if net_source and "signal_meta" in result.columns:
+        signal_series = pd.to_numeric(result["signal_meta"], errors="coerce")
+        net_series = pd.to_numeric(result[net_source], errors="coerce")
+        meta_hits = np.where(signal_series > 0, (net_series > 0).astype(float), np.nan)
+        result["meta_hit_rate"] = meta_hits
+
+    return result
+
+
 __all__ = [
     "rolling_mean",
     "rolling_std",
     "z_scores",
     "ks_statistic",
     "summary_stats",
+    "ensure_meta_metrics",
 ]

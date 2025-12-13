@@ -556,6 +556,11 @@ def compute_signal_for_index(
         "signal_dir_only": signal_dir_only,
     }
 
+    if probabilities:
+        result["p_up_components"] = probabilities.copy()
+        for name, value in probabilities.items():
+            result[f"p_up_{name}"] = value
+
     if direction_model_kind is not None:
         result["direction_model_kind"] = direction_model_kind
 

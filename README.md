@@ -13,7 +13,7 @@ cd /workspaces/btc
 python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements.txt  # installs google-cloud-bigquery-storage for fast table reads
 ```
 
 ## 2. Generate and upload spot & futures data
@@ -68,6 +68,45 @@ This will upload parquet to:
 
 > If the Binance endpoints are geo-blocked, you can still use `src/ingest_spot_klines.py --dummy`
 > to generate synthetic spot data locally for testing the rest of the pipeline.
+
+### 2.3 Macro, on-chain, and funding scaffolding
+
+Phase 1 macros use free endpoints. Export API keys before calling the loaders:
+
+```bash
+export FRED_API_KEY="..."
+export ALPHA_VANTAGE_API_KEY="..."
+```
+
+Fetch macroeconomic series into `data/raw/macro/`:
+
+```bash
+# FRED broad trade-weighted USD index
+python -m data.ingestors.fred_macro DTWEXBGS --start 2019-01-01
+
+# Alpha Vantage daily SPX close (uses TIME_SERIES_DAILY JSON)
+python -m data.ingestors.alpha_vantage_macro TIME_SERIES_DAILY SPX
+```
+
+Fetch on-chain metrics into `data/raw/onchain/`:
+
+```bash
+# Active Bitcoin addresses, trailing year
+python -m data.ingestors.blockchain_onchain activeaddresses --timespan 1year
+```
+
+Convert raw tidy rows into hourly feature Parquet and monitoring summaries:
+
+```bash
+# Writes data/processed/*/hourly_features.parquet and artifacts/monitoring/*_summary.json
+python -m data.processed.compute_macro_features
+python -m data.processed.compute_onchain_features
+python -m data.processed.compute_funding_features --pair BTCUSDT --fetch --limit 500
+```
+
+Funding features depend on Binance endpoints. The `--fetch` flag hydrates `data/raw/funding/binance/`
+before the hourly aggregation runs. If live API access is restricted, copy historical Parquet into that
+directory and run the processor without `--fetch`.
 
 ## 3. Create BigQuery dataset (once)
 

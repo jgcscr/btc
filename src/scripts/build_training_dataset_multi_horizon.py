@@ -1,6 +1,7 @@
 import argparse
 import os
-from typing import Iterable, List, Optional
+from pathlib import Path
+from typing import Iterable, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,63 @@ from src.data.targets_multi_horizon import add_multi_horizon_targets
 
 
 DEFAULT_HORIZONS: List[int] = [1, 4]
+PROCESSED_PATHS = [
+    Path("data/processed/macro/hourly_features.parquet"),
+    Path("data/processed/onchain/hourly_features.parquet"),
+    Path("data/processed/funding/hourly_features.parquet"),
+    Path("data/processed/coinapi/market_hourly_features.parquet"),
+    Path("data/processed/coinapi/funding_hourly_features.parquet"),
+    Path("data/processed/cryptoquant/hourly_features.parquet"),
+]
+
+
+def _add_cryptoquant_flags(df: pd.DataFrame) -> pd.DataFrame:
+    cq_columns = [col for col in df.columns if col.startswith("cq_daily_")]
+    if not cq_columns:
+        df["cq_daily_fallback_active"] = 0
+        df["cq_daily_fallback_complete"] = 0
+        return df
+
+    coverage = df[cq_columns].notna()
+    df["cq_daily_fallback_active"] = coverage.any(axis=1).astype(int)
+    df["cq_daily_fallback_complete"] = coverage.all(axis=1).astype(int)
+    return df
+
+
+def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.DataFrame:
+    if "ts" not in df.columns:
+        raise RuntimeError("Expected 'ts' column in curated features for feature alignment.")
+
+    augmented = df.copy()
+    augmented["ts"] = pd.to_datetime(augmented["ts"], utc=True)
+
+    for path in paths:
+        if not path.exists():
+            print(f"Processed features not found at {path}; skipping.")
+            continue
+
+        extra = pd.read_parquet(path)
+        if extra.empty:
+            print(f"Processed features at {path} are empty; skipping.")
+            continue
+
+        if "timestamp" in extra.columns:
+            extra = extra.rename(columns={"timestamp": "ts"})
+
+        extra["ts"] = pd.to_datetime(extra["ts"], utc=True)
+
+        columns_before = set(augmented.columns)
+        augmented = augmented.merge(extra, on="ts", how="left")
+        new_columns = [col for col in augmented.columns if col not in columns_before]
+
+        if new_columns:
+            preview = ", ".join(new_columns[:5])
+            suffix = "..." if len(new_columns) > 5 else ""
+            print(f"Added {len(new_columns)} feature columns from {path}: {preview}{suffix}")
+        else:
+            print(f"No new columns merged from {path}; check schema overlap.")
+
+    return _add_cryptoquant_flags(augmented)
 
 
 def _split_array(values: np.ndarray, n_train: int, n_val: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -56,6 +114,7 @@ def build_multi_horizon_dataset(
         raise RuntimeError("Loaded empty DataFrame from BigQuery; check curated features table content.")
 
     df = df.sort_values("ts").reset_index(drop=True)
+    df = _merge_processed_features(df, PROCESSED_PATHS)
 
     df_onchain = None
     if fetch_onchain:

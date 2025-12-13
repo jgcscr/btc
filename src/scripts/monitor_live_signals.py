@@ -10,10 +10,10 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
-from src.monitoring.metrics import ks_statistic
+from src.monitoring.metrics import ensure_meta_metrics, ks_statistic
 
 DEFAULT_LOG_PATH = Path("artifacts/live/paper_trade_realtime.csv")
-DEFAULT_BASELINE_PATH = Path("artifacts/analysis/live_baseline_summary.json")
+DEFAULT_BASELINE_PATH = Path("artifacts/monitoring/meta_baseline.json")
 DEFAULT_WINDOW = 240
 DEFAULT_ALERT_THRESHOLD = 2.0
 TABLE_HEADERS = (
@@ -81,7 +81,7 @@ def load_log(path: Path) -> pd.DataFrame:
         df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
         df = df.sort_values("ts")
 
-    return df
+    return ensure_meta_metrics(df)
 
 
 def load_baseline(path: Path) -> dict[str, Any]:
