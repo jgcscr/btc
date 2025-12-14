@@ -373,13 +373,15 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
         column to TIMESTAMP on-the-fly so the WHERE clause stays type-safe.
         """
 
-        int_cast = f"CAST({column} AS INT64)"
+        safe_int = f"SAFE_CAST({column} AS INT64)"
+        safe_str = f"SAFE_CAST({column} AS STRING)"
         return "(CASE " \
             f"WHEN SAFE_CAST({column} AS TIMESTAMP) IS NOT NULL THEN SAFE_CAST({column} AS TIMESTAMP) " \
-            f"WHEN SAFE_CAST({column} AS INT64) IS NOT NULL THEN (CASE " \
-            f"WHEN ABS({int_cast}) >= 1000000000000000 THEN TIMESTAMP_MICROS({int_cast}) " \
-            f"WHEN ABS({int_cast}) >= 1000000000000 THEN TIMESTAMP_MILLIS({int_cast}) " \
-            f"ELSE TIMESTAMP_SECONDS({int_cast}) END) " \
+            f"WHEN {safe_int} IS NOT NULL THEN (CASE " \
+            f"WHEN ABS({safe_int}) >= 1000000000000000 THEN TIMESTAMP_MICROS({safe_int}) " \
+            f"WHEN ABS({safe_int}) >= 1000000000000 THEN TIMESTAMP_MILLIS({safe_int}) " \
+            f"ELSE TIMESTAMP_SECONDS({safe_int}) END) " \
+            f"WHEN {safe_str} IS NOT NULL THEN SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', {safe_str}) " \
             "ELSE NULL END)"
 
     ts_expression = _bq_ts_expression()
