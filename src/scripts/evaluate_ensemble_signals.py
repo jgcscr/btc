@@ -72,6 +72,7 @@ def _compute_trade_stats(ret: np.ndarray, signal: np.ndarray) -> Dict[str, float
             "hit_rate": 0.0,
             "avg_ret_per_trade": 0.0,
             "cum_ret": 0.0,
+            "max_drawdown": 0.0,
         }
 
     ret_trades = ret[mask]
@@ -79,11 +80,21 @@ def _compute_trade_stats(ret: np.ndarray, signal: np.ndarray) -> Dict[str, float
     avg_ret = float(np.mean(ret_trades))
     cum_ret = float(np.sum(ret_trades))
 
+    strategy_ret = ret * signal.astype(float)
+    equity_curve = np.cumsum(strategy_ret)
+    if equity_curve.size == 0:
+        max_drawdown = 0.0
+    else:
+        running_max = np.maximum.accumulate(equity_curve)
+        drawdowns = running_max - equity_curve
+        max_drawdown = float(np.max(drawdowns))
+
     return {
         "n_trades": float(n_trades),
         "hit_rate": hit_rate,
         "avg_ret_per_trade": avg_ret,
         "cum_ret": cum_ret,
+        "max_drawdown": max_drawdown,
     }
 
 
@@ -141,6 +152,7 @@ def evaluate_ensemble_signals(
         f"  hit_rate: {ens_stats['hit_rate']:.4f}\n"
         f"  avg_ret_per_trade: {ens_stats['avg_ret_per_trade']:.6f}\n"
         f"  cum_ret: {ens_stats['cum_ret']:.6f}\n"
+        f"  max_drawdown: {ens_stats['max_drawdown']:.6f}\n"
     )
 
     print(
@@ -149,6 +161,7 @@ def evaluate_ensemble_signals(
         f"  hit_rate: {dir_stats['hit_rate']:.4f}\n"
         f"  avg_ret_per_trade: {dir_stats['avg_ret_per_trade']:.6f}\n"
         f"  cum_ret: {dir_stats['cum_ret']:.6f}\n"
+        f"  max_drawdown: {dir_stats['max_drawdown']:.6f}\n"
     )
 
 

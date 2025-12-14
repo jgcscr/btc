@@ -194,6 +194,44 @@ curl -X POST "$SERVICE_URL/predict" \
 
 ---
 
+## 7. Walk-forward evaluation (CPU-only)
+
+The walk-forward harness clears `CUDA_VISIBLE_DEVICES`, so every refit (including the transformer Optuna sweep) runs on CPU inside the default Codespaces container. Artifacts are stored under `artifacts/walkforward/<schedule>/<window_id>/` and summarized per schedule.
+
+### 7.1 Smoke check (7-day window)
+
+Use the smoke config for a quick validation of the end-to-end wiring:
+
+```bash
+python -m src.scripts.run_walkforward_eval \
+	--config configs/walkforward/monthly_cpu_smoke.yaml
+```
+
+Outputs land in `artifacts/walkforward/monthly_cpu_smoke/`; the latest run is mirrored to `summary_latest.json` for fast inspection.
+
+### 7.2 Monthly schedule (full 1-month windows)
+
+Run the full monthly schedule to refresh all production windows and append a consolidated CSV/JSON summary:
+
+```bash
+python -m src.scripts.run_walkforward_eval \
+	--config configs/walkforward/monthly_cpu.yaml
+```
+
+Setting `--force` rebuilds an existing window directory. Aggregate metrics live in `artifacts/walkforward/monthly_cpu/summary.csv` and `summary.json`; each window folder (for example `test_20241001_1m`) keeps the datasets, retrained transformer checkpoints, and backtests for deeper analysis.
+
+### 7.3 Regression metric checks
+
+Compare fresh metrics against the stored baselines after any walk-forward or backtest run:
+
+```bash
+python -m src.scripts.metrics_diff \
+	--baseline artifacts/baselines/walkforward_monthly_cpu_summary.json \
+	--new artifacts/walkforward/monthly_cpu/summary.json
+```
+
+The diff tool inspects `hit_rate`, `cum_ret`/`cum_ret_net`, `max_drawdown`, `n_trades`, and `sharpe_like` with ±2%/±0.05 tolerances (drawdowns may worsen by at most 0.01). Use `--update` to promote a reviewed run as the new baseline.
+
 **Experiment history and detailed status:** See `docs/experiment_2024-10_to-2025-12_v1.md` for a full log of ingestion, feature, and vendor status.
 
 This completes the full pipeline: multi-vendor data ingestion → feature engineering → BigQuery → model training → API serving on Cloud Run.

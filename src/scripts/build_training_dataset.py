@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Sequence
@@ -34,6 +35,36 @@ def _add_cryptoquant_flags(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _log_cryptoquant_features(df: pd.DataFrame) -> None:
+    cq_columns = sorted(col for col in df.columns if col.startswith("cq_daily_"))
+    if not cq_columns:
+        return
+    catalog_path = Path("artifacts/monitoring/cryptoquant_feature_catalog.json")
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    feature_groups = {
+        "value": [c for c in cq_columns if c.startswith("cq_daily_") and "delta" not in c and "zscore" not in c and "pct_" not in c],
+        "delta": [c for c in cq_columns if c.startswith("cq_daily_delta_")],
+        "pct": [c for c in cq_columns if c.startswith("cq_daily_pct_")],
+        "zscore": [c for c in cq_columns if c.startswith("cq_daily_zscore_")],
+    }
+    payload = {
+        "feature_count": len(cq_columns),
+        "feature_groups": {name: len(columns) for name, columns in feature_groups.items()},
+        "features": cq_columns,
+    }
+    catalog_path.write_text(json.dumps(payload, indent=2))
+    print(
+        "Logged {count} CryptoQuant fallback features ({value} values, {delta} deltas, {pct} pct, {zscore} z-scores) to {path}".format(
+            count=len(cq_columns),
+            value=payload["feature_groups"].get("value", 0),
+            delta=payload["feature_groups"].get("delta", 0),
+            pct=payload["feature_groups"].get("pct", 0),
+            zscore=payload["feature_groups"].get("zscore", 0),
+            path=catalog_path,
+        )
+    )
+
+
 def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.DataFrame:
     if "ts" not in df.columns:
         raise RuntimeError("Expected 'ts' column in curated features for feature alignment.")
@@ -67,7 +98,9 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
         else:
             print(f"No new columns merged from {path}; check schema overlap.")
 
-    return _add_cryptoquant_flags(augmented)
+    augmented = _add_cryptoquant_flags(augmented)
+    _log_cryptoquant_features(augmented)
+    return augmented
 
 
 def main(output_dir: str) -> None:

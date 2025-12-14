@@ -11,6 +11,8 @@ import pandas as pd
 RAW_ROOT = Path("data/raw/cryptoquant_daily")
 OUTPUT_PATH = Path("data/processed/cryptoquant/hourly_features.parquet")
 SUMMARY_PATH = Path("artifacts/monitoring/cryptoquant_daily_summary.json")
+ZSCORE_WINDOW = 30
+ZSCORE_MIN_PERIODS = 5
 
 
 class CryptoQuantProcessingError(RuntimeError):
@@ -38,13 +40,27 @@ def _pivot_daily(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
 
 
 def _resample_hourly(pivot: pd.DataFrame) -> pd.DataFrame:
-    hourly = pivot.resample("1H").ffill()
-    hourly.columns = [f"cq_daily_{col}" for col in hourly.columns]
+    base_columns = [str(col) for col in pivot.columns]
 
-    daily_delta = pivot.diff().resample("1H").ffill()
-    daily_delta.columns = [f"cq_daily_delta_{col}" for col in daily_delta.columns]
+    hourly = pivot.resample("1h").ffill()
+    hourly.columns = [f"cq_daily_{col}" for col in base_columns]
 
-    merged = pd.concat([hourly, daily_delta], axis=1)
+    daily_delta = pivot.diff().resample("1h").ffill()
+    daily_delta.columns = [f"cq_daily_delta_{col}" for col in base_columns]
+
+    daily_pct = pivot.pct_change()
+    daily_pct = daily_pct.replace([float("inf"), float("-inf")], pd.NA)
+    daily_pct = daily_pct.resample("1h").ffill()
+    daily_pct.columns = [f"cq_daily_pct_{col}" for col in base_columns]
+
+    rolling_mean = pivot.rolling(window=ZSCORE_WINDOW, min_periods=ZSCORE_MIN_PERIODS).mean()
+    rolling_std = pivot.rolling(window=ZSCORE_WINDOW, min_periods=ZSCORE_MIN_PERIODS).std(ddof=0)
+    rolling_std = rolling_std.replace(0, pd.NA)
+    zscore_daily = (pivot - rolling_mean) / rolling_std
+    zscore_hourly = zscore_daily.resample("1h").ffill()
+    zscore_hourly.columns = [f"cq_daily_zscore_{col}" for col in base_columns]
+
+    merged = pd.concat([hourly, daily_delta, daily_pct, zscore_hourly], axis=1)
     merged = merged.reset_index().rename(columns={"ts": "timestamp"})
     return merged
 
@@ -64,6 +80,18 @@ def _summarize(frame: pd.DataFrame) -> dict:
         "first_timestamp": frame["timestamp"].min().isoformat(),
         "latest_timestamp": frame["timestamp"].max().isoformat(),
         "zero_valued_columns": {},
+        "feature_groups": {
+            "value": len(
+                [
+                    c
+                    for c in frame.columns
+                    if c.startswith("cq_daily_") and "delta" not in c and "zscore" not in c and "pct_" not in c
+                ]
+            ),
+            "delta": len([c for c in frame.columns if c.startswith("cq_daily_delta_")]),
+            "pct": len([c for c in frame.columns if c.startswith("cq_daily_pct_")]),
+            "zscore": len([c for c in frame.columns if c.startswith("cq_daily_zscore_")]),
+        },
         "note": (
             "Derived from CryptoQuant daily metrics via forward-fill; true hourly data pending support ticket "
             "CQ-2025-1213."
