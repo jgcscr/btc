@@ -368,21 +368,40 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
     def _bq_ts_expression(column: str = "ts") -> str:
         """Builds a BigQuery expression that normalizes a timestamp column.
 
-        The curated table stores ts either as TIMESTAMP or as various epoch-based
-        integers depending on the ingestion batch. This expression converts the
-        column to TIMESTAMP on-the-fly so the WHERE clause stays type-safe.
+        The curated table stores ts either as TIMESTAMP or as various mixed-format
+        integers/strings. This expression normalizes the value to TIMESTAMP while
+        guarding against out-of-range epoch conversions.
         """
 
+        min_seconds = -62135596800
+        max_seconds = 253402300799
+        min_millis = min_seconds * 1000
+        max_millis = max_seconds * 1000
+        min_micros = min_seconds * 1_000_000
+        max_micros = max_seconds * 1_000_000
+
+        safe_ts = f"SAFE_CAST({column} AS TIMESTAMP)"
         safe_int = f"SAFE_CAST({column} AS INT64)"
         safe_str = f"SAFE_CAST({column} AS STRING)"
-        return "(CASE " \
-            f"WHEN SAFE_CAST({column} AS TIMESTAMP) IS NOT NULL THEN SAFE_CAST({column} AS TIMESTAMP) " \
-            f"WHEN {safe_int} IS NOT NULL THEN (CASE " \
-            f"WHEN ABS({safe_int}) >= 1000000000000000 THEN TIMESTAMP_MICROS({safe_int}) " \
-            f"WHEN ABS({safe_int}) >= 1000000000000 THEN TIMESTAMP_MILLIS({safe_int}) " \
-            f"ELSE TIMESTAMP_SECONDS({safe_int}) END) " \
-            f"WHEN {safe_str} IS NOT NULL THEN SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', {safe_str}) " \
-            "ELSE NULL END)"
+        digits_expr = f"REGEXP_REPLACE({safe_str}, r'[^0-9]')"
+
+        parts = [
+            "(CASE",
+            f" WHEN {safe_ts} IS NOT NULL THEN {safe_ts}",
+            f" WHEN {safe_int} IS NOT NULL AND {safe_int} BETWEEN {min_seconds} AND {max_seconds} THEN TIMESTAMP_SECONDS({safe_int})",
+            f" WHEN {safe_int} IS NOT NULL AND {safe_int} BETWEEN {min_millis} AND {max_millis} THEN TIMESTAMP_MILLIS({safe_int})",
+            f" WHEN {safe_int} IS NOT NULL AND {safe_int} BETWEEN {min_micros} AND {max_micros} THEN TIMESTAMP_MICROS({safe_int})",
+            f" WHEN {safe_str} IS NOT NULL THEN (CASE",
+            f"     WHEN LENGTH({digits_expr}) >= 14 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', SUBSTR({digits_expr}, 1, 14))",
+            f"     WHEN LENGTH({digits_expr}) = 12 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {digits_expr} || '00')",
+            f"     WHEN LENGTH({digits_expr}) = 10 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {digits_expr} || '0000')",
+            f"     ELSE SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', {safe_str})",
+            "   END)",
+            " ELSE NULL",
+            "END)",
+        ]
+
+        return " ".join(parts)
 
     ts_expression = _bq_ts_expression()
     where_clause = " AND ".join(
