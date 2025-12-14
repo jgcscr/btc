@@ -368,9 +368,10 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
     def _bq_ts_expression(column: str = "ts") -> str:
         """Builds a BigQuery expression that normalizes a timestamp column.
 
-        The curated table stores ts either as TIMESTAMP or as various mixed-format
-        integers/strings. This expression normalizes the value to TIMESTAMP while
-        guarding against out-of-range epoch conversions.
+        The curated table stores ts either as TIMESTAMP-like strings, calendar
+        encodings (YYYYMMDDHHMMSS), or epoch counts (seconds/millis/micros).
+        This expression works entirely through string inspection so that we
+        never issue an unsupported CAST from INT64 to TIMESTAMP.
         """
 
         min_seconds = -62135596800
@@ -380,24 +381,26 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
         min_micros = min_seconds * 1_000_000
         max_micros = max_seconds * 1_000_000
 
-        safe_ts = f"SAFE_CAST({column} AS TIMESTAMP)"
-        safe_int = f"SAFE_CAST({column} AS INT64)"
-        safe_str = f"SAFE_CAST({column} AS STRING)"
-        digits_expr = f"REGEXP_REPLACE({safe_str}, r'[^0-9]')"
+        raw_str = f"SAFE_CAST({column} AS STRING)"
+        clean_digits = f"REGEXP_REPLACE({raw_str}, r'[^0-9]')"
+        digits_int = f"SAFE_CAST({clean_digits} AS INT64)"
 
-        parts = [
+        parts: List[str] = [
             "(CASE",
-            f" WHEN {safe_ts} IS NOT NULL THEN {safe_ts}",
-            f" WHEN {safe_int} IS NOT NULL AND {safe_int} BETWEEN {min_seconds} AND {max_seconds} THEN TIMESTAMP_SECONDS({safe_int})",
-            f" WHEN {safe_int} IS NOT NULL AND {safe_int} BETWEEN {min_millis} AND {max_millis} THEN TIMESTAMP_MILLIS({safe_int})",
-            f" WHEN {safe_int} IS NOT NULL AND {safe_int} BETWEEN {min_micros} AND {max_micros} THEN TIMESTAMP_MICROS({safe_int})",
-            f" WHEN {safe_str} IS NOT NULL THEN (CASE",
-            f"     WHEN LENGTH({digits_expr}) >= 14 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', SUBSTR({digits_expr}, 1, 14))",
-            f"     WHEN LENGTH({digits_expr}) = 12 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {digits_expr} || '00')",
-            f"     WHEN LENGTH({digits_expr}) = 10 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {digits_expr} || '0000')",
-            f"     ELSE SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', {safe_str})",
-            "   END)",
-            " ELSE NULL",
+            f" WHEN {raw_str} IS NULL THEN NULL",
+            # ISO 8601 variants (with optional timezone), e.g. 2024-01-01T00:00:00Z
+            f" WHEN REGEXP_CONTAINS({raw_str}, r'^\\d{{4}}-\\d{{2}}-\\d{{2}}') THEN SAFE.PARSE_TIMESTAMP('%Y-%m-%dT%H:%M:%E*S%Ez', {raw_str})",
+            # Compact calendar encodings: YYYYMMDDHHMMSS or shorter variants.
+            f" WHEN LENGTH({clean_digits}) = 14 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {clean_digits})",
+            f" WHEN LENGTH({clean_digits}) = 12 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {clean_digits} || '00')",
+            f" WHEN LENGTH({clean_digits}) = 10 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {clean_digits} || '0000')",
+            # Epoch encodings.
+            f" WHEN LENGTH({clean_digits}) = 19 AND {digits_int} BETWEEN {min_micros} AND {max_micros} THEN TIMESTAMP_MICROS({digits_int})",
+            f" WHEN LENGTH({clean_digits}) = 16 AND {digits_int} BETWEEN {min_micros} AND {max_micros} THEN TIMESTAMP_MICROS({digits_int})",
+            f" WHEN LENGTH({clean_digits}) = 13 AND {digits_int} BETWEEN {min_millis} AND {max_millis} THEN TIMESTAMP_MILLIS({digits_int})",
+            f" WHEN LENGTH({clean_digits}) = 10 AND {digits_int} BETWEEN {min_seconds} AND {max_seconds} THEN TIMESTAMP_SECONDS({digits_int})",
+            # Fallback: try friendly parsing with space-separated timestamp.
+            f" ELSE SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%E*S', {raw_str})",
             "END)",
         ]
 
