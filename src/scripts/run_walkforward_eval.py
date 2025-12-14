@@ -365,10 +365,28 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
         formatted = ts_utc.strftime("%Y-%m-%d %H:%M:%S")
         return f"TIMESTAMP('{formatted} UTC')"
 
+    def _bq_ts_expression(column: str = "ts") -> str:
+        """Builds a BigQuery expression that normalizes a timestamp column.
+
+        The curated table stores ts either as TIMESTAMP or as various epoch-based
+        integers depending on the ingestion batch. This expression converts the
+        column to TIMESTAMP on-the-fly so the WHERE clause stays type-safe.
+        """
+
+        int_cast = f"CAST({column} AS INT64)"
+        return "(CASE " \
+            f"WHEN SAFE_CAST({column} AS TIMESTAMP) IS NOT NULL THEN SAFE_CAST({column} AS TIMESTAMP) " \
+            f"WHEN SAFE_CAST({column} AS INT64) IS NOT NULL THEN (CASE " \
+            f"WHEN ABS({int_cast}) >= 1000000000000000 THEN TIMESTAMP_MICROS({int_cast}) " \
+            f"WHEN ABS({int_cast}) >= 1000000000000 THEN TIMESTAMP_MILLIS({int_cast}) " \
+            f"ELSE TIMESTAMP_SECONDS({int_cast}) END) " \
+            "ELSE NULL END)"
+
+    ts_expression = _bq_ts_expression()
     where_clause = " AND ".join(
         [
-            f"ts >= {_bq_timestamp(window.train_start)}",
-            f"ts < {_bq_timestamp(window.test_end)}",
+            f"{ts_expression} >= {_bq_timestamp(window.train_start)}",
+            f"{ts_expression} < {_bq_timestamp(window.test_end)}",
         ]
     )
 
