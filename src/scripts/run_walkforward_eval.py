@@ -360,10 +360,15 @@ def _save_npz(path: Path, payload: Dict[str, np.ndarray]) -> None:
 def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_config: DataConfig) -> DatasetArtifacts:
     datasets_dir.mkdir(parents=True, exist_ok=True)
 
+    def _bq_timestamp(ts: pd.Timestamp) -> str:
+        ts_utc = ts.tz_convert("UTC") if ts.tzinfo is not None else ts.tz_localize("UTC")
+        formatted = ts_utc.strftime("%Y-%m-%d %H:%M:%S")
+        return f"TIMESTAMP('{formatted} UTC')"
+
     where_clause = " AND ".join(
         [
-            f"ts >= '{window.train_start.isoformat()}'",
-            f"ts < '{window.test_end.isoformat()}'",
+            f"ts >= {_bq_timestamp(window.train_start)}",
+            f"ts < {_bq_timestamp(window.test_end)}",
         ]
     )
 
