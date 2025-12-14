@@ -382,8 +382,10 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
         max_micros = max_seconds * 1_000_000
 
         raw_str = f"SAFE_CAST({column} AS STRING)"
-        clean_digits = f"REGEXP_REPLACE({raw_str}, r'[^0-9]')"
+        clean_digits = f"REGEXP_REPLACE({raw_str}, r'[^0-9]', '')"
         digits_int = f"SAFE_CAST({clean_digits} AS INT64)"
+
+        nanos_to_micros = f"DIV({digits_int}, 1000)"
 
         parts: List[str] = [
             "(CASE",
@@ -391,12 +393,12 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
             # ISO 8601 variants (with optional timezone), e.g. 2024-01-01T00:00:00Z
             f" WHEN REGEXP_CONTAINS({raw_str}, r'^\\d{{4}}-\\d{{2}}-\\d{{2}}') THEN SAFE.PARSE_TIMESTAMP('%Y-%m-%dT%H:%M:%E*S%Ez', {raw_str})",
             # Compact calendar encodings: YYYYMMDDHHMMSS or shorter variants.
-            f" WHEN LENGTH({clean_digits}) = 14 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {clean_digits})",
-            f" WHEN LENGTH({clean_digits}) = 12 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {clean_digits} || '00')",
-            f" WHEN LENGTH({clean_digits}) = 10 THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {clean_digits} || '0000')",
+            f" WHEN LENGTH({clean_digits}) = 14 AND REGEXP_CONTAINS({clean_digits}, r'^(19|20)') THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {clean_digits})",
+            f" WHEN LENGTH({clean_digits}) = 12 AND REGEXP_CONTAINS({clean_digits}, r'^(19|20)') THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {clean_digits} || '00')",
+            f" WHEN LENGTH({clean_digits}) = 10 AND REGEXP_CONTAINS({clean_digits}, r'^(19|20)') THEN SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', {clean_digits} || '0000')",
             # Epoch encodings.
-            f" WHEN LENGTH({clean_digits}) = 19 AND {digits_int} BETWEEN {min_micros} AND {max_micros} THEN TIMESTAMP_MICROS({digits_int})",
-            f" WHEN LENGTH({clean_digits}) = 16 AND {digits_int} BETWEEN {min_micros} AND {max_micros} THEN TIMESTAMP_MICROS({digits_int})",
+            f" WHEN LENGTH({clean_digits}) = 19 AND {nanos_to_micros} BETWEEN {min_micros} AND {max_micros} THEN TIMESTAMP_MICROS({nanos_to_micros})",
+            f" WHEN LENGTH({clean_digits}) BETWEEN 15 AND 16 AND {digits_int} BETWEEN {min_micros} AND {max_micros} THEN TIMESTAMP_MICROS({digits_int})",
             f" WHEN LENGTH({clean_digits}) = 13 AND {digits_int} BETWEEN {min_millis} AND {max_millis} THEN TIMESTAMP_MILLIS({digits_int})",
             f" WHEN LENGTH({clean_digits}) = 10 AND {digits_int} BETWEEN {min_seconds} AND {max_seconds} THEN TIMESTAMP_SECONDS({digits_int})",
             # Fallback: try friendly parsing with space-separated timestamp.
