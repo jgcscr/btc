@@ -14,23 +14,6 @@ preprocessing:
 
 data: {}
 
-models:
-  xgb_ret1h:
-    strategy: reuse
-    source_dir: artifacts/models/xgb_ret1h_v1
-  xgb_dir1h:
-    strategy: reuse
-    source_dir: artifacts/models/xgb_dir1h_v1
-  transformer_dir1h_optuna:
-    strategy: retrain_optuna
-    script: src/scripts/search_transformer_optuna.py
-    n_trials: 3
-    seq_len: 24
-    timeout_seconds: 3600
+models: {}
 
-backtests:
-  ensemble:
-    script: src/scripts/evaluate_ensemble_signals.py
-    thresholds:
-      p_up_min: 0.6
-      ret_min: 0.0005
+backtests: {}
