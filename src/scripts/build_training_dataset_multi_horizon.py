@@ -12,12 +12,16 @@ from src.config import (
     PROJECT_ID,
 )
 from src.data.bq_loader import load_btc_features_1h
-from src.data.dataset_preparation import make_features_and_target, time_series_train_val_test_split
+from src.data.dataset_preparation import (
+    enforce_unique_hourly_index,
+    make_features_and_target,
+    time_series_train_val_test_split,
+)
 from src.data.onchain_loader import fetch_onchain_metrics, load_onchain_cached, OnchainAPIError
 from src.data.targets_multi_horizon import add_multi_horizon_targets
 
 
-DEFAULT_HORIZONS: List[int] = [1, 4]
+DEFAULT_HORIZONS: List[int] = [1, 4, 8, 12]
 PROCESSED_PATHS = [
     Path("data/processed/macro/hourly_features.parquet"),
     Path("data/processed/onchain/hourly_features.parquet"),
@@ -25,6 +29,27 @@ PROCESSED_PATHS = [
     Path("data/processed/coinapi/market_hourly_features.parquet"),
     Path("data/processed/coinapi/funding_hourly_features.parquet"),
     Path("data/processed/cryptoquant/hourly_features.parquet"),
+]
+
+CORE_MODEL_FEATURES = [
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+    "num_trades",
+    "fut_open",
+    "fut_high",
+    "fut_low",
+    "fut_close",
+    "fut_volume",
+    "open_interest",
+    "funding_rate",
+    "ma_close_7h",
+    "ma_close_24h",
+    "ma_ratio_7_24",
+    "vol_24h",
 ]
 
 
@@ -46,7 +71,10 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
         raise RuntimeError("Expected 'ts' column in curated features for feature alignment.")
 
     augmented = df.copy()
-    augmented["ts"] = pd.to_datetime(augmented["ts"], utc=True)
+    augmented["ts"] = pd.to_datetime(augmented["ts"], utc=True, errors="coerce")
+    augmented = augmented.dropna(subset=["ts"]).reset_index(drop=True)
+    augmented["ts"] = augmented["ts"].dt.floor("h")
+    augmented = augmented.drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
 
     for path in paths:
         if not path.exists():
@@ -61,7 +89,10 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
         if "timestamp" in extra.columns:
             extra = extra.rename(columns={"timestamp": "ts"})
 
-        extra["ts"] = pd.to_datetime(extra["ts"], utc=True)
+        extra["ts"] = pd.to_datetime(extra["ts"], utc=True, errors="coerce")
+        extra = extra.dropna(subset=["ts"]).reset_index(drop=True)
+        extra["ts"] = extra["ts"].dt.floor("h")
+        extra = extra.drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
 
         columns_before = set(augmented.columns)
         augmented = augmented.merge(extra, on="ts", how="left")
@@ -74,6 +105,11 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
         else:
             print(f"No new columns merged from {path}; check schema overlap.")
 
+    augmented = (
+        augmented.sort_values("ts")
+        .drop_duplicates(subset="ts", keep="last")
+        .reset_index(drop=True)
+    )
     return _add_cryptoquant_flags(augmented)
 
 
@@ -113,8 +149,34 @@ def build_multi_horizon_dataset(
     if df.empty:
         raise RuntimeError("Loaded empty DataFrame from BigQuery; check curated features table content.")
 
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df = df.dropna(subset=["ts"]).reset_index(drop=True)
+    df, dup_count, gap_count = enforce_unique_hourly_index(
+        df,
+        label="curated_features",
+        raise_on_gap=False,
+        normalize_to_hour=True,
+    )
+    if dup_count == 0 and gap_count == 0:
+        print("[curated_features] Hourly spacing verified; no duplicates detected.")
+    elif gap_count:
+        print(f"[curated_features] Logged {gap_count} non-hourly intervals; upstream gaps remain.")
+
     df = df.sort_values("ts").reset_index(drop=True)
     df = _merge_processed_features(df, PROCESSED_PATHS)
+    df, dup_after_merge, gap_after_merge = enforce_unique_hourly_index(
+        df,
+        label="curated_features_merged",
+        raise_on_gap=False,
+        normalize_to_hour=True,
+    )
+    if dup_after_merge:
+        print(f"[curated_features_merged] Removed {dup_after_merge} duplicates introduced during merge.")
+    if gap_after_merge:
+        print(
+            f"[curated_features_merged] Logged {gap_after_merge} non-hourly intervals after merge; "
+            "downstream consumers should handle upstream gaps."
+        )
 
     df_onchain = None
     if fetch_onchain:
@@ -136,16 +198,17 @@ def build_multi_horizon_dataset(
         metric_cols = [col for col in df_onchain.columns if col != "ts"]
         print(f"Merging on-chain metrics: {metric_cols}")
         df = df.merge(df_onchain, on="ts", how="left")
-
     df_targets = add_multi_horizon_targets(df, horizons=horizons, price_col="close")
 
     ret_cols = [f"ret_{h}h" for h in horizons]
     df_targets = df_targets.dropna(subset=ret_cols)
 
-    X, y_ret1h = make_features_and_target(df_targets, target_column="ret_1h", dropna=False)
-    remove_cols = [f"ret_{h}h" for h in horizons if h != 1] + [f"dir_{h}h" for h in horizons]
-    X = X.drop(columns=remove_cols, errors="ignore")
-
+    X, y_ret1h = make_features_and_target(
+        df_targets,
+        target_column="ret_1h",
+        dropna=False,
+        allowed_features=CORE_MODEL_FEATURES,
+    )
     splits = time_series_train_val_test_split(X, y_ret1h, train_frac=train_frac, val_frac=val_frac)
 
     n_train = splits.X_train.shape[0]
@@ -154,7 +217,7 @@ def build_multi_horizon_dataset(
     if n_train + n_val + splits.X_test.shape[0] != n_total:
         raise RuntimeError("Split sizes do not sum to dataset length; check split configuration.")
 
-    data_ret4h = {h: df_targets[f"ret_{h}h"].to_numpy(dtype=np.float32) for h in horizons if h != 1}
+    data_ret = {h: df_targets[f"ret_{h}h"].to_numpy(dtype=np.float32) for h in horizons if h != 1}
     data_dir = {h: df_targets[f"dir_{h}h"].to_numpy(dtype=np.int8) for h in horizons}
 
     if output_path is None:
@@ -172,7 +235,7 @@ def build_multi_horizon_dataset(
         "direction_threshold": np.array([0.0], dtype=np.float32),
     }
 
-    for horizon, values in data_ret4h.items():
+    for horizon, values in data_ret.items():
         train, val, test = _split_array(values, n_train, n_val)
         save_kwargs[f"y_ret{horizon}h_train"] = train
         save_kwargs[f"y_ret{horizon}h_val"] = val

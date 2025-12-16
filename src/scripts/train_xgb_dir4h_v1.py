@@ -1,22 +1,12 @@
 import argparse
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from xgboost import XGBClassifier
-
-
-REQUIRED_KEYS = {
-    "X_train",
-    "X_val",
-    "X_test",
-    "y_dir4h_train",
-    "y_dir4h_val",
-    "y_dir4h_test",
-    "feature_names",
-}
 
 
 def _load_params_json(params_path: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -31,14 +21,26 @@ def _load_params_json(params_path: Optional[str]) -> Optional[Dict[str, Any]]:
     return loaded
 
 
-def _load_dataset(dataset_path: str) -> Dict[str, Any]:
+def _required_keys(horizon: int) -> set[str]:
+    return {
+        "X_train",
+        "X_val",
+        "X_test",
+        f"y_dir{horizon}h_train",
+        f"y_dir{horizon}h_val",
+        f"y_dir{horizon}h_test",
+        "feature_names",
+    }
+
+
+def _load_dataset(dataset_path: str, horizon: int) -> Dict[str, Any]:
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
 
     data = np.load(dataset_path, allow_pickle=True)
-    missing = [key for key in REQUIRED_KEYS if key not in data]
+    missing = [key for key in _required_keys(horizon) if key not in data]
     if missing:
-        raise KeyError(f"Dataset is missing required keys for 4h direction training: {missing}")
+        raise KeyError(f"Dataset is missing required keys for {horizon}h direction training: {missing}")
 
     threshold_arr = data.get("direction_threshold")
     threshold = float(threshold_arr[0]) if threshold_arr is not None else 0.0
@@ -47,9 +49,9 @@ def _load_dataset(dataset_path: str) -> Dict[str, Any]:
         "X_train": data["X_train"],
         "X_val": data["X_val"],
         "X_test": data["X_test"],
-        "y_train": data["y_dir4h_train"],
-        "y_val": data["y_dir4h_val"],
-        "y_test": data["y_dir4h_test"],
+        "y_train": data[f"y_dir{horizon}h_train"],
+        "y_val": data[f"y_dir{horizon}h_val"],
+        "y_test": data[f"y_dir{horizon}h_test"],
         "feature_names": data["feature_names"].tolist(),
         "threshold": threshold,
     }
@@ -67,10 +69,10 @@ def _evaluate_split(model: XGBClassifier, name: str, X: np.ndarray, y: np.ndarra
     }
 
 
-def train_and_evaluate(dataset_path: str, output_dir: str, params_json: Optional[str]) -> None:
+def train_and_evaluate(dataset_path: str, output_dir: str, params_json: Optional[str], horizon: int) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
-    dataset = _load_dataset(dataset_path)
+    dataset = _load_dataset(dataset_path, horizon=horizon)
     X_train = dataset["X_train"]
     X_val = dataset["X_val"]
     X_test = dataset["X_test"]
@@ -120,12 +122,14 @@ def train_and_evaluate(dataset_path: str, output_dir: str, params_json: Optional
         for entry in metrics
     }
 
-    model_path = os.path.join(output_dir, "xgb_dir4h_model.json")
+    model_path = os.path.join(output_dir, f"xgb_dir{horizon}h_model.json")
     model.save_model(model_path)
 
     metadata = {
         "model_type": "xgboost_classifier",
-        "target": "direction_4h",
+        "target": f"direction_{horizon}h",
+        "horizon_hours": horizon,
+        "trained_at": datetime.now(timezone.utc).isoformat(),
         "threshold": threshold,
         "feature_names": feature_names,
         "metrics": metrics,
@@ -136,9 +140,21 @@ def train_and_evaluate(dataset_path: str, output_dir: str, params_json: Optional
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
+    metadata_simple = {
+        "model_type": "xgboost_classifier",
+        "horizon_hours": horizon,
+        "target": f"dir_{horizon}h",
+        "feature_names": feature_names,
+        "trained_at": metadata["trained_at"],
+        "model_path": model_path,
+        "dataset_path": dataset_path,
+    }
+    with open(os.path.join(output_dir, "metadata.json"), "w", encoding="utf-8") as handle:
+        json.dump(metadata_simple, handle, indent=2)
+
     summary = {
         "model_type": "xgboost_classifier",
-        "target": "direction_4h",
+        "target": f"direction_{horizon}h",
         "dataset_path": dataset_path,
         "threshold": threshold,
         "feature_names": feature_names,
@@ -150,14 +166,14 @@ def train_and_evaluate(dataset_path: str, output_dir: str, params_json: Optional
     with open(summary_path, "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
 
-    print("Saved 4h direction model to:", model_path)
+    print(f"Saved {horizon}h direction model to:", model_path)
     print("Saved metadata to:", meta_path)
     print("Saved summary to:", summary_path)
     print(json.dumps(metrics, indent=2))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train an XGBoost classifier for 4h BTC direction.")
+    parser = argparse.ArgumentParser(description="Train an XGBoost classifier for multi-horizon BTC direction.")
     parser.add_argument(
         "--dataset-path",
         type=str,
@@ -167,7 +183,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="artifacts/models/xgb_dir4h_v1",
+        default=None,
         help="Directory to store the trained direction model and metadata",
     )
     parser.add_argument(
@@ -176,9 +192,25 @@ def main() -> None:
         default=None,
         help="Optional JSON file containing XGBoost hyperparameters to override defaults.",
     )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=4,
+        help="Prediction horizon in hours (e.g., 4, 8, 12).",
+    )
     args = parser.parse_args()
 
-    train_and_evaluate(args.dataset_path, args.output_dir, args.params_json)
+    if args.horizon <= 0:
+        raise SystemExit("--horizon must be a positive integer")
+
+    output_dir = args.output_dir or f"artifacts/models/xgb_dir{args.horizon}h_v1"
+
+    train_and_evaluate(
+        dataset_path=args.dataset_path,
+        output_dir=output_dir,
+        params_json=args.params_json,
+        horizon=args.horizon,
+    )
 
 
 if __name__ == "__main__":

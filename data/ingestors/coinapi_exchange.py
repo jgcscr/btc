@@ -1,4 +1,4 @@
-"""CoinAPI loader for BTCUSDT spot, futures, and funding metrics."""
+"""Market loader fetching Binance US spot and CoinAPI futures/funding metrics."""
 from __future__ import annotations
 
 import argparse
@@ -12,13 +12,20 @@ from urllib.parse import quote
 import pandas as pd
 import requests
 
+from data.ingestors import binance_us_spot
+
 COINAPI_URL = "https://rest.coinapi.io/v1"
 RAW_MARKET_ROOT = Path("data/raw/market/coinapi")
 RAW_FUNDING_ROOT = Path("data/raw/funding/coinapi")
 FUNDING_FAILURE_PATH = Path("artifacts/monitoring/coinapi_funding_failure.json")
-SPOT_SYMBOL_DEFAULT = "BINANCE_SPOT_BTC_USDT"
+SPOT_SYMBOL_DEFAULT = "BTCUSDT"
 FUTURES_SYMBOL_DEFAULT = "BINANCEFTS_PERP_BTC_USDT"
 FUNDING_SYMBOL_DEFAULT = "BINANCEFTS_PERP_BTC_USDT"
+
+
+def _is_env_truthy(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class CoinAPIIngestionError(RuntimeError):
@@ -113,8 +120,32 @@ def _record_funding_failure(
     )
 
 
-def _fetch_funding(symbol_id_hint: str, api_key: str, limit: int) -> Tuple[str, List[dict]]:
-    canonical_symbol, symbols_payload = _discover_funding_symbol(symbol_id_hint, api_key)
+def _resolve_funding_symbol(cli_symbol: str | None) -> tuple[str, bool]:
+    env_symbol = os.getenv("COINAPI_FUNDING_SYMBOL", "").strip()
+    if env_symbol:
+        return env_symbol, False
+
+    if cli_symbol:
+        trimmed = cli_symbol.strip()
+        if trimmed:
+            return trimmed, False
+
+    return FUNDING_SYMBOL_DEFAULT, True
+
+
+def _fetch_funding(
+    symbol_id_hint: str,
+    api_key: str,
+    limit: int,
+    allow_missing: bool,
+    discover_symbol: bool,
+) -> Tuple[str, List[dict]]:
+    symbols_payload: List[dict] = []
+    canonical_symbol = symbol_id_hint
+
+    if discover_symbol:
+        canonical_symbol, symbols_payload = _discover_funding_symbol(symbol_id_hint, api_key)
+
     encoded_symbol = quote(canonical_symbol, safe="")
     url = f"{COINAPI_URL}/futures/funding_rates/{encoded_symbol}"
     params = {"limit": limit}
@@ -135,7 +166,27 @@ def _fetch_funding(symbol_id_hint: str, api_key: str, limit: int) -> Tuple[str, 
     )
 
     if response.status_code == 404:
-        _record_funding_failure(symbol_id_hint, canonical_symbol, request_ts, response.status_code, raw_text, symbols_payload)
+        if allow_missing:
+            if symbols_payload:
+                print(
+                    "CoinAPI funding request returned 404 but RUN_WITHOUT_FUNDING is enabled; "
+                    "proceeding without funding data.",
+                )
+            else:
+                print(
+                    "CoinAPI funding request returned 404 and no discovery payload was available; "
+                    "proceeding without funding data due to RUN_WITHOUT_FUNDING.",
+                )
+            return canonical_symbol, []
+
+        _record_funding_failure(
+            symbol_id_hint,
+            canonical_symbol,
+            request_ts,
+            response.status_code,
+            raw_text,
+            symbols_payload,
+        )
         return canonical_symbol, []
     if response.status_code != 200:
         raise CoinAPIIngestionError(
@@ -214,23 +265,43 @@ def ingest_coinapi(
     limit: int,
     spot_symbol: str = SPOT_SYMBOL_DEFAULT,
     futures_symbol: str = FUTURES_SYMBOL_DEFAULT,
-    funding_symbol: str = FUNDING_SYMBOL_DEFAULT,
+    funding_symbol: str | None = None,
+    spot_start: str | None = None,
+    spot_end: str | None = None,
+    spot_interval: str = "1h",
+    spot_symbol_id: str = binance_us_spot.DEFAULT_SYMBOL_ID,
 ) -> Tuple[List[Path], List[Path]]:
     api_key = _require_api_key()
     market_paths: List[Path] = []
     funding_paths: List[Path] = []
 
-    spot_records = _fetch_ohlcv(spot_symbol, api_key, period_id, limit)
-    spot_frame = _ohlcv_to_tidy(spot_symbol, "spot", spot_records)
-    market_paths.append(_write_parquet(spot_frame, RAW_MARKET_ROOT, "spot", spot_symbol))
-    print(f"Saved {len(spot_frame)} spot metric rows to {market_paths[-1]}")
+    run_without_funding = _is_env_truthy("RUN_WITHOUT_FUNDING")
+    funding_symbol_hint, should_discover_funding = _resolve_funding_symbol(funding_symbol)
+
+    spot_path = binance_us_spot.ingest_binance_us_spot(
+        symbol=spot_symbol,
+        interval=spot_interval,
+        start=spot_start,
+        end=spot_end,
+        limit=limit,
+        output_root=binance_us_spot.RAW_MARKET_ROOT,
+        symbol_id=spot_symbol_id,
+    )
+    market_paths.append(spot_path)
+    print(f"Saved Binance US spot metrics to {spot_path}")
 
     futures_records = _fetch_ohlcv(futures_symbol, api_key, period_id, limit)
     futures_frame = _ohlcv_to_tidy(futures_symbol, "futures", futures_records)
     market_paths.append(_write_parquet(futures_frame, RAW_MARKET_ROOT, "futures", futures_symbol))
     print(f"Saved {len(futures_frame)} futures metric rows to {market_paths[-1]}")
 
-    resolved_symbol, funding_records = _fetch_funding(funding_symbol, api_key, limit)
+    resolved_symbol, funding_records = _fetch_funding(
+        symbol_id_hint=funding_symbol_hint,
+        api_key=api_key,
+        limit=limit,
+        allow_missing=run_without_funding,
+        discover_symbol=should_discover_funding,
+    )
     if funding_records:
         funding_frame = _funding_to_tidy(resolved_symbol, funding_records)
         if not funding_frame.empty:
@@ -238,6 +309,9 @@ def ingest_coinapi(
             print(f"Saved {len(funding_frame)} funding records to {funding_paths[-1]}")
         else:
             print("CoinAPI funding payload empty; nothing written.")
+    else:
+        if run_without_funding:
+            print("RUN_WITHOUT_FUNDING enabled and no funding records returned; continuing without funding parquet.")
 
     return market_paths, funding_paths
 
@@ -246,9 +320,37 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch BTCUSDT market and funding data from CoinAPI.")
     parser.add_argument("--period-id", default="1HRS", help="Period identifier (default: 1HRS).")
     parser.add_argument("--limit", type=int, default=720, help="Number of rows to fetch (default: 720).")
-    parser.add_argument("--spot-symbol", default=SPOT_SYMBOL_DEFAULT, help="CoinAPI symbol ID for spot data.")
+    parser.add_argument(
+        "--spot-symbol",
+        default=SPOT_SYMBOL_DEFAULT,
+        help="Binance US trading symbol for spot data (default: BTCUSDT).",
+    )
+    parser.add_argument(
+        "--spot-interval",
+        default="1h",
+        help="Binance US interval for spot klines (default: 1h).",
+    )
+    parser.add_argument(
+        "--spot-start",
+        default=None,
+        help="UTC ISO timestamp for first spot kline open time (defaults to limit window).",
+    )
+    parser.add_argument(
+        "--spot-end",
+        default=None,
+        help="UTC ISO timestamp for last spot kline open time (defaults to latest completed candle).",
+    )
+    parser.add_argument(
+        "--spot-symbol-id",
+        default=binance_us_spot.DEFAULT_SYMBOL_ID,
+        help="Symbol identifier stored in tidy spot parquet (default aligns with BTCUSDT).",
+    )
     parser.add_argument("--futures-symbol", default=FUTURES_SYMBOL_DEFAULT, help="CoinAPI symbol ID for futures data.")
-    parser.add_argument("--funding-symbol", default=FUNDING_SYMBOL_DEFAULT, help="CoinAPI symbol ID for funding data.")
+    parser.add_argument(
+        "--funding-symbol",
+        default=None,
+        help="CoinAPI symbol ID for funding data (overrides COINAPI_FUNDING_SYMBOL).",
+    )
     return parser.parse_args()
 
 
@@ -258,6 +360,10 @@ def main() -> None:
         period_id=args.period_id,
         limit=args.limit,
         spot_symbol=args.spot_symbol,
+        spot_interval=args.spot_interval,
+        spot_start=args.spot_start,
+        spot_end=args.spot_end,
+        spot_symbol_id=args.spot_symbol_id,
         futures_symbol=args.futures_symbol,
         funding_symbol=args.funding_symbol,
     )

@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import optuna
@@ -187,11 +187,17 @@ def _retrain_best(args: argparse.Namespace, splits: DatasetSplits, best_params: 
     }
 
 
-def _save_outputs(output_dir: str, model, summary: Dict[str, Dict[str, float]]):
+def _save_outputs(
+    output_dir: str,
+    mode: str,
+    model,
+    summary: Dict[str, Dict[str, float]],
+    feature_names: List[str],
+) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
-    model_path = os.path.join(output_dir, "best_model.json")
-    model.save_model(model_path)
+    legacy_model_path = os.path.join(output_dir, "best_model.json")
+    model.save_model(legacy_model_path)
 
     summary_path = os.path.join(output_dir, "best_summary.json")
     with open(summary_path, "w", encoding="utf-8") as handle:
@@ -200,6 +206,30 @@ def _save_outputs(output_dir: str, model, summary: Dict[str, Dict[str, float]]):
     legacy_path = os.path.join(output_dir, "summary.json")
     with open(legacy_path, "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
+
+    if mode == "reg":
+        model_filename = "xgb_ret1h_model.json"
+        metadata_filename = "model_metadata.json"
+        metadata_payload: Dict[str, Any] = {
+            "model_type": "xgboost",
+            "target": "ret_1h",
+            "feature_names": feature_names,
+            "summary": summary,
+        }
+    else:
+        model_filename = "xgb_dir1h_model.json"
+        metadata_filename = "model_metadata_direction.json"
+        metadata_payload = {
+            "model_type": "xgboost_classifier",
+            "target": "direction_1h",
+            "threshold": 0.0,
+            "feature_names": feature_names,
+            "summary": summary,
+        }
+
+    model.save_model(os.path.join(output_dir, model_filename))
+    with open(os.path.join(output_dir, metadata_filename), "w", encoding="utf-8") as handle:
+        json.dump(metadata_payload, handle, indent=2)
 
 
 def main() -> None:
@@ -247,7 +277,7 @@ def main() -> None:
         },
     }
 
-    _save_outputs(args.output_dir, model, summary)
+    _save_outputs(args.output_dir, args.mode, model, summary, prepared.feature_names)
     print(f"Saved best model and summary to {args.output_dir}")
 
 

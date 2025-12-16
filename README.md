@@ -32,6 +32,44 @@ Set the following environment variables for premium data access:
 These providers are now in active use. Free endpoints are no longer sufficient for full feature coverage.
 
 
+## Quick Manual Prediction
+
+Run the all-in-one refresh script to rebuild features, regenerate datasets, and emit 1h/4h/8h/12h predictions. The command writes `artifacts/predictions/latest.json` and appends to `artifacts/predictions/history.json`.
+
+```bash
+# Full refresh with live ingestion
+python -m src.scripts.run_refresh_and_predict --targets 1,4,8,12
+
+# CI-friendly smoke test (skips network calls and emits stub predictions)
+python -m src.scripts.run_refresh_and_predict --dry-run --targets 1,4,8,12
+```
+
+Example `latest.json` payload (values truncated):
+
+```json
+{
+	"generated_at": "2025-12-16T16:41:13.731354+00:00",
+	"predictions": {
+		"1h": {
+			"timestamp": "2025-12-16T00:00:00Z",
+			"horizon_hours": 1,
+			"close": 86486.12,
+			"p_up": 0.4756,
+			"ret_pred": 0.0010,
+			"projected_price": 86573.57,
+			"signal_ensemble": 1,
+			"signal_dir_only": 0
+		},
+		"4h": { "...": "..." },
+		"8h": { "...": "..." },
+		"12h": { "...": "..." }
+	}
+}
+```
+
+Pipeline regression tests covering the CLI live in `tests/pipeline/` and can be executed via `pytest tests/pipeline -q`.
+
+
 ## 2. Ingestion and Feature Engineering Overview
 
 ### Active Data Loaders

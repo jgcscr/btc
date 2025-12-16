@@ -52,6 +52,7 @@ class ModelConfig:
     strategy: str
     source_dir: Optional[Path]
     script: Optional[str]
+    mode: Optional[str]
     n_trials: Optional[int]
     seq_len: Optional[int]
     timeout_seconds: Optional[int]
@@ -271,13 +272,20 @@ def _load_config(path: Path) -> HarnessConfig:
 
     models: List[ModelConfig] = []
     for name, cfg in models_raw.items():
+        raw_mode = cfg.get("mode")
+        mode = str(raw_mode).lower() if raw_mode is not None else None
+
+        raw_trials = cfg.get("n_trials", cfg.get("trials"))
+        n_trials = int(raw_trials) if raw_trials is not None else None
+
         models.append(
             ModelConfig(
                 name=name,
                 strategy=str(cfg.get("strategy", "reuse")),
                 source_dir=Path(cfg["source_dir"]) if cfg.get("source_dir") else None,
                 script=cfg.get("script"),
-                n_trials=int(cfg["n_trials"]) if cfg.get("n_trials") is not None else None,
+                mode=mode,
+                n_trials=n_trials,
                 seq_len=int(cfg["seq_len"]) if cfg.get("seq_len") is not None else None,
                 timeout_seconds=int(cfg["timeout_seconds"]) if cfg.get("timeout_seconds") is not None else None,
             )
@@ -620,26 +628,45 @@ def _handle_models(models: List[ModelConfig], datasets: DatasetArtifacts, models
             seq = cfg.seq_len or seq_len
             target_dir.mkdir(parents=True, exist_ok=True)
 
-            cmd = [
-                sys.executable,
-                "-m",
-                script.replace(".py", "").replace("/", "."),
-                "--dataset-path",
-                str(datasets.direction_path),
-                "--seq-len",
-                str(seq),
-                "--n-trials",
-                str(trials),
-                "--output-dir",
-                str(target_dir),
-                "--device",
-                "cpu",
-            ]
-            if cfg.timeout_seconds:
-                cmd.extend(["--timeout", str(cfg.timeout_seconds)])
+            module_path = script.replace(".py", "").replace("/", ".")
+            cmd = [sys.executable, "-m", module_path]
 
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = ""
+
+            if module_path.endswith("search_xgb_optuna"):
+                mode = cfg.mode or "reg"
+                dataset_path = datasets.regression_path if mode == "reg" else datasets.direction_path
+                cmd.extend([
+                    "--dataset-path",
+                    str(dataset_path),
+                    "--mode",
+                    mode,
+                    "--n-trials",
+                    str(trials),
+                    "--output-dir",
+                    str(target_dir),
+                ])
+                if cfg.timeout_seconds:
+                    cmd.extend(["--timeout", str(cfg.timeout_seconds)])
+            else:
+                cmd.extend([
+                    "--dataset-path",
+                    str(datasets.direction_path),
+                    "--seq-len",
+                    str(seq),
+                    "--n-trials",
+                    str(trials),
+                    "--output-dir",
+                    str(target_dir),
+                    "--device",
+                    "cpu",
+                ])
+                if cfg.timeout_seconds:
+                    cmd.extend(["--timeout", str(cfg.timeout_seconds)])
+
+                if cfg.mode:
+                    cmd.extend(["--mode", cfg.mode])
 
             result = _run_subprocess(cmd, cwd=None, env=env, capture=True)
             summaries[cfg.name] = "retrained via Optuna"

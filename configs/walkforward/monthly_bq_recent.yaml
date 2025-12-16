@@ -14,6 +14,25 @@ preprocessing:
 
 data: {}
 
-models: {}
+models:
+  xgb_ret1h:
+    script: src/scripts/search_xgb_optuna.py
+    strategy: retrain_optuna
+    mode: reg
+    trials: 5
+    timeout_seconds: 900
+    seq_len: 24
+  xgb_dir1h:
+    script: src/scripts/search_xgb_optuna.py
+    strategy: retrain_optuna
+    mode: dir
+    trials: 5
+    timeout_seconds: 900
+    seq_len: 24
 
-backtests: {}
+backtests:
+  ensemble:
+    script: src/scripts/evaluate_ensemble_signals.py
+    thresholds:
+      p_up_min: 0.5
+      ret_min: 0.0002

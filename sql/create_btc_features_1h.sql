@@ -8,7 +8,7 @@ WITH spot AS (
     close,
     volume,
     quote_volume,
-    num_trades
+     SAFE_CAST(num_trades AS FLOAT64) AS num_trades_float
   FROM `jc-financial-466902.btc_forecast_raw.spot_klines`
   WHERE `interval` = '1h'
 ),
@@ -34,14 +34,14 @@ joined AS (
     s.close,
     s.volume,
     s.quote_volume,
-    s.num_trades,
-    f.fut_open,
-    f.fut_high,
-    f.fut_low,
-    f.fut_close,
-    f.fut_volume,
-    f.open_interest,
-    f.funding_rate
+      s.num_trades_float AS num_trades,
+    COALESCE(f.fut_open, s.open) AS fut_open,
+    COALESCE(f.fut_high, s.high) AS fut_high,
+    COALESCE(f.fut_low, s.low) AS fut_low,
+    COALESCE(f.fut_close, s.close) AS fut_close,
+    COALESCE(f.fut_volume, 0.0) AS fut_volume,
+    COALESCE(f.open_interest, 0.0) AS open_interest,
+    COALESCE(f.funding_rate, 0.0) AS funding_rate
   FROM spot s
   LEFT JOIN fut f
     ON f.fut_ts = s.ts
@@ -62,7 +62,11 @@ features AS (
     -- Optional forward-looking 3h log return target (USES FUTURE DATA)
     -- Only use this as a supervised target, never as an input feature.
     LEAD(SAFE.LOG(close), 3) OVER (ORDER BY ts)
-      - SAFE.LOG(close) AS ret_fwd_3h
+      - SAFE.LOG(close) AS ret_fwd_3h,
+
+    -- Forward-looking 4h log return target for multi-horizon models (USES FUTURE DATA)
+    LEAD(SAFE.LOG(close), 4) OVER (ORDER BY ts)
+      - SAFE.LOG(close) AS ret_4h
   FROM with_returns
 )
 SELECT
@@ -85,6 +89,7 @@ SELECT
   -- Targets
   ret_1h,
   ret_fwd_3h,
+  ret_4h,
 
   -- Rolling 7h and 24h moving averages of close (backward-looking only)
   AVG(close) OVER (

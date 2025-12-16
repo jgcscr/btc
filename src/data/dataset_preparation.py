@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -17,10 +17,65 @@ class DatasetSplits:
     feature_names: List[str]
 
 
+def enforce_unique_hourly_index(
+    df: pd.DataFrame,
+    *,
+    time_column: str = "ts",
+    label: str = "frame",
+    expected_freq: pd.Timedelta | str = pd.Timedelta(hours=1),
+    raise_on_gap: bool = True,
+    normalize_to_hour: bool = False,
+) -> tuple[pd.DataFrame, int, int]:
+    """Ensure a dataframe has unique, hourly-spaced timestamps.
+
+    Returns a tuple of (clean dataframe, duplicates_removed, gap_count).
+    Duplicates are resolved by keeping the latest row for each timestamp.
+    Any non-hourly intervals trigger a log; optionally raise when detected.
+    """
+
+    if time_column not in df.columns:
+        raise ValueError(f"{label} is missing required column: {time_column}")
+
+    clean = df.copy()
+    clean[time_column] = pd.to_datetime(clean[time_column], utc=True, errors="coerce")
+    if clean[time_column].isna().any():
+        raise ValueError(f"{label} contains unparsable timestamps in {time_column}")
+
+    clean = clean.sort_values(time_column).reset_index(drop=True)
+
+    if normalize_to_hour:
+        clean[time_column] = clean[time_column].dt.floor("h")
+        clean = clean.sort_values(time_column).reset_index(drop=True)
+
+    before = len(clean)
+    clean = clean.drop_duplicates(subset=time_column, keep="last").reset_index(drop=True)
+    duplicates_removed = before - len(clean)
+    if duplicates_removed:
+        print(f"[{label}] Dropped {duplicates_removed} duplicate rows; kept latest entries.")
+
+    expected_delta = pd.Timedelta(expected_freq)
+    deltas = clean[time_column].diff().dropna()
+    anomaly_mask = deltas != expected_delta
+    gap_count = int(anomaly_mask.sum())
+    if gap_count:
+        anomaly_ts = clean.loc[anomaly_mask.index, time_column]
+        first_issue = anomaly_ts.iloc[0].isoformat()
+        last_issue = anomaly_ts.iloc[-1].isoformat()
+        print(
+            f"[{label}] Found {gap_count} non-hourly intervals between timestamps. "
+            f"First anomaly at {first_issue}, last at {last_issue}."
+        )
+        if raise_on_gap:
+            raise AssertionError(f"{label} violates expected {expected_delta} spacing; see log above.")
+
+    return clean, duplicates_removed, gap_count
+
+
 def make_features_and_target(
     df: pd.DataFrame,
     target_column: str = "ret_1h",
     dropna: bool = True,
+    allowed_features: Optional[Sequence[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.Series]:
     """Create feature matrix X and target y from the curated features table.
 
@@ -38,8 +93,14 @@ def make_features_and_target(
 
     y = df[target_column].copy()
 
-    non_feature_cols = {"ts", target_column, "ret_fwd_3h"}
+    non_feature_cols = {"ts", target_column, "ret_fwd_3h", "ret_4h"}
     feature_cols = [c for c in df.columns if c not in non_feature_cols]
+
+    if allowed_features is not None:
+        missing = [col for col in allowed_features if col not in feature_cols]
+        if missing:
+            raise ValueError(f"Missing required feature columns: {missing}")
+        feature_cols = list(allowed_features)
 
     X = df[feature_cols].copy()
 

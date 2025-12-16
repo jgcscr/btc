@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 MARKET_RAW_ROOT = Path("data/raw/market/coinapi")
+BINANCEUS_MARKET_ROOT = Path("data/raw/market/binanceus")
 FUNDING_RAW_ROOT = Path("data/raw/funding/coinapi")
 MARKET_OUTPUT = Path("data/processed/coinapi/market_hourly_features.parquet")
 FUNDING_OUTPUT = Path("data/processed/coinapi/funding_hourly_features.parquet")
@@ -20,14 +21,19 @@ class CoinAPIProcessingError(RuntimeError):
     """Raised when no CoinAPI raw data is available."""
 
 
-def _load_tidy_frames(root: Path) -> list[pd.DataFrame]:
+def _load_tidy_frames(root: Path, allowed_prefixes: tuple[str, ...] | None = None) -> list[pd.DataFrame]:
     frames: list[pd.DataFrame] = []
     if not root.exists():
         return frames
     for parquet_path in root.rglob("*.parquet"):
         frame = pd.read_parquet(parquet_path)
         if {"ts", "metric", "value"}.issubset(frame.columns):
-            frames.append(frame[["ts", "metric", "value"]])
+            subset = frame[["ts", "metric", "value"]]
+            if allowed_prefixes:
+                mask = subset["metric"].astype(str).str.startswith(allowed_prefixes)
+                subset = subset[mask]
+            if not subset.empty:
+                frames.append(subset)
     return frames
 
 
@@ -42,7 +48,7 @@ def _pivot(frames: Iterable[pd.DataFrame], prefix: str) -> pd.DataFrame:
 
     pivot = tidy.pivot_table(index="ts", columns="metric", values="value", aggfunc="last")
     pivot = pivot.sort_index()
-    resampled = pivot.resample("1H").ffill()
+    resampled = pivot.resample("1h").ffill()
     resampled.columns = [f"{prefix}_{col}" for col in resampled.columns]
     resampled = resampled.reset_index().rename(columns={"ts": "timestamp"})
     if prefix == "coinapi":
@@ -136,7 +142,11 @@ def process_coinapi_features(
     market_output: Path = MARKET_OUTPUT,
     funding_output: Path = FUNDING_OUTPUT,
 ) -> tuple[Path, Path | None]:
-    market_frames = _load_tidy_frames(market_root)
+    spot_frames = _load_tidy_frames(BINANCEUS_MARKET_ROOT, allowed_prefixes=("spot_",))
+    if not spot_frames:
+        spot_frames = _load_tidy_frames(market_root, allowed_prefixes=("spot_",))
+    futures_frames = _load_tidy_frames(market_root, allowed_prefixes=("futures_",))
+    market_frames = spot_frames + futures_frames
     market = _pivot(market_frames, "coinapi")
     market_output.parent.mkdir(parents=True, exist_ok=True)
     market.to_parquet(market_output, index=False)

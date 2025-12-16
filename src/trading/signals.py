@@ -13,9 +13,11 @@ from xgboost import XGBClassifier, XGBRegressor
 
 from src.config import PROJECT_ID, BQ_DATASET_CURATED, BQ_TABLE_FEATURES_1H
 from src.data.bq_loader import load_btc_features_1h
-from src.data.dataset_preparation import make_features_and_target
+from src.data.dataset_preparation import enforce_unique_hourly_index, make_features_and_target
 from src.data.onchain_loader import load_onchain_cached
 from src.data.targets_multi_horizon import add_multi_horizon_targets
+from src.scripts.build_training_dataset import PROCESSED_PATHS as REG_PROCESSED_PATHS
+from src.scripts.build_training_dataset import _merge_processed_features as merge_curated_features
 from src.training.lstm_model import LSTMDirectionClassifier
 from src.models.transformer_classifier import TransformerDirectionClassifier
 from src.trading.ensembles import simple_average, weighted_average
@@ -81,12 +83,27 @@ def _build_features_from_csv(
         raise ValueError("Features CSV must include a 'ts' column.")
 
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
-    df = df.sort_values("ts").reset_index(drop=True)
+    df, _, gap_csv = enforce_unique_hourly_index(
+        df,
+        label="offline_features",
+        raise_on_gap=False,
+    )
+    if gap_csv:
+        print(f"[offline_features] Logged {gap_csv} non-hourly intervals; proceeding with gaps.")
 
     if onchain_path:
         df_onchain = load_onchain_cached(onchain_path)
         df_onchain = df_onchain.set_index("ts").reindex(df["ts"]).ffill().bfill().reset_index()
         df = df.merge(df_onchain, on="ts", how="left")
+        df, _, gap_csv_merged = enforce_unique_hourly_index(
+            df,
+            label="offline_features_merged",
+            raise_on_gap=False,
+        )
+        if gap_csv_merged:
+            print(
+                f"[offline_features_merged] Logged {gap_csv_merged} non-hourly intervals after merge; proceeding with gaps."
+            )
 
     df_targets = add_multi_horizon_targets(df, horizons=horizons, price_col="close")
     ret_cols = [f"ret_{h}h" for h in horizons]
@@ -135,11 +152,28 @@ def prepare_data_for_signals(
             feature_names = list(X_all.columns)
     else:
         df_all_raw = _load_full_features_df()
+        df_all_raw, _, gap_live = enforce_unique_hourly_index(
+            df_all_raw,
+            label="curated_features_live",
+            raise_on_gap=False,
+        )
+        if gap_live:
+            print(f"[curated_features_live] Logged {gap_live} non-hourly intervals; upstream feed has gaps.")
         if "ts" not in df_all_raw.columns:
             raise ValueError("Expected a 'ts' column in the curated features table.")
 
         df_all_sorted = df_all_raw.sort_values("ts").reset_index(drop=True)
-        df_all = df_all_sorted.dropna(subset=[target_column]).reset_index(drop=True)
+        df_all_augmented = merge_curated_features(df_all_sorted, REG_PROCESSED_PATHS)
+        df_all_augmented, _, gap_live_merged = enforce_unique_hourly_index(
+            df_all_augmented,
+            label="curated_features_live_merged",
+            raise_on_gap=False,
+        )
+        if gap_live_merged:
+            print(
+                f"[curated_features_live_merged] Logged {gap_live_merged} non-hourly intervals after merge; upstream feed has gaps."
+            )
+        df_all = df_all_augmented.dropna(subset=[target_column]).reset_index(drop=True)
 
         non_feature_cols = {"ts", target_column, "ret_fwd_3h"}
         feature_cols = [c for c in df_all.columns if c not in non_feature_cols]
@@ -202,6 +236,7 @@ def prepare_data_for_signals_from_ohlcv(
         raise ValueError(f"Dataframe missing required feature columns: {sorted(missing)}")
 
     df_all = df_features.sort_values("ts").reset_index(drop=True)
+    df_all, _, _ = enforce_unique_hourly_index(df_all, label="realtime_features")
     X_all_ordered = df_all[feature_names].copy()
 
     n_rows = len(X_all_ordered)

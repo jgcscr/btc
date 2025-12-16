@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -13,6 +14,11 @@ from src.data.binance_klines import fetch_funding_rates
 RAW_ROOT = Path("data/raw/funding/binance")
 OUTPUT_PATH = Path("data/processed/funding/hourly_features.parquet")
 SUMMARY_PATH = Path("artifacts/monitoring/funding_summary.json")
+
+
+def _is_env_truthy(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class FundingProcessingError(RuntimeError):
@@ -60,13 +66,25 @@ def _pivot_hourly(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
 
     pivot = tidy.pivot_table(index="ts", columns="metric", values="value", aggfunc="last")
     pivot = pivot.sort_index()
-    hourly = pivot.resample("1H").ffill()
+    hourly = pivot.resample("1h").ffill()
     hourly.columns = [f"funding_{col}" for col in hourly.columns]
     derived = hourly.copy()
     for column in hourly.columns:
         derived[f"{column}_annualized"] = hourly[column] * 3 * 365  # funding occurs every 8 hours
     derived = derived.reset_index().rename(columns={"ts": "timestamp"})
     return derived
+
+
+def _empty_hourly_frame(pair: str) -> pd.DataFrame:
+    metric_col = f"funding_{pair}_funding_rate"
+    annualized_col = f"{metric_col}_annualized"
+    return pd.DataFrame(
+        {
+            "timestamp": pd.DatetimeIndex([], tz="UTC"),
+            metric_col: pd.Series(dtype="float64"),
+            annualized_col: pd.Series(dtype="float64"),
+        }
+    )
 
 
 def _write_summary(frame: pd.DataFrame, path: Path) -> None:
@@ -94,6 +112,7 @@ def process_funding_features(
     pair: str,
     live_fetch: bool,
     live_limit: int,
+    allow_missing: bool,
     raw_root: Path = RAW_ROOT,
     output_path: Path = OUTPUT_PATH,
 ) -> Path:
@@ -102,7 +121,18 @@ def process_funding_features(
         _write_raw(live_frame, pair, raw_root)
 
     frames = _load_tidy_frames(raw_root)
-    hourly = _pivot_hourly(frames)
+    if not frames:
+        if not allow_missing:
+            raise FundingProcessingError("No funding raw data found; enable --allow-missing or RUN_WITHOUT_FUNDING to proceed.")
+
+        print(
+            "Funding features: no raw inputs detected but RUN_WITHOUT_FUNDING/--allow-missing is set; "
+            "writing empty funding feature parquet.",
+        )
+        hourly = _empty_hourly_frame(pair)
+    else:
+        hourly = _pivot_hourly(frames)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     hourly.to_parquet(output_path, index=False)
     _write_summary(hourly, SUMMARY_PATH)
@@ -135,15 +165,22 @@ def _parse_args() -> argparse.Namespace:
         default=OUTPUT_PATH,
         help="Output parquet path (default: data/processed/funding/hourly_features.parquet).",
     )
+    parser.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help="Allow missing funding inputs and emit an empty parquet instead of raising.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    allow_missing = args.allow_missing or _is_env_truthy("RUN_WITHOUT_FUNDING")
     output_path = process_funding_features(
         pair=args.pair,
         live_fetch=args.fetch,
         live_limit=args.limit,
+        allow_missing=allow_missing,
         raw_root=args.raw_root,
         output_path=args.output,
     )

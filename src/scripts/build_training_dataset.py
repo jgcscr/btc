@@ -9,7 +9,11 @@ import pandas as pd
 
 from src.config import PROJECT_ID, BQ_DATASET_CURATED, BQ_TABLE_FEATURES_1H
 from src.data.bq_loader import load_btc_features_1h
-from src.data.dataset_preparation import make_features_and_target, time_series_train_val_test_split
+from src.data.dataset_preparation import (
+    enforce_unique_hourly_index,
+    make_features_and_target,
+    time_series_train_val_test_split,
+)
 
 
 PROCESSED_PATHS = [
@@ -19,6 +23,27 @@ PROCESSED_PATHS = [
     Path("data/processed/coinapi/market_hourly_features.parquet"),
     Path("data/processed/coinapi/funding_hourly_features.parquet"),
     Path("data/processed/cryptoquant/hourly_features.parquet"),
+]
+
+CORE_MODEL_FEATURES = [
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+    "num_trades",
+    "fut_open",
+    "fut_high",
+    "fut_low",
+    "fut_close",
+    "fut_volume",
+    "open_interest",
+    "funding_rate",
+    "ma_close_7h",
+    "ma_close_24h",
+    "ma_ratio_7_24",
+    "vol_24h",
 ]
 
 
@@ -71,6 +96,7 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
 
     augmented = df.copy()
     augmented["ts"] = pd.to_datetime(augmented["ts"], utc=True)
+    augmented["ts"] = augmented["ts"].dt.floor("h")
 
     for path in paths:
         if not path.exists():
@@ -86,6 +112,7 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
             extra = extra.rename(columns={"timestamp": "ts"})
 
         extra["ts"] = pd.to_datetime(extra["ts"], utc=True)
+        extra["ts"] = extra["ts"].dt.floor("h")
 
         columns_before = set(augmented.columns)
         augmented = augmented.merge(extra, on="ts", how="left")
@@ -98,6 +125,7 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
         else:
             print(f"No new columns merged from {path}; check schema overlap.")
 
+    augmented = augmented.sort_values("ts").drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
     augmented = _add_cryptoquant_flags(augmented)
     _log_cryptoquant_features(augmented)
     return augmented
@@ -115,9 +143,39 @@ def main(output_dir: str) -> None:
     if df.empty:
         raise RuntimeError("Loaded empty DataFrame from BigQuery; check that the curated table has data.")
 
-    df = _merge_processed_features(df, PROCESSED_PATHS)
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df = df.dropna(subset=["ts"]).reset_index(drop=True)
+    df, dup_count, gap_count = enforce_unique_hourly_index(
+        df,
+        label="curated_features",
+        raise_on_gap=False,
+        normalize_to_hour=True,
+    )
+    if dup_count == 0 and gap_count == 0:
+        print("[curated_features] Hourly spacing verified; no duplicates detected.")
+    elif gap_count:
+        print(f"[curated_features] Logged {gap_count} non-hourly intervals; upstream gaps remain.")
 
-    X, y = make_features_and_target(df, target_column="ret_1h")
+    df = _merge_processed_features(df, PROCESSED_PATHS)
+    df, dup_after_merge, gap_after_merge = enforce_unique_hourly_index(
+        df,
+        label="curated_features_merged",
+        raise_on_gap=False,
+        normalize_to_hour=True,
+    )
+    if dup_after_merge:
+        print(f"[curated_features_merged] Removed {dup_after_merge} duplicates introduced during merge.")
+    if gap_after_merge:
+        print(
+            f"[curated_features_merged] Logged {gap_after_merge} non-hourly intervals after merge; "
+            "downstream consumers should handle upstream gaps."
+        )
+
+    X, y = make_features_and_target(
+        df,
+        target_column="ret_1h",
+        allowed_features=CORE_MODEL_FEATURES,
+    )
 
     splits = time_series_train_val_test_split(X, y)
 

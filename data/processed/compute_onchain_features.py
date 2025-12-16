@@ -38,7 +38,7 @@ def _pivot_hourly(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
 
     pivot = tidy.pivot_table(index="ts", columns="metric", values="value", aggfunc="last")
     pivot = pivot.sort_index()
-    hourly = pivot.resample("1H").ffill()
+    hourly = pivot.resample("1h").ffill()
     hourly.columns = [f"onchain_{col}" for col in hourly.columns]
     hourly = hourly.reset_index().rename(columns={"ts": "timestamp"})
     return hourly
