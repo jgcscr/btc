@@ -40,6 +40,7 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
 
     augmented = df.copy()
     augmented["ts"] = pd.to_datetime(augmented["ts"], utc=True)
+    augmented = augmented.sort_values("ts").reset_index(drop=True)
 
     for path in paths:
         if not path.exists():
@@ -55,9 +56,17 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
             extra = extra.rename(columns={"timestamp": "ts"})
 
         extra["ts"] = pd.to_datetime(extra["ts"], utc=True)
+        extra = extra.sort_values("ts").drop_duplicates(subset="ts", keep="last")
 
         columns_before = set(augmented.columns)
-        augmented = augmented.merge(extra, on="ts", how="left")
+        merged = pd.merge_asof(
+            augmented.sort_values("ts"),
+            extra,
+            on="ts",
+            direction="backward",
+            allow_exact_matches=True,
+        )
+        augmented = merged.sort_values("ts").reset_index(drop=True)
         new_columns = [col for col in augmented.columns if col not in columns_before]
 
         if new_columns:

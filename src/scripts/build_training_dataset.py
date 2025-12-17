@@ -44,6 +44,21 @@ CORE_MODEL_FEATURES = [
     "ma_close_24h",
     "ma_ratio_7_24",
     "vol_24h",
+    "macro_DXY_open",
+    "macro_DXY_high",
+    "macro_DXY_low",
+    "macro_DXY_close",
+    "macro_DXY_volume",
+    "macro_DXY_close_realized_vol_1h",
+    "macro_DXY_close_realized_vol_24h",
+    "macro_US10Y_yield",
+    "macro_VIX_open",
+    "macro_VIX_high",
+    "macro_VIX_low",
+    "macro_VIX_close",
+    "macro_VIX_volume",
+    "macro_VIX_close_realized_vol_1h",
+    "macro_VIX_close_realized_vol_24h",
 ]
 
 
@@ -97,6 +112,7 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
     augmented = df.copy()
     augmented["ts"] = pd.to_datetime(augmented["ts"], utc=True)
     augmented["ts"] = augmented["ts"].dt.floor("h")
+    augmented = augmented.sort_values("ts").reset_index(drop=True)
 
     for path in paths:
         if not path.exists():
@@ -113,9 +129,17 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
 
         extra["ts"] = pd.to_datetime(extra["ts"], utc=True)
         extra["ts"] = extra["ts"].dt.floor("h")
+        extra = extra.sort_values("ts").drop_duplicates(subset="ts", keep="last")
 
         columns_before = set(augmented.columns)
-        augmented = augmented.merge(extra, on="ts", how="left")
+        merged = pd.merge_asof(
+            augmented.sort_values("ts"),
+            extra,
+            on="ts",
+            direction="backward",
+            allow_exact_matches=True,
+        )
+        augmented = merged.sort_values("ts").reset_index(drop=True)
         new_columns = [col for col in augmented.columns if col not in columns_before]
 
         if new_columns:

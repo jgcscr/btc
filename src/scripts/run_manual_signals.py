@@ -28,6 +28,8 @@ DEFAULT_TARGETS = (1, 2, 3, 4, 8, 12)
 DEFAULT_P_UP_MIN = 0.45
 DEFAULT_RET_MIN = 0.0
 MODEL_ROOT = Path("artifacts/models")
+RET_MODEL_META_1H = MODEL_ROOT / "xgb_ret1h_v1" / "model_metadata.json"
+DIR_MODEL_META_1H = MODEL_ROOT / "xgb_dir1h_v1" / "model_metadata_direction.json"
 DATASET_PATH = Path("artifacts/datasets/btc_features_multi_horizon_splits.npz")
 OUTPUT_JSON = Path("artifacts/predictions/manual/latest.json")
 DEFAULT_THRESHOLDS_PATH = Path("artifacts/predictions/manual/thresholds.json")
@@ -70,10 +72,37 @@ def parse_targets(value: str) -> List[int]:
 
 
 def load_feature_names(dataset_path: Path) -> List[str]:
+    dataset_features: List[str] = []
     if dataset_path.exists():
         with np.load(dataset_path, allow_pickle=True) as data:
             if "feature_names" in data:
-                return data["feature_names"].tolist()
+                dataset_features = data["feature_names"].tolist()
+
+    meta_features: List[str] = []
+    for meta_path in (RET_MODEL_META_1H, DIR_MODEL_META_1H):
+        if not meta_path.exists():
+            continue
+        try:
+            payload = json.loads(meta_path.read_text())
+        except json.JSONDecodeError:
+            continue
+        names = payload.get("feature_names")
+        if isinstance(names, list) and names:
+            meta_features = [str(name) for name in names]
+            break
+
+    if meta_features:
+        if dataset_features and any(name not in dataset_features for name in meta_features):
+            missing = [name for name in meta_features if name not in dataset_features]
+            print(
+                f"Warning: dataset is missing model feature columns {missing}; falling back to dataset feature list.",
+                file=sys.stderr,
+            )
+        else:
+            return meta_features
+
+    if dataset_features:
+        return dataset_features
     return FEATURE_FALLBACK
 
 

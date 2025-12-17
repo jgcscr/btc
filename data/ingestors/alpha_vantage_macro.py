@@ -2,19 +2,125 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
-from datetime import datetime
+import time
+import io
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import requests
 
 ALPHA_URL = "https://www.alphavantage.co/query"
 RAW_ROOT = Path("data/raw/macro/alpha_vantage")
-SUPPORTED_FUNCTIONS = {
-    "TIME_SERIES_DAILY": {"default_interval": None},
-    "TIME_SERIES_INTRADAY": {"default_interval": "60min"},
+KEY_USAGE_PATH = Path("artifacts/monitoring/alpha_vantage_key_usage.json")
+CATALOG_SUMMARY_PATH = Path("artifacts/monitoring/alpha_vantage_catalog.json")
+DEFAULT_BACKOFF_SECONDS = 30.0
+MAX_BACKOFF_SECONDS = 900.0
+DEFAULT_SLEEP_SECONDS = 5.0
+DEFAULT_CATALOG: List[Dict[str, Any]] = [
+    {
+        "symbol": "SPY",
+        "functions": [
+            {"function": "TIME_SERIES_INTRADAY", "params": {"interval": "60min"}},
+            {"function": "TIME_SERIES_DAILY"},
+        ],
+    },
+    {
+        "symbol": "QQQ",
+        "functions": [
+            {"function": "TIME_SERIES_INTRADAY", "params": {"interval": "60min"}},
+            {"function": "TIME_SERIES_DAILY"},
+        ],
+    },
+    {
+        "symbol": "DXY",
+        "functions": [
+            {"function": "TIME_SERIES_INTRADAY", "params": {"interval": "60min"}},
+            {"function": "TIME_SERIES_DAILY"},
+        ],
+    },
+    {
+        "symbol": "GLD",
+        "functions": [
+            {
+                "function": "TIME_SERIES_INTRADAY_EXTENDED",
+                "params": {"interval": "60min", "slices": ["year1month1", "year1month2"]},
+            },
+            {"function": "TIME_SERIES_DAILY"},
+        ],
+    },
+    {
+        "symbol": "HYG",
+        "functions": [
+            {
+                "function": "TIME_SERIES_INTRADAY_EXTENDED",
+                "params": {"interval": "60min", "slices": ["year1month1", "year1month2"]},
+            },
+            {"function": "TIME_SERIES_DAILY"},
+        ],
+    },
+    {
+        "symbol": "USO",
+        "functions": [
+            {
+                "function": "TIME_SERIES_INTRADAY_EXTENDED",
+                "params": {"interval": "60min", "slices": ["year1month1", "year1month2"]},
+            },
+            {"function": "TIME_SERIES_DAILY"},
+        ],
+    },
+    {
+        "symbol": "VIX",
+        "functions": [
+            {"function": "TIME_SERIES_INTRADAY", "params": {"interval": "60min"}},
+            {"function": "TIME_SERIES_DAILY"},
+        ],
+    },
+    {
+        "symbol": "US10Y",
+        "functions": [
+            {
+                "function": "TREASURY_YIELD",
+                "params": {
+                    "interval": "daily",
+                    "maturity": "10year",
+                },
+            },
+        ],
+    },
+]
+DEFAULT_ALIASES: Dict[str, List[str]] = {
+    "DXY": ["USDX", "UUP", "FX_DXY", "DX-Y.NYB"],
+    "US10Y": ["^TNX", "US10Y"],
+    "VIX": ["VIXY", "VXX", "VIXM", "^VIX", "VIX"],
+    "^TNX": ["US10Y"],
+}
+SUPPORTED_FUNCTIONS: Dict[str, Dict[str, Any]] = {
+    "TIME_SERIES_INTRADAY": {
+        "response_type": "time_series",
+        "default_params": {"interval": "60min"},
+        "requires_symbol": True,
+    },
+    "TIME_SERIES_DAILY": {
+        "response_type": "time_series",
+        "default_params": {},
+        "requires_symbol": True,
+    },
+    "TIME_SERIES_INTRADAY_EXTENDED": {
+        "response_type": "intraday_extended",
+        "default_params": {"interval": "60min", "slices": ["year1month1"]},
+        "requires_symbol": True,
+    },
+    "TREASURY_YIELD": {
+        "response_type": "treasury_yield",
+        "default_params": {"interval": "daily", "maturity": "10year"},
+        "requires_symbol": False,
+    },
 }
 
 
@@ -22,33 +128,219 @@ class AlphaVantageIngestionError(RuntimeError):
     """Raised when the Alpha Vantage API call fails."""
 
 
-def _require_api_key() -> str:
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
-    if not api_key:
-        raise AlphaVantageIngestionError(
-            "ALPHA_VANTAGE_API_KEY is not set; export the key before running the loader.",
+class AlphaVantageRateLimitError(AlphaVantageIngestionError):
+    """Raised when all keys are temporarily rate-limited."""
+
+    def __init__(self, message: str, wait_seconds: float) -> None:
+        super().__init__(message)
+        self.wait_seconds = wait_seconds
+
+
+class AlphaVantageInvalidKeyError(AlphaVantageIngestionError):
+    """Raised when no valid Alpha Vantage API keys remain."""
+
+
+@dataclass
+class _KeyState:
+    next_retry: datetime
+    attempts: int = 0
+    invalid: bool = False
+
+
+class AlphaVantageKeyManager:
+    """Manages Alpha Vantage API keys with rotation and backoff."""
+
+    def __init__(
+        self,
+        keys: Sequence[str],
+        usage_path: Path = KEY_USAGE_PATH,
+        base_backoff: float = DEFAULT_BACKOFF_SECONDS,
+        now_fn: Optional[Callable[[], datetime]] = None,
+    ) -> None:
+        unique = [key.strip() for key in keys if key and key.strip()]
+        if not unique:
+            raise AlphaVantageInvalidKeyError(
+                "ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_KEYS must provide at least one key.",
+            )
+        self._keys = deque(dict.fromkeys(unique))
+        initial_time = datetime.min.replace(tzinfo=timezone.utc)
+        self._states: Dict[str, _KeyState] = {
+            key: _KeyState(next_retry=initial_time) for key in self._keys
+        }
+        self._usage_path = usage_path
+        self._usage: Dict[str, Dict[str, Dict[str, Any]]] = self._load_usage()
+        self._base_backoff = max(base_backoff, 1.0)
+        self._now: Callable[[], datetime] = now_fn or (lambda: datetime.now(timezone.utc))
+
+    @classmethod
+    def from_env(cls) -> "AlphaVantageKeyManager":
+        keys_env = os.getenv("ALPHA_VANTAGE_KEYS", "")
+        if keys_env.strip():
+            keys = [part.strip() for part in keys_env.split(",") if part.strip()]
+        else:
+            fallback = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
+            keys = [fallback] if fallback else []
+        base_backoff = float(os.getenv("ALPHA_VANTAGE_BACKOFF_SECONDS", str(DEFAULT_BACKOFF_SECONDS)))
+        return cls(keys=keys, base_backoff=base_backoff)
+
+    def acquire(self) -> str:
+        now = self._now()
+        for _ in range(len(self._keys)):
+            key = self._keys[0]
+            self._keys.rotate(-1)
+            state = self._states[key]
+            if state.invalid:
+                continue
+            if now >= state.next_retry:
+                return key
+        valid_keys = [key for key, state in self._states.items() if not state.invalid]
+        if not valid_keys:
+            raise AlphaVantageInvalidKeyError("All Alpha Vantage API keys are marked invalid.")
+        wait_seconds = min(
+            max((self._states[key].next_retry - now).total_seconds(), 0.0)
+            for key in valid_keys
         )
-    return api_key
+        raise AlphaVantageRateLimitError(
+            f"All Alpha Vantage keys are backoff-limited for {wait_seconds:.1f} seconds.",
+            wait_seconds,
+        )
+
+    def mark_success(self, key: str) -> None:
+        state = self._states.get(key)
+        if not state:
+            return
+        state.attempts = 0
+        state.next_retry = self._now()
+        self._increment_usage(key, "calls")
+
+    def mark_rate_limit(self, key: str, retry_after: Optional[float]) -> None:
+        state = self._states.get(key)
+        if not state or state.invalid:
+            return
+        state.attempts += 1
+        if retry_after is None:
+            backoff_seconds = min(self._base_backoff * (2 ** (state.attempts - 1)), MAX_BACKOFF_SECONDS)
+        else:
+            backoff_seconds = min(max(retry_after, self._base_backoff), MAX_BACKOFF_SECONDS)
+        state.next_retry = self._now() + timedelta(seconds=backoff_seconds)
+        self._increment_usage(key, "rate_limit_hits")
+
+    def mark_invalid(self, key: str) -> None:
+        state = self._states.get(key)
+        if not state:
+            return
+        state.invalid = True
+        state.next_retry = datetime.max.replace(tzinfo=timezone.utc)
+
+    def _increment_usage(self, key: str, field: str) -> None:
+        today = self._now().date().isoformat()
+        day_entry = self._usage.setdefault(today, {})
+        key_entry = day_entry.setdefault(key, {"calls": 0, "rate_limit_hits": 0})
+        key_entry[field] = key_entry.get(field, 0) + 1
+        key_entry["last_updated"] = self._now().isoformat()
+        self._persist_usage()
+
+    def _load_usage(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        if not self._usage_path.exists():
+            return {}
+        try:
+            with self._usage_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+                if isinstance(data, dict):
+                    return data
+        except (OSError, json.JSONDecodeError):
+            pass
+        return {}
+
+    def _persist_usage(self) -> None:
+        self._usage_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._usage_path.open("w", encoding="utf-8") as handle:
+            json.dump(self._usage, handle, indent=2)
 
 
-def _build_params(
-    function: str,
-    symbol: str,
-    api_key: str,
-    interval: str | None,
-) -> Dict[str, str]:
-    params: Dict[str, str] = {
+def _build_params(function: str, api_key: str, params: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    request: Dict[str, str] = {
         "function": function,
-        "symbol": symbol,
         "apikey": api_key,
-        "datatype": "json",
     }
-    if interval:
-        params["interval"] = interval
-    return params
+    if params:
+        for key, value in params.items():
+            if value is None:
+                continue
+            request[str(key)] = str(value)
+    request.setdefault("datatype", "json")
+    return request
 
 
-def _flatten_time_series(symbol: str, payload: dict) -> pd.DataFrame:
+def _classify_error_from_text(text: str) -> str:
+    lowered = text.lower()
+    if "invalid api key" in lowered:
+        return "invalid_key"
+    if "premium endpoint" in lowered or ("premium" in lowered and "instantly unlock" in lowered):
+        return "invalid_key"
+    if "call frequency" in lowered:
+        return "rate_limit"
+    if "premium" in lowered:
+        return "rate_limit"
+    return "other"
+
+
+def _classify_response_error(response: requests.Response, payload: Optional[Dict[str, Any]]) -> str:
+    if response.status_code in {401, 403}:
+        return "invalid_key"
+    if response.status_code == 429:
+        return "rate_limit"
+    if payload:
+        note = str(payload.get("Note", ""))
+        error_message = str(payload.get("Error Message", ""))
+        classification = _classify_error_from_text(note or error_message)
+        if classification != "other":
+            return classification
+    return _classify_error_from_text(response.text)
+
+
+def _classify_payload_status(payload: Dict[str, Any]) -> str:
+    note = str(payload.get("Note", ""))
+    error_message = str(payload.get("Error Message", ""))
+    classification = _classify_error_from_text(note or error_message)
+    if classification != "other":
+        return classification
+    information = str(payload.get("Information", ""))
+    if information:
+        info_classification = _classify_error_from_text(information)
+        if info_classification != "other":
+            return info_classification
+        return "other_error"
+    if error_message:
+        return "other_error"
+    if note:
+        # Alpha Vantage uses Note for both quota and informational messages.
+        # If it wasn't classified as rate limit above, treat as generic error.
+        return "other_error"
+    return "ok"
+
+
+def _retry_after_seconds(response: requests.Response, payload: Optional[Dict[str, Any]]) -> Optional[float]:
+    header_value = response.headers.get("Retry-After")
+    if header_value:
+        try:
+            return float(header_value)
+        except ValueError:
+            pass
+    if payload:
+        note = str(payload.get("Note", "")).lower()
+        for token in ("seconds", "second", "minutes", "minute"):
+            if token in note:
+                numbers = [word for word in note.replace("-", " ").split() if word.isdigit()]
+                if numbers:
+                    value = float(numbers[0])
+                    if "minute" in token:
+                        value *= 60.0
+                    return value
+    return None
+
+
+def _flatten_time_series(symbol: str, payload: dict, canonical_symbol: Optional[str] = None) -> pd.DataFrame:
     time_series = None
     for key, value in payload.items():
         if key.startswith("Time Series"):
@@ -58,6 +350,7 @@ def _flatten_time_series(symbol: str, payload: dict) -> pd.DataFrame:
         raise AlphaVantageIngestionError("Response did not contain a time series block.")
 
     rows: list[dict[str, object]] = []
+    metric_symbol = canonical_symbol or symbol
     for timestamp_str, fields in time_series.items():
         ts = pd.Timestamp(timestamp_str, tz="UTC")
         if isinstance(fields, dict):
@@ -69,7 +362,7 @@ def _flatten_time_series(symbol: str, payload: dict) -> pd.DataFrame:
                     numeric_value = None
                 rows.append({
                     "ts": ts,
-                    "metric": f"{symbol}_{clean_field}",
+                    "metric": f"{metric_symbol}_{clean_field}",
                     "value": numeric_value,
                     "source": "alpha_vantage",
                 })
@@ -81,40 +374,289 @@ def _flatten_time_series(symbol: str, payload: dict) -> pd.DataFrame:
     return frame
 
 
+def _parse_intraday_extended_csv(
+    symbol: str,
+    csv_text: str,
+    canonical_symbol: Optional[str] = None,
+) -> pd.DataFrame:
+    try:
+        frame = pd.read_csv(io.StringIO(csv_text))
+    except pd.errors.EmptyDataError as exc:  # pragma: no cover - defensive guard
+        raise AlphaVantageIngestionError("Alpha Vantage extended intraday returned empty CSV.") from exc
+    if frame.empty:
+        raise AlphaVantageIngestionError("Alpha Vantage extended intraday returned no rows.")
+    time_column = None
+    if "time" in frame.columns:
+        time_column = "time"
+    elif "timestamp" in frame.columns:
+        time_column = "timestamp"
+    if time_column is None:
+        raise AlphaVantageIngestionError("Extended intraday CSV missing time column.")
+
+    expected_columns = {"open", "high", "low", "close", "volume"}
+    if not expected_columns.issubset(set(frame.columns)):
+        raise AlphaVantageIngestionError("Extended intraday CSV missing expected OHLCV columns.")
+
+    frame["ts"] = pd.to_datetime(frame[time_column], utc=True, errors="coerce")
+    frame = frame.dropna(subset=["ts"])
+    value_columns = ["open", "high", "low", "close", "volume"]
+    frame[value_columns] = frame[value_columns].apply(pd.to_numeric, errors="coerce")
+
+    metric_symbol = canonical_symbol or symbol
+    melted = frame.melt(
+        id_vars=["ts"],
+        value_vars=value_columns,
+        var_name="component",
+        value_name="value",
+    )
+    melted["metric"] = melted["component"].apply(lambda comp: f"{metric_symbol}_{comp}")
+    melted["source"] = "alpha_vantage"
+    return melted[["ts", "metric", "value", "source"]].sort_values("ts").reset_index(drop=True)
+
+
+def _fetch_intraday_extended_slice(
+    manager: AlphaVantageKeyManager,
+    function: str,
+    request_params: Dict[str, Any],
+    canonical_symbol: str,
+    attempt_symbol: str,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    last_error: Optional[str] = None
+    while True:
+        try:
+            api_key = manager.acquire()
+        except AlphaVantageRateLimitError as exc:
+            raise exc
+
+        prepared_params = dict(request_params)
+        prepared_params.setdefault("symbol", attempt_symbol)
+        prepared_params.setdefault("datatype", "csv")
+        prepared_params["adjusted"] = str(prepared_params.get("adjusted", "false")).lower()
+        api_function = "TIME_SERIES_INTRADAY" if function == "TIME_SERIES_INTRADAY_EXTENDED" else function
+        params_for_request = _build_params(api_function, api_key, prepared_params)
+
+        try:
+            response = requests.get(ALPHA_URL, params=params_for_request, timeout=30)
+        except requests.RequestException as exc:  # pragma: no cover - network safeguard
+            raise AlphaVantageIngestionError(f"Alpha Vantage request failed: {exc}") from exc
+
+        payload: Optional[Dict[str, Any]] = None
+        if response.status_code != 200:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            classification = _classify_response_error(response, payload)
+            if classification == "invalid_key":
+                manager.mark_invalid(api_key)
+                last_error = f"Invalid API key response ({response.status_code})"
+                continue
+            if classification == "rate_limit":
+                manager.mark_rate_limit(api_key, _retry_after_seconds(response, payload))
+                last_error = f"Rate limit response ({response.status_code})"
+                continue
+            raise AlphaVantageIngestionError(
+                f"Alpha Vantage extended request returned status {response.status_code}: {response.text[:256]}",
+            )
+
+        text_body = response.text
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+
+        if payload is not None:
+            classification = _classify_payload_status(payload)
+            if classification == "invalid_key":
+                manager.mark_invalid(api_key)
+                last_error = "Invalid API key response payload"
+                continue
+            if classification == "rate_limit":
+                manager.mark_rate_limit(api_key, _retry_after_seconds(response, payload))
+                last_error = "Alpha Vantage rate limit escalation"
+                continue
+            if classification == "other_error":
+                message = payload.get("Error Message") or payload.get("Note") or last_error or "Unknown Alpha Vantage error"
+                raise AlphaVantageIngestionError(str(message))
+            frame = _flatten_time_series(attempt_symbol, payload, canonical_symbol=canonical_symbol)
+            manager.mark_success(api_key)
+            return frame, dict(response.headers)
+
+        frame = _parse_intraday_extended_csv(attempt_symbol, text_body, canonical_symbol=canonical_symbol)
+        manager.mark_success(api_key)
+        return frame, dict(response.headers)
+
+
+def _ingest_intraday_extended(
+    manager: AlphaVantageKeyManager,
+    function: str,
+    params: Dict[str, Any],
+    canonical_symbol: str,
+    attempt_symbol: str,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    slices_param = params.get("slices")
+    if isinstance(slices_param, str):
+        slices = [slices_param]
+    elif isinstance(slices_param, Iterable):
+        slices = [str(value) for value in slices_param if value]
+    else:
+        slices = []
+    if not slices:
+        slices = ["year1month1"]
+
+    base_params = {key: value for key, value in params.items() if key != "slices"}
+    base_params.setdefault("interval", params.get("interval", "60min"))
+    frames: List[pd.DataFrame] = []
+    last_headers: Dict[str, Any] = {}
+
+    for slice_name in slices:
+        slice_params = dict(base_params)
+        slice_params["slice"] = slice_name
+        frame, headers = _fetch_intraday_extended_slice(
+            manager=manager,
+            function=function,
+            request_params=slice_params,
+            canonical_symbol=canonical_symbol,
+            attempt_symbol=attempt_symbol,
+        )
+        frames.append(frame)
+        last_headers = headers
+
+    if not frames:
+        raise AlphaVantageIngestionError("Alpha Vantage extended intraday produced no data slices.")
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.sort_values(["ts", "metric"]).drop_duplicates(subset=["ts", "metric"], keep="last").reset_index(drop=True)
+    return combined, last_headers
+
+
+def _flatten_treasury_yield(payload: dict, canonical_symbol: str) -> pd.DataFrame:
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        raise AlphaVantageIngestionError("Treasury yield response did not contain data rows.")
+
+    rows: list[dict[str, object]] = []
+    for entry in data:
+        date_str = entry.get("date")
+        value = entry.get("value")
+        if not date_str:
+            continue
+        ts = pd.Timestamp(date_str).tz_localize("UTC")
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            numeric_value = None
+        rows.append({
+            "ts": ts,
+            "metric": f"{canonical_symbol}_yield",
+            "value": numeric_value,
+            "source": "alpha_vantage",
+        })
+
+    if not rows:
+        raise AlphaVantageIngestionError("Treasury yield response parsing produced no rows.")
+
+    return pd.DataFrame(rows).sort_values("ts").reset_index(drop=True)
+
+
 def ingest_series(
     function: str,
-    symbol: str,
-    interval: str | None = None,
+    params: Dict[str, Any],
     output_root: Path = RAW_ROOT,
-) -> Path:
+    return_summary: bool = False,
+    canonical_symbol: Optional[str] = None,
+    attempt_symbol: Optional[str] = None,
+    key_manager: Optional[AlphaVantageKeyManager] = None,
+) -> Path | Tuple[Path, Dict[str, Any]]:
     if function not in SUPPORTED_FUNCTIONS:
         supported = ", ".join(SUPPORTED_FUNCTIONS)
         raise AlphaVantageIngestionError(f"Unsupported function '{function}'. Supported: {supported}")
+    params = {str(key): value for key, value in params.items()}
+    manager = key_manager or AlphaVantageKeyManager.from_env()
 
-    api_key = _require_api_key()
-    interval = interval or SUPPORTED_FUNCTIONS[function]["default_interval"]
-    params = _build_params(function, symbol, api_key, interval)
+    canonical = canonical_symbol or attempt_symbol or params.get("symbol")
+    if not canonical:
+        raise AlphaVantageIngestionError("Canonical symbol is required to label metrics.")
+    canonical = str(canonical)
+    attempt_value = str(attempt_symbol or canonical)
 
-    try:
-        response = requests.get(ALPHA_URL, params=params, timeout=30)
-    except requests.RequestException as exc:  # pragma: no cover - network failure safeguard
-        raise AlphaVantageIngestionError(f"Alpha Vantage request failed: {exc}") from exc
+    response_type = SUPPORTED_FUNCTIONS[function]["response_type"]
+    interval = params.get("interval")
+    quota_headers: Dict[str, Any] = {}
 
-    if response.status_code != 200:
-        raise AlphaVantageIngestionError(
-            f"Alpha Vantage request returned status {response.status_code}: {response.text[:256]}",
+    if response_type == "intraday_extended":
+        frame, quota_headers = _ingest_intraday_extended(
+            manager=manager,
+            function=function,
+            params=params,
+            canonical_symbol=canonical,
+            attempt_symbol=attempt_value,
         )
+    else:
+        last_error: Optional[str] = None
+        while True:
+            try:
+                api_key = manager.acquire()
+            except AlphaVantageRateLimitError as exc:
+                raise exc
 
-    payload = response.json()
-    if payload.get("Error Message"):
-        raise AlphaVantageIngestionError(payload["Error Message"])
-    if payload.get("Note"):
-        raise AlphaVantageIngestionError(payload["Note"])
+            request_params = _build_params(function, api_key, params)
 
-    frame = _flatten_time_series(symbol, payload)
+            try:
+                response = requests.get(ALPHA_URL, params=request_params, timeout=30)
+            except requests.RequestException as exc:  # pragma: no cover - network failure safeguard
+                raise AlphaVantageIngestionError(f"Alpha Vantage request failed: {exc}") from exc
 
-    remaining = response.headers.get("X-RateLimit-Remaining")
-    limit = response.headers.get("X-RateLimit-Limit")
+            payload: Optional[Dict[str, Any]] = None
+            if response.status_code != 200:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                classification = _classify_response_error(response, payload)
+                if classification == "invalid_key":
+                    manager.mark_invalid(api_key)
+                    last_error = f"Invalid API key response ({response.status_code})"
+                    continue
+                if classification == "rate_limit":
+                    manager.mark_rate_limit(api_key, _retry_after_seconds(response, payload))
+                    last_error = f"Rate limit response ({response.status_code})"
+                    continue
+                raise AlphaVantageIngestionError(
+                    f"Alpha Vantage request returned status {response.status_code}: {response.text[:256]}",
+                )
+
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise AlphaVantageIngestionError(f"Failed to parse Alpha Vantage response: {exc}") from exc
+
+            classification = _classify_payload_status(payload)
+            if classification == "invalid_key":
+                manager.mark_invalid(api_key)
+                last_error = "Invalid API key response payload"
+                continue
+            if classification == "rate_limit":
+                manager.mark_rate_limit(api_key, _retry_after_seconds(response, payload))
+                last_error = "Alpha Vantage rate limit escalation"
+                continue
+            if classification == "other_error":
+                message = payload.get("Error Message") or payload.get("Note") or last_error or "Unknown Alpha Vantage error"
+                raise AlphaVantageIngestionError(str(message))
+
+            if response_type == "time_series":
+                frame = _flatten_time_series(attempt_value, payload, canonical_symbol=canonical)
+            elif response_type == "treasury_yield":
+                frame = _flatten_treasury_yield(payload, canonical_symbol=canonical)
+            else:  # pragma: no cover - defensive branch for future extension
+                raise AlphaVantageIngestionError(f"Unhandled response type '{response_type}' for function {function}.")
+
+            quota_headers = dict(response.headers)
+            manager.mark_success(api_key)
+            break
+
+    remaining = quota_headers.get("X-RateLimit-Remaining") if quota_headers else None
+    limit = quota_headers.get("X-RateLimit-Limit") if quota_headers else None
     if remaining or limit:
         print(f"Alpha Vantage quota remaining {remaining}/{limit} (function={function}, interval={interval})")
     else:
@@ -122,22 +664,275 @@ def ingest_series(
     sample = frame.head(5)
     print("Alpha Vantage sample rows:\n", sample)
 
-    output_dir = output_root / f"symbol={symbol}" / function.lower()
+    safe_canonical = canonical.replace("/", "_").replace(":", "_")
+    output_dir = output_root / f"symbol={safe_canonical}" / function.lower()
     output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    output_path = output_dir / f"alpha_{symbol}_{function.lower()}_{timestamp}.parquet"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    attempt_label = attempt_value.replace("/", "_").replace(":", "_")
+    output_path = output_dir / f"alpha_{attempt_label}_{function.lower()}_{timestamp}.parquet"
     frame.to_parquet(output_path, index=False)
+
+    summary = {
+        "rows": int(len(frame)),
+        "first_timestamp": frame["ts"].min().isoformat() if not frame.empty else None,
+        "latest_timestamp": frame["ts"].max().isoformat() if not frame.empty else None,
+        "interval": params.get("interval"),
+        "params": params,
+    }
+    if return_summary:
+        return output_path, summary
     return output_path
+
+
+def _load_catalog(path: Optional[Path]) -> List[Dict[str, Any]]:
+    if path is None:
+        return DEFAULT_CATALOG
+    if not path.exists():
+        raise AlphaVantageIngestionError(f"Catalog file not found: {path}")
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:  # pragma: no cover - validation guard
+        raise AlphaVantageIngestionError(f"Failed to parse catalog JSON: {exc}") from exc
+    if not isinstance(data, list):
+        raise AlphaVantageIngestionError("Catalog JSON must be a list of symbol entries.")
+    return data
+
+
+def _validate_catalog(catalog: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    validated: List[Dict[str, Any]] = []
+    for entry in catalog:
+        symbol = entry.get("symbol")
+        functions = entry.get("functions")
+        if not symbol or not isinstance(functions, list):
+            raise AlphaVantageIngestionError("Catalog entries must include 'symbol' and 'functions' list.")
+        parsed_funcs: List[Dict[str, Any]] = []
+        for spec in functions:
+            fn = spec.get("function")
+            if fn not in SUPPORTED_FUNCTIONS:
+                supported = ", ".join(sorted(SUPPORTED_FUNCTIONS))
+                raise AlphaVantageIngestionError(
+                    f"Catalog entry for {symbol} references unsupported function '{fn}'. Supported: {supported}",
+                )
+            fn_config = SUPPORTED_FUNCTIONS[fn]
+            params: Dict[str, Any] = dict(fn_config.get("default_params", {}))
+            if "interval" in spec:
+                params["interval"] = spec.get("interval")
+            extra_params = spec.get("params", {})
+            if extra_params:
+                if not isinstance(extra_params, dict):
+                    raise AlphaVantageIngestionError(
+                        f"Catalog entry for {symbol} function {fn} must provide params as an object.",
+                    )
+                for key, value in extra_params.items():
+                    params[str(key)] = value
+            parsed_funcs.append({"function": fn, "params": params})
+        validated.append({
+            "symbol": str(symbol),
+            "name": entry.get("name", str(symbol)),
+            "functions": parsed_funcs,
+            "aliases": [str(alias) for alias in entry.get("aliases", DEFAULT_ALIASES.get(str(symbol), []))],
+        })
+    return validated
+
+
+def _sleep_between_calls(seconds: float) -> None:
+    if seconds <= 0:
+        return
+    time.sleep(seconds)
+
+
+def ingest_catalog(
+    catalog: Optional[Sequence[Dict[str, Any]]] = None,
+    sleep_seconds: Optional[float] = None,
+    output_root: Path = RAW_ROOT,
+) -> List[Dict[str, Any]]:
+    catalog_path_env = os.getenv("ALPHA_VANTAGE_CATALOG_PATH")
+    resolved_catalog = catalog
+    if resolved_catalog is None:
+        path = Path(catalog_path_env) if catalog_path_env else None
+        resolved_catalog = _load_catalog(path)
+    validated_catalog = _validate_catalog(resolved_catalog)
+
+    if sleep_seconds is None:
+        sleep_env = os.getenv("ALPHA_VANTAGE_SLEEP_SECONDS")
+        sleep_seconds = float(sleep_env) if sleep_env else DEFAULT_SLEEP_SECONDS
+
+    total_requests = sum(len(entry["functions"]) for entry in validated_catalog)
+    key_manager = AlphaVantageKeyManager.from_env() if total_requests else None
+    results: List[Dict[str, Any]] = []
+    completed = 0
+
+    for entry in validated_catalog:
+        symbol = entry["symbol"]
+        aliases = [alias for alias in entry.get("aliases", []) if alias]
+        for spec in entry["functions"]:
+            fn = spec["function"]
+            fn_config = SUPPORTED_FUNCTIONS[fn]
+            base_params = dict(spec.get("params", {}))
+            requires_symbol = fn_config.get("requires_symbol", True)
+            attempt_symbols = [symbol] + [alias for alias in aliases if alias not in {symbol}]
+            if not requires_symbol:
+                attempt_symbols = [symbol]
+            last_error: Optional[str] = None
+            resolved_symbol: Optional[str] = None
+            output_path: Optional[Path] = None
+            summary: Dict[str, Any] = {}
+            for attempt in attempt_symbols:
+                try:
+                    params = dict(base_params)
+                    if requires_symbol:
+                        params["symbol"] = attempt
+                    path, attempt_summary = ingest_series(
+                        function=fn,
+                        params=params,
+                        output_root=output_root,
+                        return_summary=True,
+                        canonical_symbol=symbol,
+                        attempt_symbol=attempt if requires_symbol else symbol,
+                        key_manager=key_manager,
+                    )
+                    resolved_symbol = attempt
+                    output_path = Path(path)
+                    summary = attempt_summary
+                    last_error = None
+                    break
+                except AlphaVantageIngestionError as exc:
+                    last_error = str(exc)
+                    print(f"Warning: failed to ingest {symbol} via {attempt} {fn}: {exc}")
+                    _sleep_between_calls(sleep_seconds)
+            if resolved_symbol is not None and output_path is not None:
+                result = {
+                    "symbol": symbol,
+                    "function": fn,
+                    "interval": summary.get("interval"),
+                    "rows": summary.get("rows"),
+                    "latest_timestamp": summary.get("latest_timestamp"),
+                    "path": str(output_path),
+                    "status": "success",
+                    "resolved_symbol": resolved_symbol,
+                    "params": summary.get("params"),
+                }
+            else:
+                result = {
+                    "symbol": symbol,
+                    "function": fn,
+                    "interval": base_params.get("interval"),
+                    "rows": 0,
+                    "latest_timestamp": None,
+                    "path": None,
+                    "status": "error",
+                    "resolved_symbol": None,
+                    "error": last_error,
+                    "params": base_params,
+                }
+            results.append(result)
+            completed += 1
+            if completed < total_requests:
+                _sleep_between_calls(sleep_seconds)
+
+    success = sum(1 for row in results if row["status"] == "success")
+    errors = [row for row in results if row["status"] != "success"]
+    print(
+        f"Alpha Vantage catalog ingestion finished: {success}/{len(results)} calls succeeded. "
+        f"sleep_seconds={sleep_seconds}.",
+    )
+    if errors:
+        print("Failures detected:")
+        for row in errors:
+            print(
+                f"  - {row['symbol']} {row['function']} ({row.get('interval')}) -> {row.get('error')}",
+            )
+    CATALOG_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CATALOG_SUMMARY_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(results, handle, indent=2)
+    return results
+
+
+def _infer_frequency(ts: pd.Series) -> str:
+    if ts.empty:
+        return "unknown"
+    ordered = ts.sort_values().dropna()
+    if len(ordered) < 2:
+        return "unknown"
+    deltas = ordered.diff().dropna()
+    if deltas.empty:
+        return "unknown"
+    median_delta = deltas.median()
+    minutes = int(median_delta.total_seconds() // 60)
+    if minutes == 0:
+        return "unknown"
+    if minutes % (24 * 60) == 0:
+        days = minutes // (24 * 60)
+        return f"{days}d"
+    return f"{minutes}min"
+
+
+def audit_outputs(output_root: Path = RAW_ROOT) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if not output_root.exists():
+        print(f"No Alpha Vantage outputs found under {output_root}.")
+        return rows
+
+    for parquet_path in output_root.rglob("*.parquet"):
+        parts = parquet_path.relative_to(output_root).parts
+        if len(parts) < 3:
+            continue
+        symbol_part = parts[0]
+        function_part = parts[1]
+        symbol = symbol_part.split("=")[-1]
+        function_name = function_part.upper()
+        df = pd.read_parquet(parquet_path, columns=["ts"])
+        freq = _infer_frequency(df["ts"])
+        latest_ts = df["ts"].max()
+        latest_iso = latest_ts.isoformat() if pd.notna(latest_ts) else None
+        rows.append(
+            {
+                "symbol": symbol,
+                "function": function_name,
+                "frequency": freq,
+                "rows": int(len(df)),
+                "latest_timestamp": latest_iso,
+                "path": str(parquet_path),
+            },
+        )
+
+    if not rows:
+        print(f"No Alpha Vantage parquet files detected under {output_root}.")
+        return rows
+
+    summary = pd.DataFrame(rows)
+    summary = summary.sort_values(["symbol", "function", "latest_timestamp"], ascending=[True, True, False])
+    latest_per_series = summary.groupby(["symbol", "function"], as_index=False).first()
+    print(latest_per_series[["symbol", "function", "frequency", "rows", "latest_timestamp"]])
+    return latest_per_series.to_dict(orient="records")
+
+
+def _parse_cli_params(pairs: Iterable[str]) -> Dict[str, str]:
+    params: Dict[str, str] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise AlphaVantageIngestionError(
+                f"Invalid --param value '{pair}'. Use key=value format.",
+            )
+        key, value = pair.split("=", maxsplit=1)
+        params[key.strip()] = value.strip()
+    return params
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch Alpha Vantage data into Parquet.")
-    parser.add_argument("function", choices=sorted(SUPPORTED_FUNCTIONS), help="Alpha Vantage function")
-    parser.add_argument("symbol", help="Ticker symbol (e.g. SPY, DXY).")
+    parser.add_argument("function", nargs="?", choices=sorted(SUPPORTED_FUNCTIONS), help="Alpha Vantage function")
+    parser.add_argument("symbol", nargs="?", help="Ticker symbol (e.g. SPY, DXY).")
     parser.add_argument(
         "--interval",
         default=None,
         help="Interval for intraday data (e.g. 60min). Required only for TIME_SERIES_INTRADAY.",
+    )
+    parser.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        help="Additional query parameter in key=value form (repeat for multiple values).",
     )
     parser.add_argument(
         "--output-root",
@@ -145,19 +940,70 @@ def _parse_args() -> argparse.Namespace:
         default=RAW_ROOT,
         help="Root directory for raw Parquet output (default: data/raw/macro/alpha_vantage).",
     )
+    parser.add_argument(
+        "--run-catalog",
+        action="store_true",
+        help="Ingest the default (or configured) Alpha Vantage catalog instead of a single series.",
+    )
+    parser.add_argument(
+        "--catalog-path",
+        type=Path,
+        default=None,
+        help="Optional path to a JSON catalog overriding the built-in symbol list.",
+    )
+    parser.add_argument(
+        "--sleep-seconds",
+        type=float,
+        default=None,
+        help="Seconds to wait between catalog requests (default: ALPHA_VANTAGE_SLEEP_SECONDS env or 5.0).",
+    )
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="Print a summary of the most recent Alpha Vantage ingestions and exit.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    output_path = ingest_series(
+    if args.audit:
+        audit_outputs(args.output_root)
+        return
+
+    if args.run_catalog:
+        catalog = _load_catalog(args.catalog_path) if args.catalog_path else None
+        ingest_catalog(catalog=catalog, sleep_seconds=args.sleep_seconds, output_root=args.output_root)
+        return
+
+    if not args.function or not args.symbol:
+        raise AlphaVantageIngestionError(
+            "Function and symbol arguments are required unless --run-catalog or --audit is provided.",
+        )
+
+    params: Dict[str, Any] = {"symbol": args.symbol}
+    if args.interval:
+        params["interval"] = args.interval
+    extra_params = _parse_cli_params(args.param)
+    params.update(extra_params)
+
+    manager = AlphaVantageKeyManager.from_env()
+    ingest_series(
         function=args.function,
-        symbol=args.symbol,
-        interval=args.interval,
+        params=params,
         output_root=args.output_root,
+        canonical_symbol=args.symbol,
+        attempt_symbol=args.symbol,
+        key_manager=manager,
     )
-    print(f"Saved Alpha Vantage {args.function} {args.symbol} data to {output_path}")
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
-    main()
+if __name__ == "__main__":
+    try:
+        main()
+    except AlphaVantageRateLimitError as exc:
+        print(f"Alpha Vantage rate limit exhausted: {exc}")
+        raise SystemExit(1)
+    except AlphaVantageIngestionError as exc:
+        print(f"Alpha Vantage ingestion failed: {exc}")
+        raise SystemExit(1)

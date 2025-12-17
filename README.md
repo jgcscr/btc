@@ -74,7 +74,41 @@ Pipeline regression tests covering the CLI live in `tests/pipeline/` and can be 
 
 ### Active Data Loaders
 
-- **Alpha Vantage macro**: Ingests macroeconomic series (e.g., SPX, DXY) using premium Alpha Vantage endpoints. Requires `ALPHA_VANTAGE_API_KEY`.
+- **Alpha Vantage macro**: Ingests macroeconomic series (e.g., SPX, DXY) using premium Alpha Vantage endpoints. Requires `ALPHA_VANTAGE_API_KEY`. The expanded catalog can be refreshed in one shot:
+
+	```bash
+	python -m data.ingestors.alpha_vantage_macro --run-catalog
+	```
+
+	Default coverage (configurable via `ALPHA_VANTAGE_CATALOG_PATH`, see below):
+
+	| Symbol | Description | Functions |
+	| --- | --- | --- |
+	| SPY | S&P 500 ETF | 60min intraday, daily |
+	| QQQ | Nasdaq 100 ETF | 60min intraday, daily |
+	| DXY | US Dollar Index | daily |
+	| ^TNX | US 10Y Treasury Yield | daily |
+	| VIX | CBOE Volatility Index | daily |
+	| GLD | Gold ETF | 60min intraday, daily |
+	| USO | Oil ETF | 60min intraday, daily |
+	| HYG | High-Yield Corporate Bond ETF | 60min intraday, daily |
+
+	Customize the list by setting `ALPHA_VANTAGE_CATALOG_PATH` to a JSON file matching the on-disk schema, and control throttling with `ALPHA_VANTAGE_SLEEP_SECONDS`. A minimal catalog override looks like:
+
+	```json
+	[
+		{
+			"symbol": "BTCUSD",
+			"name": "Spot Bitcoin",
+			"functions": [
+				{"function": "TIME_SERIES_INTRADAY", "interval": "60min"},
+				{"function": "TIME_SERIES_DAILY"}
+			]
+		}
+	]
+	```
+
+	Pass `--audit` to summarize the most recent ingestions.
 - **CoinAPI spot/perp/funding**: Loads spot and perpetual BTCUSDT market data, plus funding rates. Funding endpoint is premium and currently under vendor investigation (see status below). Requires `COINAPI_KEY`.
 - **CryptoQuant daily fallback**: Ingests daily on-chain metrics (exchange flows, reserves, whale counts) using `CQ_TOKEN`. Hourly access is pending (see status below). Synthetic data is used for fallback if API is unavailable.
 - **FRED macro**: Loads macroeconomic indicators (e.g., trade-weighted USD) using `FRED_API_KEY`.

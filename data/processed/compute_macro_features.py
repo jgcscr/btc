@@ -39,8 +39,8 @@ def _pivot_hourly(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     tidy = tidy.sort_values("ts")
 
     pivot = tidy.pivot_table(index="ts", columns="metric", values="value", aggfunc="last")
-    pivot = pivot.sort_index()
-    hourly = pivot.resample("1h").ffill()
+    pivot = pivot.sort_index().ffill()  # Carry forward sparse symbols before resampling.
+    hourly = pivot.resample("1h").asfreq().ffill()
     hourly.columns = [f"macro_{col}" for col in hourly.columns]
     hourly = hourly.reset_index().rename(columns={"ts": "timestamp"})
     hourly = _add_realized_volatility(hourly)
@@ -66,17 +66,29 @@ def _add_realized_volatility(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _write_summary(frame: pd.DataFrame, path: Path) -> None:
+def _write_summary(
+    frame: pd.DataFrame,
+    path: Path,
+    lookback_duration: pd.Timedelta | None,
+) -> None:
+    window = frame.copy()
+    if lookback_duration is not None and not window.empty:
+        latest_timestamp = window["timestamp"].max()
+        cutoff = latest_timestamp - lookback_duration
+        window = window.loc[window["timestamp"] >= cutoff].copy()
     summary = {
-        "row_count": int(len(frame)),
-        "latest_timestamp": frame["timestamp"].max().isoformat() if not frame.empty else None,
+        "row_count": int(len(window)),
+        "latest_timestamp": window["timestamp"].max().isoformat() if not window.empty else None,
         "columns": {},
     }
     for column in frame.columns:
         if column == "timestamp":
             continue
-        column_data = frame[column]
-        missing_ratio = float(column_data.isna().mean()) if not frame.empty else 1.0
+        column_data = window[column] if column in window else pd.Series(dtype=float)
+        if column_data.empty:
+            missing_ratio = 1.0
+        else:
+            missing_ratio = float(column_data.isna().mean())
         summary["columns"][column] = {
             "missing_ratio": missing_ratio,
             "min": float(column_data.min()) if column_data.notna().any() else None,
@@ -87,12 +99,19 @@ def _write_summary(frame: pd.DataFrame, path: Path) -> None:
     path.write_text(json.dumps(summary, indent=2))
 
 
-def process_macro_features(raw_root: Path = RAW_ROOT, output_path: Path = OUTPUT_PATH) -> Path:
+def process_macro_features(
+    raw_root: Path = RAW_ROOT,
+    output_path: Path = OUTPUT_PATH,
+    summary_lookback_days: int | None = 90,
+) -> Path:
     frames = _load_tidy_frames(raw_root)
     hourly = _pivot_hourly(frames)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     hourly.to_parquet(output_path, index=False)
-    _write_summary(hourly, SUMMARY_PATH)
+    lookback_duration = None
+    if summary_lookback_days is not None:
+        lookback_duration = pd.Timedelta(days=int(summary_lookback_days))
+    _write_summary(hourly, SUMMARY_PATH, lookback_duration)
     return output_path
 
 
@@ -110,12 +129,22 @@ def _parse_args() -> argparse.Namespace:
         default=OUTPUT_PATH,
         help="Output parquet path (default: data/processed/macro/hourly_features.parquet).",
     )
+    parser.add_argument(
+        "--summary-lookback-days",
+        type=int,
+        default=90,
+        help="Window in days for monitoring summary statistics (default: 90).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    output_path = process_macro_features(raw_root=args.raw_root, output_path=args.output)
+    output_path = process_macro_features(
+        raw_root=args.raw_root,
+        output_path=args.output,
+        summary_lookback_days=args.summary_lookback_days,
+    )
     print(f"Wrote macro features to {output_path}")
 
 
