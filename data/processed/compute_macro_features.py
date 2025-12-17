@@ -44,7 +44,46 @@ def _pivot_hourly(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     hourly.columns = [f"macro_{col}" for col in hourly.columns]
     hourly = hourly.reset_index().rename(columns={"ts": "timestamp"})
     hourly = _add_realized_volatility(hourly)
+    hourly = _add_pct_change_columns(hourly)
+    hourly = _drop_constant_columns(hourly)
     return hourly
+
+
+def _add_pct_change_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    targets = [
+        "macro_DXY_close",
+        "macro_DXY_volume",
+        "macro_VIX_close",
+        "macro_VIX_volume",
+    ]
+    result = frame.copy()
+    for column in targets:
+        if column not in result.columns:
+            continue
+        pct_change = result[column].astype(float).pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        result[f"{column}_pct_change"] = pct_change
+    return result
+
+
+def _drop_constant_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    constant_columns: list[str] = []
+    for column in result.columns:
+        if column == "timestamp":
+            continue
+        series = result[column]
+        # Drop columns that are entirely missing or have zero variance.
+        if series.dropna().empty:
+            constant_columns.append(column)
+            continue
+        if np.isclose(series.std(ddof=0), 0.0):
+            constant_columns.append(column)
+    if constant_columns:
+        preview = ", ".join(constant_columns[:5])
+        suffix = "..." if len(constant_columns) > 5 else ""
+        print(f"Dropped {len(constant_columns)} constant macro columns: {preview}{suffix}")
+        result = result.drop(columns=constant_columns)
+    return result
 
 
 def _add_realized_volatility(frame: pd.DataFrame) -> pd.DataFrame:

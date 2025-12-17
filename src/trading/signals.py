@@ -2,6 +2,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -435,11 +436,29 @@ def load_models(
     reg = XGBRegressor()
     reg.load_model(reg_model_path)
     models["reg"] = reg
+    reg_meta_path = Path(reg_model_path).with_name("model_metadata.json")
+    if reg_meta_path.exists():
+        try:
+            metadata = json.loads(reg_meta_path.read_text())
+        except json.JSONDecodeError:
+            metadata = {}
+        feature_names = metadata.get("feature_names")
+        if isinstance(feature_names, list) and feature_names:
+            models["reg_feature_names"] = [str(name) for name in feature_names]
 
     if dir_model_path:
         dir_model = XGBClassifier()
         dir_model.load_model(dir_model_path)
         models["dir"] = dir_model
+        dir_meta_path = Path(dir_model_path).with_name("model_metadata_direction.json")
+        if dir_meta_path.exists():
+            try:
+                dir_metadata = json.loads(dir_meta_path.read_text())
+            except json.JSONDecodeError:
+                dir_metadata = {}
+            dir_feature_names = dir_metadata.get("feature_names")
+            if isinstance(dir_feature_names, list) and dir_feature_names:
+                models["dir_feature_names"] = [str(name) for name in dir_feature_names]
 
     if lstm_model_dir:
         models["dir_lstm"] = _load_lstm_direction_model(lstm_model_dir, device)
@@ -525,20 +544,38 @@ def compute_signal_for_index(
     ts_value = prepared.df_all["ts"].iloc[index]
     X_row = prepared.X_all_ordered.iloc[[index]]
     X_scaled = prepared.scaler.transform(X_row)
+    X_scaled_df = pd.DataFrame(X_scaled, columns=prepared.feature_names)
 
     reg = models["reg"]
     dir_model = models.get("dir")
     lstm_info = models.get("dir_lstm")
     transformer_info = models.get("dir_transformer")
 
-    ret_pred_arr = reg.predict(X_scaled)
+    reg_feature_names = models.get("reg_feature_names")
+    if reg_feature_names:
+        missing = [name for name in reg_feature_names if name not in X_scaled_df.columns]
+        if missing:
+            raise RuntimeError(f"Prepared data missing regression feature columns: {missing}")
+        reg_input = X_scaled_df[reg_feature_names].to_numpy()
+    else:
+        reg_input = X_scaled
+
+    ret_pred_arr = reg.predict(reg_input)
     ret_pred = float(ret_pred_arr[0])
 
     probabilities: Dict[str, float] = {}
     display_labels = {"xgb": "xgboost", "lstm": "lstm", "transformer": "transformer"}
 
     if dir_model is not None:
-        p_up_arr = dir_model.predict_proba(X_scaled)[:, 1]
+        dir_feature_names = models.get("dir_feature_names")
+        if dir_feature_names:
+            missing_dir = [name for name in dir_feature_names if name not in X_scaled_df.columns]
+            if missing_dir:
+                raise RuntimeError(f"Prepared data missing direction feature columns: {missing_dir}")
+            dir_input = X_scaled_df[dir_feature_names].to_numpy()
+        else:
+            dir_input = X_scaled
+        p_up_arr = dir_model.predict_proba(dir_input)[:, 1]
         probabilities["xgb"] = float(p_up_arr[0])
 
     if lstm_info is not None:

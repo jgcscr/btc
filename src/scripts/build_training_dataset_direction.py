@@ -24,6 +24,63 @@ PROCESSED_PATHS = [
 
 META_PATH = Path("artifacts/datasets/btc_features_1h_direction_meta.json")
 
+ZERO_VARIANCE_CANDIDATES = {
+    "fut_volume",
+    "open_interest",
+    "funding_rate",
+    "macro_DXY_close_realized_vol_1h",
+    "macro_VIX_close_realized_vol_1h",
+}
+
+
+def _drop_constant_features(df: pd.DataFrame) -> pd.DataFrame:
+    removed: list[str] = []
+    for column in ZERO_VARIANCE_CANDIDATES:
+        if column not in df.columns:
+            continue
+        series = df[column]
+        if series.dropna().empty or np.isclose(series.std(ddof=0), 0.0):
+            df = df.drop(columns=column)
+            removed.append(column)
+    if removed:
+        preview = ", ".join(removed[:5])
+        suffix = "..." if len(removed) > 5 else ""
+        print(f"Dropped {len(removed)} constant features: {preview}{suffix}")
+    return df
+
+
+def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+
+    def _safe_diff(series: pd.Series) -> pd.Series:
+        return series.diff().fillna(0.0)
+
+    def _safe_pct(series: pd.Series) -> pd.Series:
+        return series.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    for base in ("close", "volume", "fut_close", "fut_volume"):
+        if base not in result.columns:
+            continue
+        result[f"{base}_delta_1h"] = _safe_diff(result[base])
+        result[f"{base}_pct_change_1h"] = _safe_pct(result[base])
+
+    if "close" in result.columns:
+        std_7 = result["close"].rolling(window=7, min_periods=3).std(ddof=0)
+        std_24 = result["close"].rolling(window=24, min_periods=6).std(ddof=0)
+        if "ma_close_7h" in result.columns:
+            denom = std_7.replace(0.0, np.nan)
+            result["close_zscore_7h"] = ((result["close"] - result["ma_close_7h"]) / denom).fillna(0.0)
+        if "ma_close_24h" in result.columns:
+            denom = std_24.replace(0.0, np.nan)
+            result["close_zscore_24h"] = ((result["close"] - result["ma_close_24h"]) / denom).fillna(0.0)
+
+    if "fut_close" in result.columns:
+        rolling_mean = result["fut_close"].rolling(window=7, min_periods=3).mean()
+        rolling_std = result["fut_close"].rolling(window=7, min_periods=3).std(ddof=0).replace(0.0, np.nan)
+        result["fut_close_zscore_7h"] = ((result["fut_close"] - rolling_mean) / rolling_std).fillna(0.0)
+
+    return result
+
 
 def _add_cryptoquant_flags(df: pd.DataFrame) -> pd.DataFrame:
     cq_columns = [col for col in df.columns if col.startswith("cq_daily_")]
@@ -115,6 +172,8 @@ def build_direction_splits(output_dir: str, threshold: float) -> str:
     df = df.sort_values("ts").drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
 
     df = _merge_processed_features(df, PROCESSED_PATHS)
+    df = _augment_price_features(df)
+    df = _drop_constant_features(df)
     df = df.sort_values("ts").reset_index(drop=True)
 
     X, y_ret, ts_series = make_features_and_target(df, target_column="ret_1h", return_ts=True)

@@ -40,9 +40,6 @@ CORE_MODEL_FEATURES = [
     "fut_high",
     "fut_low",
     "fut_close",
-    "fut_volume",
-    "open_interest",
-    "funding_rate",
     "ma_close_7h",
     "ma_close_24h",
     "ma_ratio_7_24",
@@ -52,7 +49,6 @@ CORE_MODEL_FEATURES = [
     "macro_DXY_low",
     "macro_DXY_close",
     "macro_DXY_volume",
-    "macro_DXY_close_realized_vol_1h",
     "macro_DXY_close_realized_vol_24h",
     "macro_US10Y_yield",
     "macro_VIX_open",
@@ -60,9 +56,78 @@ CORE_MODEL_FEATURES = [
     "macro_VIX_low",
     "macro_VIX_close",
     "macro_VIX_volume",
-    "macro_VIX_close_realized_vol_1h",
     "macro_VIX_close_realized_vol_24h",
+    "macro_DXY_close_pct_change",
+    "macro_DXY_volume_pct_change",
+    "macro_VIX_close_pct_change",
+    "macro_VIX_volume_pct_change",
+    "close_delta_1h",
+    "close_pct_change_1h",
+    "volume_delta_1h",
+    "volume_pct_change_1h",
+    "fut_close_delta_1h",
+    "fut_close_pct_change_1h",
+    "close_zscore_7h",
+    "close_zscore_24h",
+    "fut_close_zscore_7h",
 ]
+
+ZERO_VARIANCE_CANDIDATES = {
+    "fut_volume",
+    "open_interest",
+    "funding_rate",
+    "macro_DXY_close_realized_vol_1h",
+    "macro_VIX_close_realized_vol_1h",
+}
+
+
+def _drop_constant_features(df: pd.DataFrame, candidates: Sequence[str]) -> tuple[pd.DataFrame, list[str]]:
+    removed: list[str] = []
+    for column in candidates:
+        if column not in df.columns:
+            continue
+        series = df[column]
+        if series.dropna().empty or np.isclose(series.std(ddof=0), 0.0):
+            df = df.drop(columns=column)
+            removed.append(column)
+    if removed:
+        preview = ", ".join(removed[:5])
+        suffix = "..." if len(removed) > 5 else ""
+        print(f"Dropped {len(removed)} constant features: {preview}{suffix}")
+    return df, removed
+
+
+def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+
+    def _safe_diff(series: pd.Series) -> pd.Series:
+        return series.diff().fillna(0.0)
+
+    def _safe_pct(series: pd.Series) -> pd.Series:
+        return series.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    for base in ("close", "volume", "fut_close", "fut_volume"):
+        if base not in result.columns:
+            continue
+        result[f"{base}_delta_1h"] = _safe_diff(result[base])
+        result[f"{base}_pct_change_1h"] = _safe_pct(result[base])
+
+    if "close" in result.columns:
+        std_7 = result["close"].rolling(window=7, min_periods=3).std(ddof=0)
+        std_24 = result["close"].rolling(window=24, min_periods=6).std(ddof=0)
+        if "ma_close_7h" in result.columns:
+            denom = std_7.replace(0.0, np.nan)
+            result["close_zscore_7h"] = ((result["close"] - result["ma_close_7h"]) / denom).fillna(0.0)
+        if "ma_close_24h" in result.columns:
+            denom = std_24.replace(0.0, np.nan)
+            result["close_zscore_24h"] = ((result["close"] - result["ma_close_24h"]) / denom).fillna(0.0)
+
+    if "fut_close" in result.columns:
+        rolling_mean = result["fut_close"].rolling(window=7, min_periods=3).mean()
+        rolling_std = result["fut_close"].rolling(window=7, min_periods=3).std(ddof=0).replace(0.0, np.nan)
+        result["fut_close_zscore_7h"] = ((result["fut_close"] - rolling_mean) / rolling_std).fillna(0.0)
+
+    return result
 
 
 def _add_cryptoquant_flags(df: pd.DataFrame) -> pd.DataFrame:
@@ -184,6 +249,8 @@ def main(output_dir: str) -> None:
         print(f"[curated_features] Logged {gap_count} non-hourly intervals; upstream gaps remain.")
 
     df = _merge_processed_features(df, PROCESSED_PATHS)
+    df = _augment_price_features(df)
+    df, _ = _drop_constant_features(df, ZERO_VARIANCE_CANDIDATES)
     df, dup_after_merge, gap_after_merge = enforce_unique_hourly_index(
         df,
         label="curated_features_merged",
@@ -198,10 +265,11 @@ def main(output_dir: str) -> None:
             "downstream consumers should handle upstream gaps."
         )
 
+    allowed_features = [feature for feature in CORE_MODEL_FEATURES if feature in df.columns]
     X, y, ts_series = make_features_and_target(
         df,
         target_column="ret_1h",
-        allowed_features=CORE_MODEL_FEATURES,
+        allowed_features=allowed_features,
         return_ts=True,
     )
 

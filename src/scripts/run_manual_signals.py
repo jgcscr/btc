@@ -55,6 +55,39 @@ FEATURE_FALLBACK = [
 ]
 
 
+def _augment_price_features(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+
+    def _safe_diff(series: pd.Series) -> pd.Series:
+        return series.diff().fillna(0.0)
+
+    def _safe_pct(series: pd.Series) -> pd.Series:
+        return series.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    for base in ("close", "volume", "fut_close", "fut_volume"):
+        if base not in result.columns:
+            continue
+        result[f"{base}_delta_1h"] = _safe_diff(result[base])
+        result[f"{base}_pct_change_1h"] = _safe_pct(result[base])
+
+    if "close" in result.columns:
+        std_7 = result["close"].rolling(window=7, min_periods=3).std(ddof=0)
+        std_24 = result["close"].rolling(window=24, min_periods=6).std(ddof=0)
+        if "ma_close_7h" in result.columns:
+            denom = std_7.replace(0.0, np.nan)
+            result["close_zscore_7h"] = ((result["close"] - result["ma_close_7h"]) / denom).fillna(0.0)
+        if "ma_close_24h" in result.columns:
+            denom = std_24.replace(0.0, np.nan)
+            result["close_zscore_24h"] = ((result["close"] - result["ma_close_24h"]) / denom).fillna(0.0)
+
+    if "fut_close" in result.columns:
+        rolling_mean = result["fut_close"].rolling(window=7, min_periods=3).mean()
+        rolling_std = result["fut_close"].rolling(window=7, min_periods=3).std(ddof=0).replace(0.0, np.nan)
+        result["fut_close_zscore_7h"] = ((result["fut_close"] - rolling_mean) / rolling_std).fillna(0.0)
+
+    return result
+
+
 def parse_targets(value: str) -> List[int]:
     parts = [part.strip() for part in value.split(",") if part.strip()]
     if not parts:
@@ -95,9 +128,14 @@ def load_feature_names(dataset_path: Path) -> List[str]:
         if dataset_features and any(name not in dataset_features for name in meta_features):
             missing = [name for name in meta_features if name not in dataset_features]
             print(
-                f"Warning: dataset is missing model feature columns {missing}; falling back to dataset feature list.",
+                f"Warning: dataset is missing model feature columns {missing}; using combined feature list.",
                 file=sys.stderr,
             )
+            combined = list(dataset_features)
+            for name in meta_features:
+                if name not in combined:
+                    combined.append(name)
+            return combined
         else:
             return meta_features
 
@@ -194,6 +232,7 @@ def _build_spot_features(hours: int, feature_names: List[str]) -> tuple[pd.DataF
         raise RuntimeError("Spot pivot is empty after computing derived metrics; increase --hours")
 
     pivot = pivot.reset_index()
+    pivot = _augment_price_features(pivot)
 
     latest_row = pivot.iloc[-1]
     missing_columns = [col for col in feature_names if col not in pivot or pivot[col].isna().all()]
@@ -353,13 +392,15 @@ def load_models_for_horizon(horizon: int) -> tuple[Path, Path] | None:
 
 def prepare_feature_frame(combined: pd.DataFrame, feature_names: List[str]) -> pd.DataFrame:
     clean, _, _ = enforce_unique_hourly_index(combined, label="manual_features")
-    frame = clean[["ts", *feature_names]].copy()
+    base_columns = ["ts", *(col for col in feature_names if col in clean.columns)]
+    frame = clean[base_columns].copy()
     for column in feature_names:
-        if column not in frame:
-            frame[column] = 0.0
+        if column not in frame.columns:
+            frame[column] = np.nan
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame = frame.sort_values("ts").reset_index(drop=True)
     frame[feature_names] = frame[feature_names].ffill().bfill().fillna(0.0)
+    frame = frame[["ts", *feature_names]]
     return frame
 
 
