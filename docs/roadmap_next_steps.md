@@ -12,6 +12,7 @@ The current BTC trading stack reliably produces hourly ensemble signals augmente
   - Standardize feature versioning and data quality checks.
   - Produce refreshed NPZ artifacts (1h, multi-horizon, new domains).
 - **Outputs:** New `data/` loaders, updated SQL/feature specs, data validation reports.
+- **Status:** Completed – refreshed curated BigQuery table, rotated macro catalog with key manager improvements, instrumented dataset metadata/timestamps, and shipped Alpha Vantage quota monitor groundwork.
 - **Dependencies & Risks:** External API stability, cost of historical backfill, need for schema evolution in BigQuery.
 
 ### Phase 2 – Modeling Enhancements
@@ -42,12 +43,11 @@ The current BTC trading stack reliably produces hourly ensemble signals augmente
 - **Dependencies & Risks:** Production exchange limits, credentials management, incident response staffing.
 
 ## Near-Term Task Queue (Next 4–6 Weeks)
-1. Build on-chain data loader (Glassnode/DefiLlama) and integrate into nightly ingestion.
-2. Extend dataset builder to include volatility and funding-rate features; regenerate NPZ splits.
-3. Add LSTM sequence training script using existing multi-horizon dataset; log experiments via MLflow.
-4. Stand up Optuna hyperparameter sweep for XGBoost + LSTM thresholds with budgeted compute.
-5. Implement ensemble orchestration script that blends tree + neural predictions with configurable weights.
-6. Enhance monitoring scripts with automated alert routing (Slack/webhook) and retry logic.
+1. Evaluate alternate macro providers (e.g., FRED premium, Twelve Data) and prepare phase-in plan alongside Alpha Vantage catalog.
+2. Automate Alpha Vantage quota alerts (Slack/SNS) using the new usage monitor and integrate with nightly scheduler.
+3. Restore premium CryptoQuant hourly metrics and CoinAPI funding coverage; rerun feature pipelines once vendor access returns.
+4. Extend LSTM/Optuna experiments from Phase 2 backlog after data reliability items above are cleared.
+5. Document alert runbooks and verify incident routing for macro/quota failures.
 
 ## Medium-Term Initiatives (1–3 Quarters)
 - Transformer-based sequence encoder (Temporal Fusion Transformer or Informer) for multi-horizon forecasting.
