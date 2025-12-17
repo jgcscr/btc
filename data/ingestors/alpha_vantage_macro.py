@@ -22,6 +22,20 @@ CATALOG_SUMMARY_PATH = Path("artifacts/monitoring/alpha_vantage_catalog.json")
 DEFAULT_BACKOFF_SECONDS = 30.0
 MAX_BACKOFF_SECONDS = 900.0
 DEFAULT_SLEEP_SECONDS = 5.0
+TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
+TWELVE_DATA_RAW_ROOT = Path("data/raw/macro/twelvedata")
+TWELVE_DATA_SYMBOL_MAP: Dict[str, List[str]] = {
+    "DXY": ["UUP", "DXY"],
+    "VIX": ["VIXY", "VIX"],
+}
+TWELVE_DATA_API_KEY_ENV = "TWELVE_DATA_API_KEY"
+_PROVIDER_ALIASES: Dict[str, Sequence[str]] = {
+    "alpha": ("alpha", "alphavantage", "alpha_vantage"),
+    "twelve": ("twelve", "twelvedata", "twelve_data"),
+}
+SUPPORTED_PROVIDERS = frozenset(_PROVIDER_ALIASES.keys())
+SUPPORTED_PROVIDER_CHOICES = tuple(sorted(SUPPORTED_PROVIDERS))
+DEFAULT_PROVIDER = "alpha"
 DEFAULT_CATALOG: List[Dict[str, Any]] = [
     {
         "symbol": "SPY",
@@ -138,6 +152,53 @@ class AlphaVantageRateLimitError(AlphaVantageIngestionError):
 
 class AlphaVantageInvalidKeyError(AlphaVantageIngestionError):
     """Raised when no valid Alpha Vantage API keys remain."""
+
+
+class TwelveDataIngestionError(AlphaVantageIngestionError):
+    """Raised when Twelve Data ingestion fails."""
+
+
+def _normalize_provider(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return None
+    for canonical, aliases in _PROVIDER_ALIASES.items():
+        if cleaned == canonical or cleaned in aliases:
+            return canonical
+    return cleaned
+
+
+def _resolve_provider(provider: Optional[str]) -> str:
+    normalized = _normalize_provider(provider)
+    if normalized:
+        if normalized not in SUPPORTED_PROVIDERS:
+            choices = ", ".join(sorted(SUPPORTED_PROVIDERS))
+            raise AlphaVantageIngestionError(f"Unsupported provider '{provider}'. Supported: {choices}")
+        return normalized
+    env_value = _normalize_provider(os.getenv("MACRO_PROVIDER"))
+    if env_value:
+        if env_value not in SUPPORTED_PROVIDERS:
+            choices = ", ".join(sorted(SUPPORTED_PROVIDERS))
+            raise AlphaVantageIngestionError(
+                f"Environment variable MACRO_PROVIDER specifies unsupported provider '{env_value}'. Supported: {choices}",
+            )
+        return env_value
+    return DEFAULT_PROVIDER
+
+
+def _require_twelve_api_key(explicit: Optional[str] = None) -> str:
+    if explicit:
+        key = explicit.strip()
+        if key:
+            return key
+    env_value = os.getenv(TWELVE_DATA_API_KEY_ENV, "").strip()
+    if not env_value:
+        raise TwelveDataIngestionError(
+            f"Twelve Data ingestion requires {TWELVE_DATA_API_KEY_ENV} environment variable to be set.",
+        )
+    return env_value
 
 
 @dataclass
@@ -257,6 +318,125 @@ class AlphaVantageKeyManager:
         with self._usage_path.open("w", encoding="utf-8") as handle:
             json.dump(self._usage, handle, indent=2)
 
+
+def _twelve_attempt_symbols(symbol: str, aliases: Sequence[str]) -> List[str]:
+    attempts: List[str] = []
+    preferred = TWELVE_DATA_SYMBOL_MAP.get(symbol, [symbol])
+    for candidate in preferred:
+        if candidate and candidate not in attempts:
+            attempts.append(candidate)
+    for alias in aliases:
+        mapped = TWELVE_DATA_SYMBOL_MAP.get(alias, [alias])
+        for candidate in mapped:
+            if candidate and candidate not in attempts:
+                attempts.append(candidate)
+    return attempts or [symbol]
+
+
+def _map_twelve_interval(function: str, interval: Optional[str]) -> str:
+    if function == "TIME_SERIES_DAILY":
+        return "1day"
+    mapping = {
+        "60min": "1h",
+        "30min": "30min",
+        "15min": "15min",
+        "5min": "5min",
+        "1min": "1min",
+    }
+    if not interval:
+        return "1h"
+    cleaned = interval.strip().lower()
+    return mapping.get(cleaned, cleaned)
+
+
+def _fetch_twelve_time_series(
+    api_key: str,
+    request_symbol: str,
+    canonical_symbol: str,
+    interval: str,
+    outputsize: str = "5000",
+    timezone_value: str = "UTC",
+) -> pd.DataFrame:
+    params = {
+        "symbol": request_symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "timezone": timezone_value,
+        "apikey": api_key,
+    }
+    try:
+        response = requests.get(TWELVE_DATA_URL, params=params, timeout=30)
+    except requests.RequestException as exc:  # pragma: no cover - defensive guard
+        raise TwelveDataIngestionError(f"Twelve Data request failed: {exc}") from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:  # pragma: no cover - defensive guard
+        raise TwelveDataIngestionError(f"Failed to parse Twelve Data response: {exc}") from exc
+
+    if response.status_code != 200 or payload.get("status") == "error":
+        message = payload.get("message") if isinstance(payload, dict) else response.text
+        raise TwelveDataIngestionError(f"Twelve Data returned error for {request_symbol}: {message}")
+
+    values = payload.get("values")
+    if not values:
+        raise TwelveDataIngestionError(f"Twelve Data returned no values for {request_symbol} ({canonical_symbol}).")
+
+    rows: List[Dict[str, Any]] = []
+    for entry in values:
+        timestamp = entry.get("datetime")
+        if not timestamp:
+            continue
+        ts = pd.to_datetime(timestamp, utc=True, errors="coerce")
+        if pd.isna(ts):
+            continue
+        for field in ("open", "high", "low", "close", "volume"):
+            value = entry.get(field)
+            try:
+                numeric_value = float(value) if value not in (None, "") else None
+            except (TypeError, ValueError):
+                numeric_value = None
+            rows.append(
+                {
+                    "ts": ts,
+                    "metric": f"{canonical_symbol}_{field}",
+                    "value": numeric_value,
+                    "source": "twelve_data",
+                },
+            )
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        raise TwelveDataIngestionError(f"Twelve Data parsing produced no rows for {request_symbol}.")
+    frame = frame.sort_values("ts").reset_index(drop=True)
+    return frame
+
+
+def _persist_provider_frame(
+    frame: pd.DataFrame,
+    provider: str,
+    output_root: Path,
+    canonical_symbol: str,
+    attempt_symbol: str,
+    function: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> Tuple[Path, Dict[str, Any]]:
+    safe_canonical = canonical_symbol.replace("/", "_").replace(":", "_")
+    output_dir = output_root / f"symbol={safe_canonical}" / function.lower()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    attempt_label = attempt_symbol.replace("/", "_").replace(":", "_")
+    output_path = output_dir / f"{provider}_{attempt_label}_{function.lower()}_{timestamp}.parquet"
+    frame.to_parquet(output_path, index=False)
+    summary = {
+        "rows": int(len(frame)),
+        "first_timestamp": frame["ts"].min().isoformat() if not frame.empty else None,
+        "latest_timestamp": frame["ts"].max().isoformat() if not frame.empty else None,
+        "interval": params.get("interval") if params else None,
+        "params": params or {},
+        "provider": provider,
+    }
+    return output_path, summary
 
 def _build_params(function: str, api_key: str, params: Optional[Dict[str, Any]]) -> Dict[str, str]:
     request: Dict[str, str] = {
@@ -567,18 +747,84 @@ def ingest_series(
     canonical_symbol: Optional[str] = None,
     attempt_symbol: Optional[str] = None,
     key_manager: Optional[AlphaVantageKeyManager] = None,
+    provider: Optional[str] = None,
+    aliases: Optional[Sequence[str]] = None,
+    twelve_api_key: Optional[str] = None,
 ) -> Path | Tuple[Path, Dict[str, Any]]:
     if function not in SUPPORTED_FUNCTIONS:
         supported = ", ".join(SUPPORTED_FUNCTIONS)
         raise AlphaVantageIngestionError(f"Unsupported function '{function}'. Supported: {supported}")
     params = {str(key): value for key, value in params.items()}
-    manager = key_manager or AlphaVantageKeyManager.from_env()
-
+    resolved_provider = _resolve_provider(provider)
     canonical = canonical_symbol or attempt_symbol or params.get("symbol")
     if not canonical:
         raise AlphaVantageIngestionError("Canonical symbol is required to label metrics.")
     canonical = str(canonical)
     attempt_value = str(attempt_symbol or canonical)
+    alias_values = [alias for alias in (aliases or []) if alias]
+    target_output_root = output_root
+    if resolved_provider == "twelve" and target_output_root == RAW_ROOT:
+        target_output_root = TWELVE_DATA_RAW_ROOT
+
+    if resolved_provider == "twelve":
+        if SUPPORTED_FUNCTIONS[function]["response_type"] != "time_series":
+            raise TwelveDataIngestionError(
+                f"Twelve Data provider currently supports only time series functions; received {function}.",
+            )
+        interval = _map_twelve_interval(function, params.get("interval"))
+        timezone_value = str(params.get("timezone", "UTC"))
+        outputsize = str(params.get("outputsize", "5000"))
+        request_candidates = _twelve_attempt_symbols(attempt_value, alias_values)
+        api_key = _require_twelve_api_key(twelve_api_key)
+        last_error: Optional[Exception] = None
+        frame: Optional[pd.DataFrame] = None
+        output_path: Optional[Path] = None
+        summary: Dict[str, Any] = {}
+        selected_symbol: Optional[str] = None
+        for request_symbol in request_candidates:
+            try:
+                frame = _fetch_twelve_time_series(
+                    api_key=api_key,
+                    request_symbol=request_symbol,
+                    canonical_symbol=canonical,
+                    interval=interval,
+                    outputsize=outputsize,
+                    timezone_value=timezone_value,
+                )
+                output_path, summary = _persist_provider_frame(
+                    frame=frame,
+                    provider="twelvedata",
+                    output_root=target_output_root,
+                    canonical_symbol=canonical,
+                    attempt_symbol=request_symbol,
+                    function=function,
+                    params={"interval": interval, "outputsize": outputsize, "timezone": timezone_value},
+                )
+                selected_symbol = request_symbol
+                break
+            except TwelveDataIngestionError as exc:
+                last_error = exc
+                print(f"Warning: Twelve Data attempt failed for {canonical} via {request_symbol}: {exc}")
+                continue
+        if frame is None or output_path is None:
+            raise TwelveDataIngestionError(
+                f"Twelve Data ingestion failed for {canonical}. Last error: {last_error}",
+            )
+
+        sample = frame.head(5)
+        print("Twelve Data sample rows:\n", sample)
+        metadata_params = dict(params)
+        if selected_symbol:
+            metadata_params.setdefault("provider_symbol", selected_symbol)
+        summary.update({
+            "provider": resolved_provider,
+            "params": metadata_params,
+        })
+        if return_summary:
+            return output_path, summary
+        return output_path
+
+    manager = key_manager or AlphaVantageKeyManager.from_env()
 
     response_type = SUPPORTED_FUNCTIONS[function]["response_type"]
     interval = params.get("interval")
@@ -665,7 +911,7 @@ def ingest_series(
     print("Alpha Vantage sample rows:\n", sample)
 
     safe_canonical = canonical.replace("/", "_").replace(":", "_")
-    output_dir = output_root / f"symbol={safe_canonical}" / function.lower()
+    output_dir = target_output_root / f"symbol={safe_canonical}" / function.lower()
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     attempt_label = attempt_value.replace("/", "_").replace(":", "_")
@@ -678,6 +924,7 @@ def ingest_series(
         "latest_timestamp": frame["ts"].max().isoformat() if not frame.empty else None,
         "interval": params.get("interval"),
         "params": params,
+        "provider": resolved_provider,
     }
     if return_summary:
         return output_path, summary
@@ -705,6 +952,15 @@ def _validate_catalog(catalog: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]
         functions = entry.get("functions")
         if not symbol or not isinstance(functions, list):
             raise AlphaVantageIngestionError("Catalog entries must include 'symbol' and 'functions' list.")
+        entry_provider_raw = entry.get("provider")
+        entry_provider: Optional[str] = None
+        if entry_provider_raw is not None:
+            entry_provider = _normalize_provider(str(entry_provider_raw))
+            if entry_provider not in SUPPORTED_PROVIDERS:
+                choices = ", ".join(sorted(SUPPORTED_PROVIDERS))
+                raise AlphaVantageIngestionError(
+                    f"Catalog entry for {symbol} references unsupported provider '{entry_provider_raw}'. Supported: {choices}",
+                )
         parsed_funcs: List[Dict[str, Any]] = []
         for spec in functions:
             fn = spec.get("function")
@@ -725,12 +981,22 @@ def _validate_catalog(catalog: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]
                     )
                 for key, value in extra_params.items():
                     params[str(key)] = value
-            parsed_funcs.append({"function": fn, "params": params})
+            spec_provider_raw = spec.get("provider")
+            spec_provider: Optional[str] = None
+            if spec_provider_raw is not None:
+                spec_provider = _normalize_provider(str(spec_provider_raw))
+                if spec_provider not in SUPPORTED_PROVIDERS:
+                    choices = ", ".join(sorted(SUPPORTED_PROVIDERS))
+                    raise AlphaVantageIngestionError(
+                        f"Catalog entry for {symbol} function {fn} references unsupported provider '{spec_provider_raw}'. Supported: {choices}",
+                    )
+            parsed_funcs.append({"function": fn, "params": params, "provider": spec_provider})
         validated.append({
             "symbol": str(symbol),
             "name": entry.get("name", str(symbol)),
             "functions": parsed_funcs,
             "aliases": [str(alias) for alias in entry.get("aliases", DEFAULT_ALIASES.get(str(symbol), []))],
+            "provider": entry_provider,
         })
     return validated
 
@@ -745,6 +1011,8 @@ def ingest_catalog(
     catalog: Optional[Sequence[Dict[str, Any]]] = None,
     sleep_seconds: Optional[float] = None,
     output_root: Path = RAW_ROOT,
+    provider: Optional[str] = None,
+    twelve_api_key: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     catalog_path_env = os.getenv("ALPHA_VANTAGE_CATALOG_PATH")
     resolved_catalog = catalog
@@ -758,13 +1026,14 @@ def ingest_catalog(
         sleep_seconds = float(sleep_env) if sleep_env else DEFAULT_SLEEP_SECONDS
 
     total_requests = sum(len(entry["functions"]) for entry in validated_catalog)
-    key_manager = AlphaVantageKeyManager.from_env() if total_requests else None
+    alpha_manager: Optional[AlphaVantageKeyManager] = None
     results: List[Dict[str, Any]] = []
     completed = 0
 
     for entry in validated_catalog:
         symbol = entry["symbol"]
         aliases = [alias for alias in entry.get("aliases", []) if alias]
+        entry_provider = entry.get("provider") or provider
         for spec in entry["functions"]:
             fn = spec["function"]
             fn_config = SUPPORTED_FUNCTIONS[fn]
@@ -777,11 +1046,18 @@ def ingest_catalog(
             resolved_symbol: Optional[str] = None
             output_path: Optional[Path] = None
             summary: Dict[str, Any] = {}
+            spec_provider = spec.get("provider") or entry_provider
             for attempt in attempt_symbols:
                 try:
                     params = dict(base_params)
                     if requires_symbol:
                         params["symbol"] = attempt
+                    resolved_provider = _resolve_provider(spec_provider)
+                    manager_to_use: Optional[AlphaVantageKeyManager] = None
+                    if resolved_provider == "alpha":
+                        if alpha_manager is None:
+                            alpha_manager = AlphaVantageKeyManager.from_env()
+                        manager_to_use = alpha_manager
                     path, attempt_summary = ingest_series(
                         function=fn,
                         params=params,
@@ -789,7 +1065,10 @@ def ingest_catalog(
                         return_summary=True,
                         canonical_symbol=symbol,
                         attempt_symbol=attempt if requires_symbol else symbol,
-                        key_manager=key_manager,
+                        key_manager=manager_to_use,
+                        provider=resolved_provider,
+                        aliases=aliases,
+                        twelve_api_key=twelve_api_key,
                     )
                     resolved_symbol = attempt
                     output_path = Path(path)
@@ -811,6 +1090,7 @@ def ingest_catalog(
                     "status": "success",
                     "resolved_symbol": resolved_symbol,
                     "params": summary.get("params"),
+                    "provider": summary.get("provider", spec_provider),
                 }
             else:
                 result = {
@@ -824,6 +1104,7 @@ def ingest_catalog(
                     "resolved_symbol": None,
                     "error": last_error,
                     "params": base_params,
+                    "provider": _normalize_provider(spec_provider) if spec_provider else None,
                 }
             results.append(result)
             completed += 1
@@ -832,15 +1113,17 @@ def ingest_catalog(
 
     success = sum(1 for row in results if row["status"] == "success")
     errors = [row for row in results if row["status"] != "success"]
+    providers_run = sorted({row.get("provider") for row in results if row.get("provider")})
+    providers_label = ", ".join(providers_run) if providers_run else "unknown"
     print(
-        f"Alpha Vantage catalog ingestion finished: {success}/{len(results)} calls succeeded. "
+        f"Macro catalog ingestion finished ({providers_label}): {success}/{len(results)} calls succeeded. "
         f"sleep_seconds={sleep_seconds}.",
     )
     if errors:
         print("Failures detected:")
         for row in errors:
             print(
-                f"  - {row['symbol']} {row['function']} ({row.get('interval')}) -> {row.get('error')}",
+                f"  - {row['symbol']} {row['function']} ({row.get('interval')}) [{row.get('provider')}] -> {row.get('error')}",
             )
     CATALOG_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CATALOG_SUMMARY_PATH.open("w", encoding="utf-8") as handle:
@@ -870,7 +1153,7 @@ def _infer_frequency(ts: pd.Series) -> str:
 def audit_outputs(output_root: Path = RAW_ROOT) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     if not output_root.exists():
-        print(f"No Alpha Vantage outputs found under {output_root}.")
+        print(f"No macro outputs found under {output_root}.")
         return rows
 
     for parquet_path in output_root.rglob("*.parquet"):
@@ -897,7 +1180,7 @@ def audit_outputs(output_root: Path = RAW_ROOT) -> List[Dict[str, Any]]:
         )
 
     if not rows:
-        print(f"No Alpha Vantage parquet files detected under {output_root}.")
+        print(f"No macro parquet files detected under {output_root}.")
         return rows
 
     summary = pd.DataFrame(rows)
@@ -958,22 +1241,43 @@ def _parse_args() -> argparse.Namespace:
         help="Seconds to wait between catalog requests (default: ALPHA_VANTAGE_SLEEP_SECONDS env or 5.0).",
     )
     parser.add_argument(
+        "--provider",
+        choices=SUPPORTED_PROVIDER_CHOICES,
+        default=None,
+        help="Data provider to use (default resolves from MACRO_PROVIDER env or alpha).",
+    )
+    parser.add_argument(
+        "--twelve-api-key",
+        default=None,
+        help=f"Override Twelve Data API key (default uses {TWELVE_DATA_API_KEY_ENV}).",
+    )
+    parser.add_argument(
         "--audit",
         action="store_true",
-        help="Print a summary of the most recent Alpha Vantage ingestions and exit.",
+        help="Print a summary of the most recent macro ingestions and exit.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    resolved_provider = _resolve_provider(args.provider)
+    output_root = args.output_root
+    if resolved_provider == "twelve" and output_root == RAW_ROOT:
+        output_root = TWELVE_DATA_RAW_ROOT
     if args.audit:
-        audit_outputs(args.output_root)
+        audit_outputs(output_root)
         return
 
     if args.run_catalog:
         catalog = _load_catalog(args.catalog_path) if args.catalog_path else None
-        ingest_catalog(catalog=catalog, sleep_seconds=args.sleep_seconds, output_root=args.output_root)
+        ingest_catalog(
+            catalog=catalog,
+            sleep_seconds=args.sleep_seconds,
+            output_root=output_root,
+            provider=resolved_provider,
+            twelve_api_key=args.twelve_api_key,
+        )
         return
 
     if not args.function or not args.symbol:
@@ -987,14 +1291,18 @@ def main() -> None:
     extra_params = _parse_cli_params(args.param)
     params.update(extra_params)
 
-    manager = AlphaVantageKeyManager.from_env()
+    manager: Optional[AlphaVantageKeyManager] = None
+    if resolved_provider == "alpha":
+        manager = AlphaVantageKeyManager.from_env()
     ingest_series(
         function=args.function,
         params=params,
-        output_root=args.output_root,
+        output_root=output_root,
         canonical_symbol=args.symbol,
         attempt_symbol=args.symbol,
         key_manager=manager,
+        provider=resolved_provider,
+        twelve_api_key=args.twelve_api_key,
     )
 
 

@@ -26,10 +26,13 @@ Set the following environment variables for premium data access:
 
 - `FRED_API_KEY` (required for FRED macro ingestion)
 - `ALPHA_VANTAGE_API_KEY` (required for Alpha Vantage macro)
+- `TWELVE_DATA_API_KEY` (required when `MACRO_PROVIDER=twelve`)
 - `COINAPI_KEY` (required for CoinAPI spot, perp, and funding)
 - `CQ_TOKEN` (required for CryptoQuant daily metrics)
 
 These providers are now in active use. Free endpoints are no longer sufficient for full feature coverage.
+
+Macro ingestion defaults to Alpha Vantage; set `MACRO_PROVIDER=twelve` (or pass `--provider twelve`) to route through Twelve Data when the Twelve key is present. Clearing the flag falls back to Alpha Vantage automatically.
 
 
 ## Quick Manual Prediction
@@ -74,7 +77,7 @@ Pipeline regression tests covering the CLI live in `tests/pipeline/` and can be 
 
 ### Active Data Loaders
 
-- **Alpha Vantage macro**: Ingests macroeconomic series (e.g., SPX, DXY) using premium Alpha Vantage endpoints. Requires `ALPHA_VANTAGE_API_KEY`. The expanded catalog can be refreshed in one shot:
+- **Macro provider (Alpha Vantage / Twelve Data)**: Ingests macroeconomic series (e.g., SPX, DXY, VIX) from the selected vendor. Defaults to Alpha Vantage (requires `ALPHA_VANTAGE_API_KEY`). Set `MACRO_PROVIDER=twelve` (or `--provider twelve`) to pull from Twelve Data instead (requires `TWELVE_DATA_API_KEY`). The expanded catalog can be refreshed in one shot:
 
 	```bash
 	python -m data.ingestors.alpha_vantage_macro --run-catalog
@@ -82,16 +85,18 @@ Pipeline regression tests covering the CLI live in `tests/pipeline/` and can be 
 
 	Default coverage (configurable via `ALPHA_VANTAGE_CATALOG_PATH`, see below):
 
-	| Symbol | Description | Functions |
-	| --- | --- | --- |
-	| SPY | S&P 500 ETF | 60min intraday, daily |
-	| QQQ | Nasdaq 100 ETF | 60min intraday, daily |
-	| DXY | US Dollar Index | daily |
-	| ^TNX | US 10Y Treasury Yield | daily |
-	| VIX | CBOE Volatility Index | daily |
-	| GLD | Gold ETF | 60min intraday, daily |
-	| USO | Oil ETF | 60min intraday, daily |
-	| HYG | High-Yield Corporate Bond ETF | 60min intraday, daily |
+	| Symbol | Description | Functions | Twelve Data proxy |
+	| --- | --- | --- | --- |
+	| SPY | S&P 500 ETF | 60min intraday, daily | (same) |
+	| QQQ | Nasdaq 100 ETF | 60min intraday, daily | (same) |
+	| DXY | US Dollar Index | daily | Uses `UUP` for ETF proxy |
+	| ^TNX | US 10Y Treasury Yield | daily | Falls back to Alpha Vantage |
+	| VIX | CBOE Volatility Index | daily | Uses `VIXY` for ETF proxy |
+	| GLD | Gold ETF | 60min intraday, daily | Twelve Data supports daily only |
+	| USO | Oil ETF | 60min intraday, daily | Twelve Data supports daily only |
+	| HYG | High-Yield Corporate Bond ETF | 60min intraday, daily | Twelve Data supports daily only |
+
+	Twelve Data currently exposes standard intra-day and daily time series; Alpha Vantage remains the fallback for intraday extended slices and treasury yield endpoints. When a Twelve Data call fails, the ingestor automatically tries the next alias (for example `DXY` → `UUP`, `VIX` → `VIXY`) and reports any unresolved functions in the monitoring summary.
 
 	Customize the list by setting `ALPHA_VANTAGE_CATALOG_PATH` to a JSON file matching the on-disk schema, and control throttling with `ALPHA_VANTAGE_SLEEP_SECONDS`. A minimal catalog override looks like:
 
@@ -135,7 +140,7 @@ Each processor emits:
 
 ### Monitoring
 
-#### Alpha Vantage quota monitor
+#### Alpha Vantage/Twelve macro monitor
 
 Run the lightweight quota monitor after any ingestion burst (and during nightly automation) to confirm remaining call headroom:
 
@@ -146,6 +151,8 @@ python -m src.scripts.monitor_alpha_vantage_quota
 Optional environment variables:
 
 - `ALPHA_VANTAGE_ALERT_THRESHOLD` (default `180`): per-key call ceiling for the current UTC day.
+
+Set `MACRO_PROVIDER` before broader refresh jobs to ensure the desired vendor remains active; leaving it unset falls back to Alpha Vantage.
 
 Example summary when all keys remain under the threshold:
 

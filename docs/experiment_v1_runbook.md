@@ -16,6 +16,20 @@ pip install -r requirements.txt
   - Dataset: `btc_forecast_curated`
   - Table: `btc_features_1h`
 - Verify GCP credentials (e.g., `GOOGLE_APPLICATION_CREDENTIALS`) are set so that `load_btc_features_1h` works.
+- Macro data requires either `ALPHA_VANTAGE_API_KEY` (default provider) or `TWELVE_DATA_API_KEY` with `MACRO_PROVIDER=twelve`. Leaving `MACRO_PROVIDER` unset falls back to Alpha Vantage automatically; the CLI also accepts `--provider {alpha,twelve}` on demand.
+
+### 1.1 Macro provider selection
+
+- Default behavior: Alpha Vantage remains active when `MACRO_PROVIDER` is omitted. Set `MACRO_PROVIDER=twelve` (or pass `--provider twelve`) to switch the ingestor and refresh scripts to Twelve Data.
+- Twelve Data requires `TWELVE_DATA_API_KEY` and automatically maps ETF proxies for symbols that lack native support.
+- Alias mapping currently used by the ingestor:
+
+  | Canonical symbol | Twelve Data symbol |
+  | --- | --- |
+  | `DXY` | `UUP` (US Dollar Index ETF) |
+  | `VIX` | `VIXY` (S&P 500 VIX Short-Term Futures ETF) |
+
+- Functions unsupported by Twelve Data (for example `TIME_SERIES_INTRADAY_EXTENDED`, `TREASURY_YIELD`) remain on Alpha Vantage and are reported in the catalog summary when skipped.
 
 ## 2. Reproduce v1 Backtest (Signals on NPZ Splits)
 
