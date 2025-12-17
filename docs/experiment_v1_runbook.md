@@ -163,6 +163,10 @@ Example cron entry (run at 5 minutes past every hour, adjust path):
 
 Ensure the environment (virtualenv, `PYTHONPATH`, GCP credentials) is correctly initialized in the cron context.
 
+### 4.2 Nightly quota check
+
+Schedule `python -m src.scripts.monitor_alpha_vantage_quota` once per night (after macro ingestion) with `ALPHA_VANTAGE_ALERT_THRESHOLD` set to the desired per-key ceiling. Capture the JSON output in logs or forward it to alerting so the Phase 2 automation can flag days where Alpha Vantage usage nears quota.
+
 ## 5. Where to Look
 
 - Datasets: `artifacts/datasets/btc_features_1h_splits.npz`.

@@ -133,6 +133,38 @@ Each processor emits:
 - `artifacts/monitoring/*_summary.json` (coverage, nulls, diagnostics)
 - All dataset builders now pull from these processed Parquet files
 
+### Monitoring
+
+#### Alpha Vantage quota monitor
+
+Run the lightweight quota monitor after any ingestion burst (and during nightly automation) to confirm remaining call headroom:
+
+```bash
+python -m src.scripts.monitor_alpha_vantage_quota
+```
+
+Optional environment variables:
+
+- `ALPHA_VANTAGE_ALERT_THRESHOLD` (default `180`): per-key call ceiling for the current UTC day.
+
+Example summary when all keys remain under the threshold:
+
+```json
+{
+	"date": "2025-12-17",
+	"threshold": 180.0,
+	"keys": {
+		"HVBSTQAQ43M17SQ1": {
+			"calls": 147.0,
+			"rate_limit_hits": 0,
+			"remaining": 33.0,
+			"last_updated": "2025-12-17T14:41:07.431991+00:00"
+		}
+	},
+	"message": "All keys remain under threshold."
+}
+```
+
 
 ## 3. Vendor Status & Escalations
 
