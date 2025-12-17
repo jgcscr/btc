@@ -76,7 +76,8 @@ def make_features_and_target(
     target_column: str = "ret_1h",
     dropna: bool = True,
     allowed_features: Optional[Sequence[str]] = None,
-) -> Tuple[pd.DataFrame, pd.Series]:
+    return_ts: bool = False,
+) -> Tuple[pd.DataFrame, pd.Series] | Tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Create feature matrix X and target y from the curated features table.
 
     - Sorts by ts.
@@ -103,7 +104,9 @@ def make_features_and_target(
         feature_cols = list(allowed_features)
 
     X = df[feature_cols].copy()
-
+    if return_ts:
+        ts_series = df["ts"].copy()
+        return X, y, ts_series
     return X, y
 
 

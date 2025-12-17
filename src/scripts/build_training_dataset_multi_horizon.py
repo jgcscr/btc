@@ -1,5 +1,7 @@
 import argparse
+import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
@@ -66,6 +68,8 @@ CORE_MODEL_FEATURES = [
     "macro_VIX_close_realized_vol_1h",
     "macro_VIX_close_realized_vol_24h",
 ]
+
+META_PATH = Path("artifacts/datasets/btc_features_multi_horizon_meta.json")
 
 
 def _add_cryptoquant_flags(df: pd.DataFrame) -> pd.DataFrame:
@@ -237,6 +241,11 @@ def build_multi_horizon_dataset(
 
     data_ret = {h: df_targets[f"ret_{h}h"].to_numpy(dtype=np.float32) for h in horizons if h != 1}
     data_dir = {h: df_targets[f"dir_{h}h"].to_numpy(dtype=np.int8) for h in horizons}
+    ts_values = df_targets["ts"].to_numpy(dtype="datetime64[ns]")
+
+    ts_train = ts_values[:n_train]
+    ts_val = ts_values[n_train:n_train + n_val]
+    ts_test = ts_values[n_train + n_val :]
 
     if output_path is None:
         output_path = os.path.join(output_dir, "btc_features_multi_horizon_splits.npz")
@@ -248,6 +257,9 @@ def build_multi_horizon_dataset(
         "y_val": splits.y_val,
         "X_test": splits.X_test,
         "y_test": splits.y_test,
+        "ts_train": ts_train,
+        "ts_val": ts_val,
+        "ts_test": ts_test,
         "feature_names": np.array(splits.feature_names),
         "horizons": np.array(sorted({int(h) for h in horizons}), dtype=np.int32),
         "direction_threshold": np.array([0.0], dtype=np.float32),
@@ -268,6 +280,31 @@ def build_multi_horizon_dataset(
     np.savez_compressed(output_path, **save_kwargs)
     print(f"Saved multi-horizon dataset splits to {output_path}")
     print("Stored horizons:", save_kwargs["horizons"].tolist())
+
+    def _describe_split(ts_array: np.ndarray) -> dict[str, object]:
+        if ts_array.size == 0:
+            return {"rows": 0, "ts_min": None, "ts_max": None}
+        series = pd.to_datetime(ts_array).tz_localize("UTC")
+        return {
+            "rows": int(ts_array.size),
+            "ts_min": series.min().isoformat(),
+            "ts_max": series.max().isoformat(),
+        }
+
+    generated_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    meta_payload = {
+        "generated_at": generated_at,
+        "row_count": int(len(df_targets)),
+        "feature_count": int(len(splits.feature_names)),
+        "splits": {
+            "train": _describe_split(ts_train),
+            "val": _describe_split(ts_val),
+            "test": _describe_split(ts_test),
+        },
+    }
+    META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    META_PATH.write_text(json.dumps(meta_payload, indent=2))
+    print(f"Wrote dataset meta summary to {META_PATH}")
     return output_path
 
 

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
 
@@ -24,6 +25,8 @@ PROCESSED_PATHS = [
     Path("data/processed/coinapi/funding_hourly_features.parquet"),
     Path("data/processed/cryptoquant/hourly_features.parquet"),
 ]
+
+META_PATH = Path("artifacts/datasets/btc_features_1h_meta.json")
 
 CORE_MODEL_FEATURES = [
     "open",
@@ -195,15 +198,23 @@ def main(output_dir: str) -> None:
             "downstream consumers should handle upstream gaps."
         )
 
-    X, y = make_features_and_target(
+    X, y, ts_series = make_features_and_target(
         df,
         target_column="ret_1h",
         allowed_features=CORE_MODEL_FEATURES,
+        return_ts=True,
     )
 
     splits = time_series_train_val_test_split(X, y)
 
     output_path = os.path.join(output_dir, "btc_features_1h_splits.npz")
+    ts_values = ts_series.to_numpy(dtype="datetime64[ns]")
+    n_train = splits.X_train.shape[0]
+    n_val = splits.X_val.shape[0]
+    ts_train = ts_values[:n_train]
+    ts_val = ts_values[n_train:n_train + n_val]
+    ts_test = ts_values[n_train + n_val :]
+
     np.savez_compressed(
         output_path,
         X_train=splits.X_train,
@@ -212,9 +223,42 @@ def main(output_dir: str) -> None:
         y_val=splits.y_val,
         X_test=splits.X_test,
         y_test=splits.y_test,
+        ts_train=ts_train,
+        ts_val=ts_val,
+        ts_test=ts_test,
+        ts_all=ts_values,
         feature_names=np.array(splits.feature_names),
     )
     print(f"Saved dataset splits to {output_path}")
+
+    def _describe(ts_array: np.ndarray) -> dict[str, object]:
+        if ts_array.size == 0:
+            return {"rows": 0, "ts_min": None, "ts_max": None}
+        series = pd.Series(pd.to_datetime(ts_array))
+        if getattr(series.dt, "tz", None) is None:
+            series = series.dt.tz_localize("UTC")
+        else:
+            series = series.dt.tz_convert("UTC")
+        return {
+            "rows": int(ts_array.size),
+            "ts_min": series.min().isoformat(),
+            "ts_max": series.max().isoformat(),
+        }
+
+    meta_payload = {
+        "generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "row_count": int(ts_values.size),
+        "feature_count": int(len(splits.feature_names)),
+        "ts_range": _describe(ts_values),
+        "splits": {
+            "train": _describe(ts_train),
+            "val": _describe(ts_val),
+            "test": _describe(ts_test),
+        },
+    }
+    META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    META_PATH.write_text(json.dumps(meta_payload, indent=2))
+    print(f"Wrote dataset meta summary to {META_PATH}")
 
 
 if __name__ == "__main__":

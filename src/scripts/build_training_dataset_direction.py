@@ -1,5 +1,7 @@
 import argparse
+import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
 
@@ -20,6 +22,8 @@ PROCESSED_PATHS = [
     Path("data/processed/cryptoquant/hourly_features.parquet"),
 ]
 
+META_PATH = Path("artifacts/datasets/btc_features_1h_direction_meta.json")
+
 
 def _add_cryptoquant_flags(df: pd.DataFrame) -> pd.DataFrame:
     cq_columns = [col for col in df.columns if col.startswith("cq_daily_")]
@@ -39,8 +43,10 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
         raise RuntimeError("Expected 'ts' column in curated features for feature alignment.")
 
     augmented = df.copy()
-    augmented["ts"] = pd.to_datetime(augmented["ts"], utc=True)
-    augmented = augmented.sort_values("ts").reset_index(drop=True)
+    augmented["ts"] = pd.to_datetime(augmented["ts"], utc=True, errors="coerce")
+    augmented = augmented.dropna(subset=["ts"]).reset_index(drop=True)
+    augmented["ts"] = augmented["ts"].dt.floor("h")
+    augmented = augmented.sort_values("ts").drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
 
     for path in paths:
         if not path.exists():
@@ -55,7 +61,9 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
         if "timestamp" in extra.columns:
             extra = extra.rename(columns={"timestamp": "ts"})
 
-        extra["ts"] = pd.to_datetime(extra["ts"], utc=True)
+        extra["ts"] = pd.to_datetime(extra["ts"], utc=True, errors="coerce")
+        extra = extra.dropna(subset=["ts"]).reset_index(drop=True)
+        extra["ts"] = extra["ts"].dt.floor("h")
         extra = extra.sort_values("ts").drop_duplicates(subset="ts", keep="last")
 
         columns_before = set(augmented.columns)
@@ -101,15 +109,28 @@ def build_direction_splits(output_dir: str, threshold: float) -> str:
             "Loaded empty DataFrame from BigQuery; check that the curated table has data."
         )
 
-    df = _merge_processed_features(df, PROCESSED_PATHS)
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df = df.dropna(subset=["ts"]).reset_index(drop=True)
+    df["ts"] = df["ts"].dt.floor("h")
+    df = df.sort_values("ts").drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
 
-    X, y_ret = make_features_and_target(df, target_column="ret_1h")
+    df = _merge_processed_features(df, PROCESSED_PATHS)
+    df = df.sort_values("ts").reset_index(drop=True)
+
+    X, y_ret, ts_series = make_features_and_target(df, target_column="ret_1h", return_ts=True)
 
     y_dir = make_direction_labels(y_ret, threshold=threshold)
 
     splits = time_series_train_val_test_split(X, y_dir)
 
     output_path = os.path.join(output_dir, "btc_features_1h_direction_splits.npz")
+    ts_values = ts_series.to_numpy(dtype="datetime64[ns]")
+    n_train = splits.X_train.shape[0]
+    n_val = splits.X_val.shape[0]
+    ts_train = ts_values[:n_train]
+    ts_val = ts_values[n_train:n_train + n_val]
+    ts_test = ts_values[n_train + n_val :]
+
     np.savez_compressed(
         output_path,
         X_train=splits.X_train,
@@ -118,10 +139,44 @@ def build_direction_splits(output_dir: str, threshold: float) -> str:
         y_val=splits.y_val,
         X_test=splits.X_test,
         y_test=splits.y_test,
+        ts_train=ts_train,
+        ts_val=ts_val,
+        ts_test=ts_test,
+        ts_all=ts_values,
         feature_names=np.array(splits.feature_names),
         threshold=np.array([threshold], dtype=float),
     )
     print(f"Saved direction dataset splits to {output_path}")
+
+    def _describe(ts_array: np.ndarray) -> dict[str, object]:
+        if ts_array.size == 0:
+            return {"rows": 0, "ts_min": None, "ts_max": None}
+        series = pd.Series(pd.to_datetime(ts_array))
+        if getattr(series.dt, "tz", None) is None:
+            series = series.dt.tz_localize("UTC")
+        else:
+            series = series.dt.tz_convert("UTC")
+        return {
+            "rows": int(ts_array.size),
+            "ts_min": series.min().isoformat(),
+            "ts_max": series.max().isoformat(),
+        }
+
+    meta_payload = {
+        "generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "row_count": int(ts_values.size),
+        "feature_count": int(len(splits.feature_names)),
+        "threshold": float(threshold),
+        "ts_range": _describe(ts_values),
+        "splits": {
+            "train": _describe(ts_train),
+            "val": _describe(ts_val),
+            "test": _describe(ts_test),
+        },
+    }
+    META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    META_PATH.write_text(json.dumps(meta_payload, indent=2))
+    print(f"Wrote direction dataset meta summary to {META_PATH}")
     return output_path
 
 
