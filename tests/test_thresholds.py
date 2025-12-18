@@ -7,6 +7,7 @@ import pytest
 
 from src.trading.thresholds import load_calibrated_thresholds
 from src.scripts.backtest_signals_4h import _resolve_thresholds, DEFAULT_P_UP_MIN_4H, DEFAULT_RET_MIN_4H
+from src.scripts.backtest_signals_1h4h_confirm import _resolve_confirmation_threshold, DEFAULT_P_UP_MIN_4H as DEFAULT_CONFIRM_P_UP
 
 
 def test_load_calibrated_thresholds_basic(tmp_path: Path) -> None:
@@ -49,4 +50,24 @@ def test_resolve_thresholds(cli_values, expected, tmp_path: Path) -> None:
         path = file_path
 
     resolved = _resolve_thresholds(p_arg, ret_arg, path)
+    assert resolved == expected
+
+
+@pytest.mark.parametrize(
+    "cli_value,threshold_entry,expected",
+    [
+        (None, {"p_up_min": 0.31, "ret_min": 0.0005}, 0.31),
+        (0.6, {"p_up_min": 0.31, "ret_min": 0.0005}, 0.6),
+        (None, None, DEFAULT_CONFIRM_P_UP),
+    ],
+)
+def test_resolve_confirmation_threshold(cli_value, threshold_entry, expected, tmp_path: Path) -> None:
+    path = None
+    if threshold_entry is not None:
+        payload = {"horizons": {"4": threshold_entry}}
+        file_path = tmp_path / "thresholds.json"
+        file_path.write_text(json.dumps(payload))
+        path = file_path
+
+    resolved = _resolve_confirmation_threshold(cli_value, path)
     assert resolved == expected

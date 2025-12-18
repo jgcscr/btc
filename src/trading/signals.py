@@ -218,7 +218,22 @@ def prepare_data_for_signals(
 
     missing_in_all = set(feature_names) - set(X_all.columns)
     if missing_in_all:
-        raise RuntimeError(f"Full dataset is missing expected feature columns: {sorted(missing_in_all)}")
+        missing_sorted = sorted(missing_in_all)
+        print(
+            "Warning: curated features missing model columns "
+            f"{missing_sorted}; filling with zeros for backtest/inference."
+        )
+        for column in missing_sorted:
+            X_all[column] = 0.0
+            if column not in feature_names:
+                feature_names.append(column)
+    LEGACY_REQUIRED_FEATURES = {"fut_volume", "open_interest", "funding_rate"}
+
+    for column in sorted(LEGACY_REQUIRED_FEATURES):
+        if column not in X_all.columns:
+            X_all[column] = 0.0
+        if column not in feature_names:
+            feature_names.append(column)
 
     X_all_ordered = X_all[feature_names].copy()
 

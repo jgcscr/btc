@@ -6,6 +6,8 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 
+from src.trading.thresholds import load_calibrated_thresholds
+
 DEFAULT_BT1H_PATH = "artifacts/analysis/backtest_signals_v1/backtest_signals.csv"
 DEFAULT_BT4H_PATH = "artifacts/analysis/backtest_signals_4h_v1/backtest_signals_4h.csv"
 DEFAULT_OUTPUT_DIR = "artifacts/analysis/backtest_signals_1h4h_confirm_v1"
@@ -35,8 +37,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--p-up-min-4h",
         type=float,
-        default=DEFAULT_P_UP_MIN_4H,
-        help="Threshold applied to 4h p_up for confirmation.",
+        default=None,
+        help=f"Threshold applied to 4h p_up for confirmation (default: {DEFAULT_P_UP_MIN_4H}).",
     )
     parser.add_argument(
         "--fee-bps",
@@ -56,7 +58,31 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT_DIR,
         help="Directory to store the combined backtest CSV (optional).",
     )
+    parser.add_argument(
+        "--thresholds-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional thresholds JSON; uses horizon 4 p_up_min when --p-up-min-4h is not provided."
+        ),
+    )
     return parser.parse_args()
+
+
+def _resolve_confirmation_threshold(p_up_arg: float | None, thresholds_path: str | None) -> float:
+    if p_up_arg is not None:
+        return float(p_up_arg)
+
+    if thresholds_path:
+        thresholds = load_calibrated_thresholds(thresholds_path)
+        horizon = thresholds.get(4)
+        if horizon and "p_up_min" in horizon:
+            try:
+                return float(horizon["p_up_min"])
+            except (TypeError, ValueError):
+                pass
+
+    return DEFAULT_P_UP_MIN_4H
 
 
 def _load_backtest(path: str, parse_dates: bool = True) -> pd.DataFrame:
@@ -136,7 +162,10 @@ def backtest_with_confirmation(args: argparse.Namespace) -> None:
     signal_1h = merged["signal_ensemble_1h"].astype(int).to_numpy()
     p_up_4h = merged["p_up_4h"].astype(float).to_numpy()
 
-    filter_4h = (p_up_4h >= args.p_up_min_4h).astype(int)
+    p_up_threshold = _resolve_confirmation_threshold(args.p_up_min_4h, args.thresholds_path)
+    print(f"Using 4h confirmation threshold: {p_up_threshold:.3f}")
+
+    filter_4h = (p_up_4h >= p_up_threshold).astype(int)
     signal_combined = (signal_1h == 1) & (filter_4h == 1)
 
     cost_per_trade = (args.fee_bps + args.slippage_bps) / 10_000.0
