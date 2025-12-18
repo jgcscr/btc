@@ -80,6 +80,36 @@ ZERO_VARIANCE_CANDIDATES = {
     "macro_VIX_close_realized_vol_1h",
 }
 
+EXCLUDED_FEATURES = {
+    "fut_volume",
+    "open_interest",
+    "funding_rate",
+    "fut_volume_delta_1h",
+    "fut_volume_pct_change_1h",
+    "cq_daily_fallback_active",
+    "cq_daily_fallback_complete",
+}
+
+
+def _fill_cryptoquant_features(df: pd.DataFrame) -> pd.DataFrame:
+    cq_cols = [col for col in df.columns if col.startswith("cq_")]
+    if not cq_cols:
+        return df
+    filled = df[cq_cols].ffill().bfill().fillna(0.0)
+    df.loc[:, cq_cols] = filled
+    print(f"Forward-filled {len(cq_cols)} cq_* features (ffill/bfill/zero).")
+    return df
+
+
+def _drop_coinapi_columns(df: pd.DataFrame) -> pd.DataFrame:
+    coinapi_cols = [col for col in df.columns if col.startswith("coinapi_")]
+    if coinapi_cols:
+        df = df.drop(columns=coinapi_cols)
+        preview = ", ".join(sorted(coinapi_cols)[:5])
+        suffix = "..." if len(coinapi_cols) > 5 else ""
+        print(f"Dropped {len(coinapi_cols)} coinapi_* features: {preview}{suffix}")
+    return df
+
 
 def _drop_constant_features(df: pd.DataFrame, candidates: Sequence[str]) -> tuple[pd.DataFrame, list[str]]:
     removed: list[str] = []
@@ -95,6 +125,16 @@ def _drop_constant_features(df: pd.DataFrame, candidates: Sequence[str]) -> tupl
         suffix = "..." if len(removed) > 5 else ""
         print(f"Dropped {len(removed)} constant features: {preview}{suffix}")
     return df, removed
+
+
+def _drop_excluded_features(df: pd.DataFrame) -> pd.DataFrame:
+    to_remove = [col for col in EXCLUDED_FEATURES if col in df.columns]
+    if to_remove:
+        df = df.drop(columns=to_remove)
+        preview = ", ".join(sorted(to_remove)[:5])
+        suffix = "..." if len(to_remove) > 5 else ""
+        print(f"Dropped {len(to_remove)} excluded features: {preview}{suffix}")
+    return df
 
 
 def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -249,8 +289,11 @@ def main(output_dir: str) -> None:
         print(f"[curated_features] Logged {gap_count} non-hourly intervals; upstream gaps remain.")
 
     df = _merge_processed_features(df, PROCESSED_PATHS)
+    df = _fill_cryptoquant_features(df)
     df = _augment_price_features(df)
     df, _ = _drop_constant_features(df, ZERO_VARIANCE_CANDIDATES)
+    df = _drop_coinapi_columns(df)
+    df = _drop_excluded_features(df)
     df, dup_after_merge, gap_after_merge = enforce_unique_hourly_index(
         df,
         label="curated_features_merged",

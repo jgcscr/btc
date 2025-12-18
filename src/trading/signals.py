@@ -56,6 +56,38 @@ from src.models.transformer_classifier import TransformerDirectionClassifier
 from src.trading.ensembles import simple_average, weighted_average
 
 
+EXCLUDED_FEATURES = {
+    "fut_volume",
+    "open_interest",
+    "funding_rate",
+    "fut_volume_delta_1h",
+    "fut_volume_pct_change_1h",
+    "cq_daily_fallback_active",
+    "cq_daily_fallback_complete",
+}
+
+
+def _fill_cryptoquant_features(df: pd.DataFrame) -> pd.DataFrame:
+    cq_cols = [col for col in df.columns if col.startswith("cq_")]
+    if not cq_cols:
+        return df
+    filled = df[cq_cols].ffill().bfill().fillna(0.0)
+    df.loc[:, cq_cols] = filled
+    print(f"Forward-filled {len(cq_cols)} cq_* features (ffill/bfill/zero).")
+    return df
+
+
+def _drop_coinapi_columns(df: pd.DataFrame) -> pd.DataFrame:
+    coinapi_cols = [col for col in df.columns if col.startswith("coinapi_")]
+    if coinapi_cols:
+        df = df.drop(columns=coinapi_cols)
+        print(
+            "Removed coinapi_* features from live feature matrix:",
+            ", ".join(sorted(coinapi_cols)),
+        )
+    return df
+
+
 @dataclass
 class PreparedData:
     df_all: pd.DataFrame
@@ -138,6 +170,7 @@ def _build_features_from_csv(
                 f"[offline_features_merged] Logged {gap_csv_merged} non-hourly intervals after merge; proceeding with gaps."
             )
 
+    df = _fill_cryptoquant_features(df)
     df_targets = add_multi_horizon_targets(df, horizons=horizons, price_col="close")
     ret_cols = [f"ret_{h}h" for h in horizons]
     df_targets = df_targets.dropna(subset=ret_cols)
@@ -197,6 +230,7 @@ def prepare_data_for_signals(
 
         df_all_sorted = df_all_raw.sort_values("ts").reset_index(drop=True)
         df_all_augmented = merge_curated_features(df_all_sorted, REG_PROCESSED_PATHS)
+        df_all_augmented = _fill_cryptoquant_features(df_all_augmented)
         df_all_augmented = _augment_price_features(df_all_augmented)
         df_all_augmented, _, gap_live_merged = enforce_unique_hourly_index(
             df_all_augmented,
@@ -216,6 +250,22 @@ def prepare_data_for_signals(
         if feature_names is None:
             feature_names = list(X_all.columns)
 
+    X_all = _drop_coinapi_columns(X_all)
+    if feature_names is not None:
+        feature_names = [col for col in feature_names if not col.startswith("coinapi_")]
+
+    X_all = _fill_cryptoquant_features(X_all)
+    excluded_in_frame = [col for col in EXCLUDED_FEATURES if col in X_all.columns]
+    if excluded_in_frame:
+        X_all = X_all.drop(columns=excluded_in_frame)
+        print(
+            "Removed excluded features from live feature matrix:",
+            ", ".join(sorted(excluded_in_frame)),
+        )
+
+    if feature_names is not None:
+        feature_names = [col for col in feature_names if col not in EXCLUDED_FEATURES]
+
     missing_in_all = set(feature_names) - set(X_all.columns)
     if missing_in_all:
         missing_sorted = sorted(missing_in_all)
@@ -227,13 +277,6 @@ def prepare_data_for_signals(
             X_all[column] = 0.0
             if column not in feature_names:
                 feature_names.append(column)
-    LEGACY_REQUIRED_FEATURES = {"fut_volume", "open_interest", "funding_rate"}
-
-    for column in sorted(LEGACY_REQUIRED_FEATURES):
-        if column not in X_all.columns:
-            X_all[column] = 0.0
-        if column not in feature_names:
-            feature_names.append(column)
 
     X_all_ordered = X_all[feature_names].copy()
 
