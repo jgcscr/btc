@@ -22,6 +22,7 @@ from src.trading.signals import (
     prepare_data_for_signals_from_ohlcv,
 )
 from src.data.dataset_preparation import enforce_unique_hourly_index
+from src.trading.thresholds import load_calibrated_thresholds
 
 DEFAULT_HOURS = 12
 DEFAULT_TARGETS = (1, 2, 3, 4, 8, 12)
@@ -142,40 +143,6 @@ def load_feature_names(dataset_path: Path) -> List[str]:
     if dataset_features:
         return dataset_features
     return FEATURE_FALLBACK
-
-
-def load_calibrated_thresholds(path: Path | None) -> Dict[int, Dict[str, float]]:
-    if path is None or not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        print(f"Warning: failed to parse thresholds JSON at {path} ({exc}).", file=sys.stderr)
-        return {}
-
-    horizons = data.get("horizons", {})
-    loaded: Dict[int, Dict[str, float]] = {}
-    for key, entry in horizons.items():
-        try:
-            horizon = int(key)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(entry, dict):
-            continue
-        p_up_min = entry.get("p_up_min")
-        ret_min = entry.get("ret_min")
-        if p_up_min is None or ret_min is None:
-            continue
-        try:
-            loaded[horizon] = {
-                "p_up_min": float(p_up_min),
-                "ret_min": float(ret_min),
-            }
-        except (TypeError, ValueError):
-            continue
-    return loaded
-
-
 def _ensure_numeric(frame: pd.DataFrame, columns: Iterable[str]) -> None:
     for column in columns:
         if column not in frame:

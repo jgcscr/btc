@@ -1,5 +1,6 @@
 import argparse
 import os
+from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
@@ -7,6 +8,7 @@ import pandas as pd
 
 from src.config_trading import DEFAULT_FEE_BPS, DEFAULT_SLIPPAGE_BPS
 from src.trading.signals import PreparedData, compute_signal_for_index, load_models, prepare_data_for_signals
+from src.trading.thresholds import load_calibrated_thresholds
 
 
 DEFAULT_P_UP_MIN_4H = 0.55
@@ -42,14 +44,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--p-up-min",
         type=float,
-        default=DEFAULT_P_UP_MIN_4H,
-        help="4h ensemble threshold for P(up).",
+        default=None,
+        help=f"4h ensemble threshold for P(up) (default: {DEFAULT_P_UP_MIN_4H}).",
     )
     parser.add_argument(
         "--ret-min",
         type=float,
-        default=DEFAULT_RET_MIN_4H,
-        help="4h ensemble threshold for predicted ret_4h (log return).",
+        default=None,
+        help=f"4h ensemble threshold for predicted ret_4h (log return) (default: {DEFAULT_RET_MIN_4H}).",
     )
     parser.add_argument(
         "--fee-bps",
@@ -86,7 +88,41 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cached on-chain metrics to merge with --features-path.",
     )
+    parser.add_argument(
+        "--thresholds-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional JSON file with per-horizon thresholds; values override defaults "
+            "unless explicit --p-up-min/--ret-min arguments are provided."
+        ),
+    )
     return parser.parse_args()
+
+
+def _resolve_thresholds(
+    p_up_min_arg: float | None,
+    ret_min_arg: float | None,
+    thresholds_path: str | Path | None,
+) -> tuple[float, float]:
+    p_up_min = DEFAULT_P_UP_MIN_4H
+    ret_min = DEFAULT_RET_MIN_4H
+
+    if thresholds_path:
+        thresholds = load_calibrated_thresholds(thresholds_path)
+        horizon_settings = thresholds.get(4)
+        if horizon_settings:
+            if p_up_min_arg is None and "p_up_min" in horizon_settings:
+                p_up_min = float(horizon_settings["p_up_min"])
+            if ret_min_arg is None and "ret_min" in horizon_settings:
+                ret_min = float(horizon_settings["ret_min"])
+
+    if p_up_min_arg is not None:
+        p_up_min = float(p_up_min_arg)
+    if ret_min_arg is not None:
+        ret_min = float(ret_min_arg)
+
+    return p_up_min, ret_min
 
 
 def _load_ret_series(dataset_path: str, horizon: int) -> np.ndarray:
@@ -168,6 +204,9 @@ def backtest_signals_4h(args: argparse.Namespace) -> None:
         dir_model_path=os.path.join(args.dir_model_dir, "xgb_dir4h_model.json"),
     )
 
+    p_up_min, ret_min = _resolve_thresholds(args.p_up_min, args.ret_min, args.thresholds_path)
+    print(f"Using 4h thresholds: p_up_min={p_up_min:.3f}, ret_min={ret_min:.5f}")
+
     ret_series = _load_ret_series(args.dataset_path, horizon=4)
     if len(ret_series) == 0:
         raise RuntimeError("Loaded empty 4h return series from dataset; ensure multi-horizon NPZ is valid.")
@@ -197,8 +236,8 @@ def backtest_signals_4h(args: argparse.Namespace) -> None:
             prepared=prepared,
             index=i,
             models=models,
-            p_up_min=args.p_up_min,
-            ret_min=args.ret_min,
+            p_up_min=p_up_min,
+            ret_min=ret_min,
         )
 
         ts_list.append(sig["ts"])

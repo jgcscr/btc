@@ -10,6 +10,38 @@ import pandas as pd
 import torch
 from joblib import load as joblib_load
 from sklearn.preprocessing import StandardScaler
+def _augment_price_features(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+
+    def _safe_diff(series: pd.Series) -> pd.Series:
+        return series.diff().fillna(0.0)
+
+    def _safe_pct(series: pd.Series) -> pd.Series:
+        return series.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    for base in ("close", "volume", "fut_close", "fut_volume"):
+        if base not in result.columns:
+            continue
+        result[f"{base}_delta_1h"] = _safe_diff(result[base])
+        result[f"{base}_pct_change_1h"] = _safe_pct(result[base])
+
+    if "close" in result.columns:
+        std_7 = result["close"].rolling(window=7, min_periods=3).std(ddof=0)
+        std_24 = result["close"].rolling(window=24, min_periods=6).std(ddof=0)
+        if "ma_close_7h" in result.columns:
+            denom = std_7.replace(0.0, np.nan)
+            result["close_zscore_7h"] = ((result["close"] - result["ma_close_7h"]) / denom).fillna(0.0)
+        if "ma_close_24h" in result.columns:
+            denom = std_24.replace(0.0, np.nan)
+            result["close_zscore_24h"] = ((result["close"] - result["ma_close_24h"]) / denom).fillna(0.0)
+
+    if "fut_close" in result.columns:
+        rolling_mean = result["fut_close"].rolling(window=7, min_periods=3).mean()
+        rolling_std = result["fut_close"].rolling(window=7, min_periods=3).std(ddof=0).replace(0.0, np.nan)
+        result["fut_close_zscore_7h"] = ((result["fut_close"] - rolling_mean) / rolling_std).fillna(0.0)
+
+    return result
+
 from xgboost import XGBClassifier, XGBRegressor
 
 from src.config import PROJECT_ID, BQ_DATASET_CURATED, BQ_TABLE_FEATURES_1H
@@ -165,6 +197,7 @@ def prepare_data_for_signals(
 
         df_all_sorted = df_all_raw.sort_values("ts").reset_index(drop=True)
         df_all_augmented = merge_curated_features(df_all_sorted, REG_PROCESSED_PATHS)
+        df_all_augmented = _augment_price_features(df_all_augmented)
         df_all_augmented, _, gap_live_merged = enforce_unique_hourly_index(
             df_all_augmented,
             label="curated_features_live_merged",
