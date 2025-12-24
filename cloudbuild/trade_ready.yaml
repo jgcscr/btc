@@ -65,89 +65,17 @@ steps:
           --data '{"dry_run": false, "args": ["--targets", "1,4,8,12"]}' \
           | tee /workspace/run_signal.json
 
-  - id: upload-report
+    - id: build-report
     name: python:3.11
     entrypoint: bash
     env:
       - REPORT_BUCKET=${_REPORT_BUCKET}
+      - PYTHONPATH=/workspace
     args:
       - -c
       - |
         set -euo pipefail
-        python - <<'PY'
-        import json
-        from datetime import datetime, timezone
-        from pathlib import Path
-
-
-        workspace = Path('/workspace')
-        refresh_path = workspace / 'run_dataset_refresh.json'
-        signal_path = workspace / 'run_signal.json'
-        report_path = workspace / 'trade_ready_report.json'
-        uri_path = workspace / 'report_uri.txt'
-
-        with refresh_path.open('r', encoding='utf-8') as f:
-          refresh = json.load(f)
-        with signal_path.open('r', encoding='utf-8') as f:
-          signal = json.load(f)
-
-        refresh_lines = []
-        for line in refresh.get('stdout', '').splitlines():
-          line = line.strip()
-          if line.startswith('{') and line.endswith('}'):
-            try:
-              refresh_lines.append(json.loads(line))
-            except json.JSONDecodeError:
-              pass
-
-        refresh_complete = next((line for line in refresh_lines if line.get('message') == 'refresh.complete'), {})
-
-        payload = {}
-        stdout = signal.get('stdout', '')
-        start_idx = stdout.find('{\n  "generated_at"')
-        if start_idx != -1:
-          brace_level = 0
-          end_idx = None
-          for i, ch in enumerate(stdout[start_idx:], start=start_idx):
-            if ch == '{':
-              brace_level += 1
-            elif ch == '}':
-              brace_level -= 1
-              if brace_level == 0:
-                end_idx = i + 1
-                break
-          if end_idx is not None:
-            try:
-              payload = json.loads(stdout[start_idx:end_idx])
-            except json.JSONDecodeError:
-              payload = {}
-
-        report = {
-          'run_dataset_refresh': {
-            'returncode': refresh.get('returncode'),
-            'duration_seconds': refresh.get('duration_seconds'),
-            'refresh_complete': refresh_complete,
-          },
-          'run_signal': {
-            'returncode': signal.get('returncode'),
-            'duration_seconds': signal.get('duration_seconds'),
-            'payload': payload,
-          }
-        }
-
-        with report_path.open('w', encoding='utf-8') as f:
-          json.dump(report, f, indent=2)
-
-        generated = payload.get('generated_at') if payload else None
-        if generated:
-          ts = datetime.fromisoformat(generated.replace('Z', '+00:00'))
-        else:
-          ts = datetime.now(timezone.utc)
-
-        report_uri = f"{REPORT_BUCKET.rstrip('/')}/reports/trade_ready/{ts:%Y%m%d}/{ts:%H}.json"
-        uri_path.write_text(report_uri, encoding='utf-8')
-        print(f"Report URI: {report_uri}")
-PY
+      python -m src.scripts.build_trade_ready_report
 
   - id: publish-report
     name: gcr.io/cloud-builders/gcloud
