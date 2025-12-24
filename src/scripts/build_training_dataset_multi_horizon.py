@@ -49,6 +49,11 @@ CORE_MODEL_FEATURES = [
     "ma_close_24h",
     "ma_ratio_7_24",
     "vol_24h",
+    "funding_rate",
+    "onchain_active_addresses",
+    "onchain_hash_rate",
+    "onchain_market_cap",
+    "onchain_transaction_count",
     "macro_DXY_open",
     "macro_DXY_high",
     "macro_DXY_low",
@@ -80,7 +85,6 @@ CORE_MODEL_FEATURES = [
 ZERO_VARIANCE_CANDIDATES = {
     "fut_volume",
     "open_interest",
-    "funding_rate",
     "macro_DXY_close_realized_vol_1h",
     "macro_VIX_close_realized_vol_1h",
 }
@@ -88,7 +92,6 @@ ZERO_VARIANCE_CANDIDATES = {
 EXCLUDED_FEATURES = {
     "fut_volume",
     "open_interest",
-    "funding_rate",
     "fut_volume_delta_1h",
     "fut_volume_pct_change_1h",
     "cq_daily_fallback_active",
@@ -116,6 +119,29 @@ def _drop_coinapi_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _reconcile_funding_rate_features(df: pd.DataFrame) -> pd.DataFrame:
+    binance_rate_col = "funding_BTCUSDT_funding_rate"
+    curated_rate_col = "funding_rate"
+    if binance_rate_col in df.columns:
+        if curated_rate_col in df.columns:
+            df[curated_rate_col] = df[binance_rate_col].combine_first(df[curated_rate_col])
+        else:
+            df[curated_rate_col] = df[binance_rate_col]
+
+        annualized_binance = "funding_BTCUSDT_funding_rate_annualized"
+        annualized_curated = "funding_rate_annualized"
+        if annualized_binance in df.columns:
+            if annualized_curated in df.columns:
+                df[annualized_curated] = df[annualized_binance].combine_first(df[annualized_curated])
+            else:
+                df[annualized_curated] = df[annualized_binance]
+
+        drop_candidates = [binance_rate_col, annualized_binance]
+        df = df.drop(columns=[col for col in drop_candidates if col in df.columns])
+
+    return df
+
+
 def _drop_constant_features(df: pd.DataFrame, candidates: Sequence[str]) -> tuple[pd.DataFrame, list[str]]:
     removed: List[str] = []
     for column in candidates:
@@ -140,6 +166,30 @@ def _drop_excluded_features(df: pd.DataFrame) -> pd.DataFrame:
         suffix = "..." if len(to_remove) > 5 else ""
         print(f"Dropped {len(to_remove)} excluded features: {preview}{suffix}")
     return df
+
+
+def _enforce_feature_coverage(df: pd.DataFrame, required: Sequence[str]) -> pd.DataFrame:
+    if not required:
+        return df
+
+    missing_columns = [col for col in required if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Cannot enforce coverage; missing columns: {missing_columns}")
+
+    coverage = df[required].notna().all(axis=1)
+    dropped = int((~coverage).sum())
+    if dropped:
+        missing_ts = df.loc[~coverage, "ts"].dropna()
+        first_gap = missing_ts.min().isoformat() if not missing_ts.empty else "unknown"
+        last_gap = missing_ts.max().isoformat() if not missing_ts.empty else "unknown"
+        print(
+            f"Dropped {dropped} rows lacking complete feature coverage between {first_gap} and {last_gap}.",
+        )
+
+    if not coverage.any():
+        raise RuntimeError("No rows remain after enforcing feature coverage; check upstream merges.")
+
+    return df.loc[coverage].reset_index(drop=True)
 
 
 def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -291,6 +341,7 @@ def build_multi_horizon_dataset(
 
     df = df.sort_values("ts").reset_index(drop=True)
     df = _merge_processed_features(df, PROCESSED_PATHS)
+    df = _reconcile_funding_rate_features(df)
     df = _fill_cryptoquant_features(df)
     df = _augment_price_features(df)
     df, _ = _drop_constant_features(df, ZERO_VARIANCE_CANDIDATES)
@@ -336,6 +387,7 @@ def build_multi_horizon_dataset(
     df_targets = df_targets.dropna(subset=ret_cols)
 
     allowed_features = [feature for feature in CORE_MODEL_FEATURES if feature in df_targets.columns]
+    df_targets = _enforce_feature_coverage(df_targets, allowed_features)
     X, y_ret1h = make_features_and_target(
         df_targets,
         target_column="ret_1h",

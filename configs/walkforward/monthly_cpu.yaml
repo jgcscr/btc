@@ -1,19 +1,19 @@
 schedule:
   name: monthly_cpu
   timezone: UTC
-  start: "2024-01-01T00:00:00Z"
-  end: "2025-12-01T00:00:00Z"
-  train_months: 18
+  start: "2025-12-01T00:00:00Z"
+  end: "2026-01-01T00:00:00Z"
+  train_months: 1
   val_months: 1
   test_months: 1
   step_months: 1
-  max_windows: 12
+  max_windows: 1
 
 preprocessing:
   seq_len: 24
 
 data:
-  features_path: data/mock_features_full_range.csv
+  features_path: null
 
 models:
   xgb_ret1h:

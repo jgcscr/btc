@@ -71,6 +71,80 @@ def enforce_unique_hourly_index(
     return clean, duplicates_removed, gap_count
 
 
+def repair_hourly_continuity(
+    df: pd.DataFrame,
+    *,
+    time_column: str = "ts",
+    label: str = "frame",
+    expected_freq: pd.Timedelta | str = pd.Timedelta(hours=1),
+    forward_fill: bool = True,
+    backward_fill: bool = True,
+) -> tuple[pd.DataFrame, int]:
+    """Reindex a dataframe to continuous hourly timestamps and fill gaps.
+
+    Parameters
+    ----------
+    df: Dataframe containing a timestamp column.
+    time_column: Name of the timestamp column (default: ``ts``).
+    label: Descriptive label used in log messages.
+    expected_freq: Expected spacing between rows (default: 1 hour).
+    forward_fill: Whether to forward-fill numeric columns.
+    backward_fill: Whether to backward-fill after forward fill to cover leading gaps.
+
+    Returns
+    -------
+    (repaired_df, missing_count)
+        The repaired dataframe (sorted, deduplicated, and reindexed) and the
+        number of missing hourly slots that were introduced.
+    """
+
+    if time_column not in df.columns:
+        raise ValueError(f"{label} is missing required column: {time_column}")
+
+    freq = pd.Timedelta(expected_freq)
+
+    normalized = df.copy()
+    normalized[time_column] = pd.to_datetime(normalized[time_column], utc=True, errors="coerce")
+    normalized = normalized.dropna(subset=[time_column]).sort_values(time_column)
+    normalized = normalized.drop_duplicates(subset=time_column, keep="last")
+
+    if normalized.empty:
+        return normalized.reset_index(drop=True), 0
+
+    start = normalized[time_column].iloc[0]
+    end = normalized[time_column].iloc[-1]
+    full_index = pd.date_range(start=start, end=end, freq=freq, tz="UTC")
+
+    existing_index = normalized.set_index(time_column).index
+    missing_index = full_index.difference(existing_index)
+
+    reindexed = normalized.set_index(time_column).reindex(full_index)
+
+    numeric_cols = reindexed.select_dtypes(include=[np.number]).columns
+    if forward_fill and len(numeric_cols) > 0:
+        reindexed[numeric_cols] = reindexed[numeric_cols].ffill()
+    if backward_fill and len(numeric_cols) > 0:
+        reindexed[numeric_cols] = reindexed[numeric_cols].bfill()
+
+    non_numeric_cols = reindexed.select_dtypes(exclude=[np.number]).columns
+    for column in non_numeric_cols:
+        if forward_fill:
+            reindexed[column] = reindexed[column].ffill()
+        if backward_fill:
+            reindexed[column] = reindexed[column].bfill()
+
+    if len(missing_index) > 0:
+        start_gap = missing_index[0].isoformat()
+        end_gap = missing_index[-1].isoformat()
+        print(
+            f"[{label}] Backfilled {len(missing_index)} hourly gaps between {start_gap} and {end_gap}.",
+        )
+
+    reindexed = reindexed.reset_index().rename(columns={"index": time_column})
+    reindexed[time_column] = pd.to_datetime(reindexed[time_column], utc=True)
+    return reindexed, len(missing_index)
+
+
 def make_features_and_target(
     df: pd.DataFrame,
     target_column: str = "ret_1h",

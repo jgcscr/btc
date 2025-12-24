@@ -13,6 +13,7 @@ from src.data.bq_loader import load_btc_features_1h
 from src.data.dataset_preparation import (
     enforce_unique_hourly_index,
     make_features_and_target,
+    repair_hourly_continuity,
     time_series_train_val_test_split,
 )
 
@@ -44,6 +45,12 @@ CORE_MODEL_FEATURES = [
     "ma_close_24h",
     "ma_ratio_7_24",
     "vol_24h",
+    "open_interest",
+    "funding_rate",
+    "onchain_active_addresses",
+    "onchain_hash_rate",
+    "onchain_market_cap",
+    "onchain_transaction_count",
     "macro_DXY_open",
     "macro_DXY_high",
     "macro_DXY_low",
@@ -74,16 +81,11 @@ CORE_MODEL_FEATURES = [
 
 ZERO_VARIANCE_CANDIDATES = {
     "fut_volume",
-    "open_interest",
-    "funding_rate",
     "macro_DXY_close_realized_vol_1h",
     "macro_VIX_close_realized_vol_1h",
 }
 
 EXCLUDED_FEATURES = {
-    "fut_volume",
-    "open_interest",
-    "funding_rate",
     "fut_volume_delta_1h",
     "fut_volume_pct_change_1h",
     "cq_daily_fallback_active",
@@ -95,9 +97,15 @@ def _fill_cryptoquant_features(df: pd.DataFrame) -> pd.DataFrame:
     cq_cols = [col for col in df.columns if col.startswith("cq_")]
     if not cq_cols:
         return df
-    filled = df[cq_cols].ffill().bfill().fillna(0.0)
+    filled = df[cq_cols].ffill().bfill()
     df.loc[:, cq_cols] = filled
-    print(f"Forward-filled {len(cq_cols)} cq_* features (ffill/bfill/zero).")
+    remaining_missing = int(filled.isna().sum().sum())
+    if remaining_missing:
+        print(
+            f"Forward/Backward-filled {len(cq_cols)} cq_* features; {remaining_missing} residual NaNs remain for manual review.",
+        )
+    else:
+        print(f"Forward/Backward-filled {len(cq_cols)} cq_* features with no residual gaps.")
     return df
 
 
@@ -108,6 +116,29 @@ def _drop_coinapi_columns(df: pd.DataFrame) -> pd.DataFrame:
         preview = ", ".join(sorted(coinapi_cols)[:5])
         suffix = "..." if len(coinapi_cols) > 5 else ""
         print(f"Dropped {len(coinapi_cols)} coinapi_* features: {preview}{suffix}")
+    return df
+
+
+def _reconcile_funding_rate_features(df: pd.DataFrame) -> pd.DataFrame:
+    binance_rate_col = "funding_BTCUSDT_funding_rate"
+    curated_rate_col = "funding_rate"
+    if binance_rate_col in df.columns:
+        if curated_rate_col in df.columns:
+            df[curated_rate_col] = df[binance_rate_col].combine_first(df[curated_rate_col])
+        else:
+            df[curated_rate_col] = df[binance_rate_col]
+
+        annualized_binance = "funding_BTCUSDT_funding_rate_annualized"
+        annualized_curated = "funding_rate_annualized"
+        if annualized_binance in df.columns:
+            if annualized_curated in df.columns:
+                df[annualized_curated] = df[annualized_binance].combine_first(df[annualized_curated])
+            else:
+                df[annualized_curated] = df[annualized_binance]
+
+        drop_candidates = [binance_rate_col, annualized_binance]
+        df = df.drop(columns=[col for col in drop_candidates if col in df.columns])
+
     return df
 
 
@@ -135,6 +166,30 @@ def _drop_excluded_features(df: pd.DataFrame) -> pd.DataFrame:
         suffix = "..." if len(to_remove) > 5 else ""
         print(f"Dropped {len(to_remove)} excluded features: {preview}{suffix}")
     return df
+
+
+def _enforce_feature_coverage(df: pd.DataFrame, required: Sequence[str]) -> pd.DataFrame:
+    if not required:
+        return df
+
+    missing_columns = [col for col in required if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Cannot enforce coverage; missing columns: {missing_columns}")
+
+    coverage = df[required].notna().all(axis=1)
+    dropped = int((~coverage).sum())
+    if dropped:
+        missing_ts = df.loc[~coverage, "ts"].dropna()
+        first_gap = missing_ts.min().isoformat() if not missing_ts.empty else "unknown"
+        last_gap = missing_ts.max().isoformat() if not missing_ts.empty else "unknown"
+        print(
+            f"Dropped {dropped} rows lacking complete feature coverage between {first_gap} and {last_gap}.",
+        )
+
+    if not coverage.any():
+        raise RuntimeError("No rows remain after enforcing feature coverage; check upstream merges.")
+
+    return df.loc[coverage].reset_index(drop=True)
 
 
 def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -181,6 +236,18 @@ def _add_cryptoquant_flags(df: pd.DataFrame) -> pd.DataFrame:
     df["cq_daily_fallback_active"] = coverage.any(axis=1).astype(int)
     df["cq_daily_fallback_complete"] = coverage.all(axis=1).astype(int)
     return df
+
+
+def _recompute_return_targets(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    if "close" not in result.columns:
+        return result
+
+    log_close = np.log(result["close"].astype(float))
+    result["ret_1h"] = log_close.diff()
+    result["ret_fwd_3h"] = log_close.shift(-3) - log_close
+    result["ret_4h"] = log_close.shift(-4) - log_close
+    return result
 
 
 def _log_cryptoquant_features(df: pd.DataFrame) -> None:
@@ -288,12 +355,22 @@ def main(output_dir: str) -> None:
     elif gap_count:
         print(f"[curated_features] Logged {gap_count} non-hourly intervals; upstream gaps remain.")
 
+    df, backfilled = repair_hourly_continuity(
+        df,
+        label="curated_features",
+        expected_freq=pd.Timedelta(hours=1),
+    )
+    if backfilled:
+        print(f"[curated_features] Reindexed with {backfilled} synthetic hourly rows via forward/back fill.")
+
     df = _merge_processed_features(df, PROCESSED_PATHS)
+    df = _reconcile_funding_rate_features(df)
     df = _fill_cryptoquant_features(df)
     df = _augment_price_features(df)
     df, _ = _drop_constant_features(df, ZERO_VARIANCE_CANDIDATES)
     df = _drop_coinapi_columns(df)
     df = _drop_excluded_features(df)
+    df = _recompute_return_targets(df)
     df, dup_after_merge, gap_after_merge = enforce_unique_hourly_index(
         df,
         label="curated_features_merged",
@@ -309,6 +386,11 @@ def main(output_dir: str) -> None:
         )
 
     allowed_features = [feature for feature in CORE_MODEL_FEATURES if feature in df.columns]
+    cq_features = [col for col in df.columns if col.startswith("cq_")]
+    for feature in cq_features:
+        if feature not in allowed_features:
+            allowed_features.append(feature)
+    df = _enforce_feature_coverage(df, allowed_features)
     X, y, ts_series = make_features_and_target(
         df,
         target_column="ret_1h",

@@ -24,6 +24,54 @@ PROCESSED_PATHS = [
 
 META_PATH = Path("artifacts/datasets/btc_features_1h_direction_meta.json")
 
+CORE_MODEL_FEATURES = [
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+    "num_trades",
+    "fut_open",
+    "fut_high",
+    "fut_low",
+    "fut_close",
+    "ma_close_7h",
+    "ma_close_24h",
+    "ma_ratio_7_24",
+    "vol_24h",
+    "onchain_active_addresses",
+    "onchain_hash_rate",
+    "onchain_market_cap",
+    "onchain_transaction_count",
+    "macro_DXY_open",
+    "macro_DXY_high",
+    "macro_DXY_low",
+    "macro_DXY_close",
+    "macro_DXY_volume",
+    "macro_DXY_close_realized_vol_24h",
+    "macro_US10Y_yield",
+    "macro_VIX_open",
+    "macro_VIX_high",
+    "macro_VIX_low",
+    "macro_VIX_close",
+    "macro_VIX_volume",
+    "macro_VIX_close_realized_vol_24h",
+    "macro_DXY_close_pct_change",
+    "macro_DXY_volume_pct_change",
+    "macro_VIX_close_pct_change",
+    "macro_VIX_volume_pct_change",
+    "close_delta_1h",
+    "close_pct_change_1h",
+    "volume_delta_1h",
+    "volume_pct_change_1h",
+    "fut_close_delta_1h",
+    "fut_close_pct_change_1h",
+    "close_zscore_7h",
+    "close_zscore_24h",
+    "fut_close_zscore_7h",
+]
+
 ZERO_VARIANCE_CANDIDATES = {
     "fut_volume",
     "open_interest",
@@ -71,6 +119,30 @@ def _drop_excluded_features(df: pd.DataFrame) -> pd.DataFrame:
         suffix = "..." if len(to_remove) > 5 else ""
         print(f"Dropped {len(to_remove)} excluded features: {preview}{suffix}")
     return df
+
+
+def _enforce_feature_coverage(df: pd.DataFrame, required: Sequence[str]) -> pd.DataFrame:
+    if not required:
+        return df
+
+    missing_columns = [col for col in required if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Cannot enforce coverage; missing columns: {missing_columns}")
+
+    coverage = df[required].notna().all(axis=1)
+    dropped = int((~coverage).sum())
+    if dropped:
+        missing_ts = df.loc[~coverage, "ts"].dropna()
+        first_gap = missing_ts.min().isoformat() if not missing_ts.empty else "unknown"
+        last_gap = missing_ts.max().isoformat() if not missing_ts.empty else "unknown"
+        print(
+            f"Dropped {dropped} rows lacking complete feature coverage between {first_gap} and {last_gap}.",
+        )
+
+    if not coverage.any():
+        raise RuntimeError("No rows remain after enforcing feature coverage; check upstream merges.")
+
+    return df.loc[coverage].reset_index(drop=True)
 
 
 def _drop_constant_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -219,7 +291,21 @@ def build_direction_splits(output_dir: str, threshold: float) -> str:
     df = _drop_excluded_features(df)
     df = df.sort_values("ts").reset_index(drop=True)
 
-    X, y_ret, ts_series = make_features_and_target(df, target_column="ret_1h", return_ts=True)
+    allowed_features = [feature for feature in CORE_MODEL_FEATURES if feature in df.columns]
+    cq_features = [col for col in df.columns if col.startswith("cq_")]
+    for feature in cq_features:
+        if feature not in allowed_features:
+            allowed_features.append(feature)
+
+    if allowed_features:
+        df = _enforce_feature_coverage(df, allowed_features)
+
+    X, y_ret, ts_series = make_features_and_target(
+        df,
+        target_column="ret_1h",
+        allowed_features=allowed_features if allowed_features else None,
+        return_ts=True,
+    )
 
     y_dir = make_direction_labels(y_ret, threshold=threshold)
 

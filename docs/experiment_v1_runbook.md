@@ -164,18 +164,153 @@ python -m src.scripts.run_signal_realtime \
     - `ts`, `p_up`, `ret_pred`, `signal_ensemble`, `signal_dir_only`, `created_at`, `notes`.
   - If the latest bar has the same `ts` as the last logged row, it skips appending (idempotent per bar).
 
-### 4.1 Suggested Scheduling
 
-Example cron entry (run at 5 minutes past every hour, adjust path):
+### 4.1 Weekly Walk-Forward Validation (Governance)
+
+To automate weekly walk-forward validation and governance reporting, use the following script:
+
+```bash
+python -m src.scripts.run_walkforward_weekly
+```
+
+This script:
+- Runs `walk_forward_eval.py` and saves KPIs to `artifacts/analysis/governance/YYYYMMDD/walkforward.json`.
+- Loads the previous walkforward.json (if present) and flags deviations > threshold in `walkforward_diff.json`.
+- Generates a Markdown summary (`summary.md`) in the same folder.
+- Logs all command output to `walkforward.log`.
+
+You can schedule this script via cron or workflow automation. Example cron entry (every Monday at 6:00 UTC):
 
 ```cron
-5 * * * * cd /workspaces/btc && /usr/bin/python -m src.scripts.run_signal_realtime \
-  --reg-model-dir artifacts/models/xgb_ret1h_v1 \
-  --dir-model-dir artifacts/models/xgb_dir1h_v1 \
-  --log-path artifacts/live/paper_trade_realtime.csv >> logs/run_signal_realtime.log 2>&1
+0 6 * * 1 cd /workspaces/btc && PYTHONPATH=/workspaces/btc /workspaces/btc/.venv/bin/python -m src.scripts.run_walkforward_weekly >> logs/run_walkforward_weekly.log 2>&1
 ```
 
 Ensure the environment (virtualenv, `PYTHONPATH`, GCP credentials) is correctly initialized in the cron context.
+
+## 7. Cloud Run Deployment Workflow
+
+The trading stack can also be operated via Google Cloud Run using the containerized FastAPI service at `src/service/main.py`.
+
+### 7.1 Build & Deploy via Helper Script
+
+Use the helper script to build, push, and deploy in one step:
+
+```bash
+export PROJECT_ID=jc-financial-466902
+export REGION=us-central1
+export ARTIFACT_REPO=btc-trading
+export SERVICE_NAME=btc-trading-service
+./scripts/deploy_cloud_run.sh
+```
+
+Override `IMAGE_TAG`, `GOVERNANCE_BUCKET`, or other variables as needed. The script prints the image URI before calling Cloud Build and Cloud Run.
+
+### 7.2 Build & Push Container (manual)
+
+```bash
+# Build from repository root
+gcloud builds submit --tag us-central1-docker.pkg.dev/jc-financial-466902/btc-trading/service:$(date +%Y%m%d%H%M) .
+
+# (Alternative with docker)
+docker build -t us-central1-docker.pkg.dev/jc-financial-466902/btc-trading/service:dev .
+docker push us-central1-docker.pkg.dev/jc-financial-466902/btc-trading/service:dev
+```
+
+### 7.3 Deploy to Cloud Run (manual)
+
+```bash
+gcloud run deploy btc-trading-service \
+  --image us-central1-docker.pkg.dev/jc-financial-466902/btc-trading/service:latest \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars PYTHONPATH=/app \
+  --set-secrets "CRYPTOCOMPARE_API_KEY=crypto-key:latest,ALPHA_VANTAGE_API_KEY=alpha-key:latest" \
+  --memory 2Gi --cpu 2 --max-instances 3
+```
+
+Secrets should be stored in Secret Manager (`crypto-key`, `alpha-key`, etc.) and mounted via `--set-secrets`. Additional environment variables supported by the service include:
+
+- `LIVE_LOG_URI` (local path or `gs://` destination)
+- `DATASET_1H_URI`, `DATASET_4H_URI`
+- `GOVERNANCE_OUTPUT_URI`
+- `META_ENSEMBLE_URI`
+
+### 7.4 Service Endpoints
+
+The FastAPI service exposes the following HTTP endpoints:
+
+- `POST /run-signal` &rarr; `src.scripts.run_signal_realtime`
+- `POST /run-walkforward` &rarr; `src.scripts.run_walkforward_weekly`
+- `POST /run-papertrade` &rarr; `src.scripts.paper_trade_loop`
+
+Sample `curl` invocations (replace `${SERVICE_URL}` with the Cloud Run URL):
+
+```bash
+curl -X POST "${SERVICE_URL}/run-signal" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true}'
+
+curl -X POST "${SERVICE_URL}/run-walkforward" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+curl -X POST "${SERVICE_URL}/run-papertrade" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true, "args": ["--loop-once"]}'
+```
+
+### 7.5 Cloud Scheduler Triggers
+
+Configure Cloud Scheduler jobs to hit the Cloud Run service using OAuth service account authentication:
+
+```bash
+gcloud scheduler jobs create http hourly-signal \
+  --schedule "5 * * * *" \
+  --uri "${SERVICE_URL}/run-signal" \
+  --http-method POST \
+  --oidc-service-account-email scheduler-runner@jc-financial-466902.iam.gserviceaccount.com \
+  --oidc-token-audience "${SERVICE_URL}" \
+  --time-zone "UTC" \
+  --headers "Content-Type=application/json" \
+  --message-body '{"dry_run": false}'
+
+gcloud scheduler jobs create http weekly-walkforward \
+  --schedule "0 6 * * 1" \
+  --uri "${SERVICE_URL}/run-walkforward" \
+  --http-method POST \
+  --oidc-service-account-email scheduler-runner@jc-financial-466902.iam.gserviceaccount.com \
+  --oidc-token-audience "${SERVICE_URL}" \
+  --time-zone "UTC" \
+  --headers "Content-Type=application/json" \
+  --message-body '{}'
+```
+
+### 7.6 Monitoring & Logs
+
+- View logs in Cloud Run: `gcloud logs read --project jc-financial-466902 --service=btc-trading-service`
+- Governance artifacts upload to `GOVERNANCE_OUTPUT_URI` (supports `gs://` destinations).
+- For alerting, run `src/scripts/alert_on_governance_drift.py` in a scheduled task or Cloud Function.
+
+### 7.7 Validation Artifacts
+
+Capture the first responses from the deployed service after each rollout and store them in `artifacts/analysis/cloud_run_validation/YYYYMMDD/`:
+
+```bash
+mkdir -p artifacts/analysis/cloud_run_validation/$(date +%Y%m%d)
+curl -X POST "${SERVICE_URL}/run-signal" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true}' \
+  | tee artifacts/analysis/cloud_run_validation/$(date +%Y%m%d)/run-signal.json
+
+gcloud logs read --project ${PROJECT_ID} \
+  --service=${SERVICE_NAME} \
+  --limit 100 \
+  > artifacts/analysis/cloud_run_validation/$(date +%Y%m%d)/cloud-run.log
+```
 
 ### 4.2 Nightly quota check
 
@@ -324,6 +459,9 @@ python -m src.scripts.run_signal_realtime_from_binance \
   --n-bars 500 \
   --reg-model-dir artifacts/models/xgb_ret1h_v1 \
   --dir-model-dir artifacts/models/xgb_dir1h_v1 \
+  --lstm-model-dir artifacts/models/lstm_dir1h_v1 \
+  --transformer-dir-model artifacts/models/transformer_dir1h_v1 \
+  --dir-model-weights transformer:2,lstm:1,xgb:1 \
   --log-path artifacts/live/paper_trade_realtime.csv
 ```
 

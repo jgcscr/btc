@@ -1,0 +1,15 @@
+__pycache__
+*.py[cod]
+*.so
+*.pyd
+
+.git
+.gitignore
+.env
+.venv
+.mypy_cache
+pytest_cache
+.vscode
+
+tmp_parquet/
+**/__pycache__/

@@ -19,8 +19,19 @@ from sklearn.preprocessing import StandardScaler
 from src.data.bq_loader import load_btc_features_1h
 from src.data.dataset_preparation import make_features_and_target
 from src.data.targets_multi_horizon import add_multi_horizon_targets
-from src.scripts.build_training_dataset import PROCESSED_PATHS as REG_PROCESSED_PATHS
-from src.scripts.build_training_dataset import _merge_processed_features as merge_curated_features
+from src.scripts.build_training_dataset import (
+    PROCESSED_PATHS as REG_PROCESSED_PATHS,
+    CORE_MODEL_FEATURES as REG_CORE_MODEL_FEATURES,
+    ZERO_VARIANCE_CANDIDATES as REG_ZERO_VARIANCE,
+    _merge_processed_features as merge_curated_features,
+    _reconcile_funding_rate_features,
+    _fill_cryptoquant_features,
+    _augment_price_features,
+    _drop_constant_features,
+    _drop_coinapi_columns,
+    _drop_excluded_features,
+    _enforce_feature_coverage,
+)
 from src.scripts.build_training_dataset_direction import make_direction_labels
 from src.training.lstm_data import save_sequence_dataset
 
@@ -428,9 +439,26 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
     if df_raw.empty:
         raise RuntimeError(f"No curated features returned for window {window.label}.")
 
-    df_merged = merge_curated_features(df_raw, REG_PROCESSED_PATHS)
+    df_augmented = _augment_required_features(df_raw)
+
+    df_merged = merge_curated_features(df_augmented, REG_PROCESSED_PATHS)
+    df_merged = _reconcile_funding_rate_features(df_merged)
+    df_merged = _fill_cryptoquant_features(df_merged)
+    df_merged = _augment_price_features(df_merged)
+    df_merged, _ = _drop_constant_features(df_merged, REG_ZERO_VARIANCE)
+    df_merged = _drop_coinapi_columns(df_merged)
+    df_merged = _drop_excluded_features(df_merged)
+
+    allowed_features: List[str] = [feature for feature in REG_CORE_MODEL_FEATURES if feature in df_merged.columns]
+    cq_features = [col for col in df_merged.columns if col.startswith("cq_")]
+    for feature in cq_features:
+        if feature not in allowed_features:
+            allowed_features.append(feature)
+
+    if allowed_features:
+        df_merged = _enforce_feature_coverage(df_merged, allowed_features)
+
     df_merged["ts"] = pd.to_datetime(df_merged["ts"], utc=True)
-    df_merged = _augment_required_features(df_merged)
 
     df_merged = df_merged[(df_merged["ts"] >= window.train_start) & (df_merged["ts"] < window.test_end)].reset_index(drop=True)
     if df_merged.empty:
@@ -441,7 +469,13 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
 
     df_filtered = df_merged.dropna(subset=["ret_1h"]).reset_index(drop=True)
 
-    X_df, y_ret = make_features_and_target(df_filtered, target_column="ret_1h", dropna=False)
+    allowed_arg = allowed_features if allowed_features else None
+    X_df, y_ret = make_features_and_target(
+        df_filtered,
+        target_column="ret_1h",
+        dropna=False,
+        allowed_features=allowed_arg,
+    )
     ts_series = df_filtered["ts"]
 
     train_mask = (ts_series >= window.train_start) & (ts_series < window.val_start)
@@ -504,7 +538,12 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
     df_multi = add_multi_horizon_targets(df_merged, horizons=[1, 4])
     df_multi = df_multi.dropna(subset=["ret_1h", "ret_4h"]).reset_index(drop=True)
 
-    X_multi, y_multi = make_features_and_target(df_multi, target_column="ret_1h", dropna=False)
+    X_multi, y_multi = make_features_and_target(
+        df_multi,
+        target_column="ret_1h",
+        dropna=False,
+        allowed_features=allowed_arg,
+    )
     ts_multi = pd.to_datetime(df_multi["ts"], utc=True)
     drop_cols = ["ret_4h", "dir_1h", "dir_4h", "ret_fwd_3h"]
     X_multi = X_multi.drop(columns=[col for col in drop_cols if col in X_multi.columns], errors="ignore")

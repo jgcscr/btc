@@ -7,17 +7,30 @@ import pandas as pd
 
 from src.config_trading import (
     DEFAULT_DIR_MODEL_DIR_1H,
+    DEFAULT_LSTM_MODEL_DIR_1H,
     DEFAULT_FEE_BPS,
     DEFAULT_P_UP_MIN,
     DEFAULT_REG_MODEL_DIR_1H,
     DEFAULT_RET_MIN,
     DEFAULT_SLIPPAGE_BPS,
+    DEFAULT_TRANSFORMER_MODEL_DIR_1H,
+    DEFAULT_DIR_MODEL_WEIGHTS_1H,
     OPTUNA_DIR_MODEL_DIR_1H,
+    OPTUNA_DIR_MODEL_WEIGHTS_1H,
+    OPTUNA_LSTM_MODEL_DIR_1H,
     OPTUNA_P_UP_MIN_1H,
     OPTUNA_REG_MODEL_DIR_1H,
     OPTUNA_RET_MIN_1H,
+    OPTUNA_TRANSFORMER_MODEL_DIR_1H,
 )
-from src.trading.signals import PreparedData, compute_signal_for_index, load_models, prepare_data_for_signals
+from src.trading.ensembles import parse_weight_spec
+from src.trading.signals import (
+    PreparedData,
+    compute_signal_for_index,
+    load_models,
+    populate_sequence_cache_from_prepared,
+    prepare_data_for_signals,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -44,6 +57,24 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=DEFAULT_DIR_MODEL_DIR_1H,
         help="Directory containing direction model JSON (xgb_dir1h_model.json).",
+    )
+    parser.add_argument(
+        "--lstm-model-dir",
+        type=str,
+        default=DEFAULT_LSTM_MODEL_DIR_1H,
+        help="Optional directory containing an LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--transformer-dir-model",
+        type=str,
+        default=DEFAULT_TRANSFORMER_MODEL_DIR_1H,
+        help="Optional directory containing a transformer direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--dir-model-weights",
+        type=str,
+        default=DEFAULT_DIR_MODEL_WEIGHTS_1H,
+        help="Optional comma-separated weights for direction models (e.g. transformer:2,lstm:1,xgb:1).",
     )
     parser.add_argument(
         "--p-up-min",
@@ -100,6 +131,15 @@ def _apply_optuna_profile(args: argparse.Namespace) -> None:
 
     if args.dir_model_dir == DEFAULT_DIR_MODEL_DIR_1H:
         args.dir_model_dir = OPTUNA_DIR_MODEL_DIR_1H
+
+    if args.lstm_model_dir in (None, DEFAULT_LSTM_MODEL_DIR_1H):
+        args.lstm_model_dir = OPTUNA_LSTM_MODEL_DIR_1H
+
+    if args.transformer_dir_model in (None, DEFAULT_TRANSFORMER_MODEL_DIR_1H):
+        args.transformer_dir_model = OPTUNA_TRANSFORMER_MODEL_DIR_1H
+
+    if args.dir_model_weights in (None, "", DEFAULT_DIR_MODEL_WEIGHTS_1H):
+        args.dir_model_weights = OPTUNA_DIR_MODEL_WEIGHTS_1H
 
     if args.p_up_min == DEFAULT_P_UP_MIN:
         args.p_up_min = OPTUNA_P_UP_MIN_1H
@@ -186,7 +226,13 @@ def paper_trade_loop(args: argparse.Namespace) -> None:
     models = load_models(
         reg_model_path=os.path.join(args.reg_model_dir, "xgb_ret1h_model.json"),
         dir_model_path=os.path.join(args.dir_model_dir, "xgb_dir1h_model.json"),
+        lstm_model_dir=args.lstm_model_dir,
+        transformer_model_dir=args.transformer_dir_model,
     )
+
+    dir_model_weights = parse_weight_spec(args.dir_model_weights) if args.dir_model_weights else None
+
+    populate_sequence_cache_from_prepared(prepared, models)
 
     ret_series = _load_ret_series_from_npz(args.dataset_path)
     if len(ret_series) != len(prepared.df_all):
@@ -219,6 +265,7 @@ def paper_trade_loop(args: argparse.Namespace) -> None:
             models=models,
             p_up_min=args.p_up_min,
             ret_min=args.ret_min,
+            dir_model_weights=dir_model_weights,
         )
 
         ts = sig["ts"]

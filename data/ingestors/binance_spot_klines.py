@@ -18,6 +18,57 @@ def _to_ms(ts: Optional[dt.datetime]) -> Optional[int]:
     return int(ts.timestamp() * 1000)
 
 
+def _interval_to_freq(interval: str) -> str:
+    suffix = interval[-1]
+    amount = int(interval[:-1])
+    if suffix == "m":
+        return f"{amount}min"
+    if suffix == "h":
+        return f"{amount}h"
+    if suffix == "d":
+        return f"{amount}d"
+    raise ValueError(f"Unsupported interval: {interval}")
+
+
+def _normalize_hourly_frame(df: pd.DataFrame, interval: str, label: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    frame = df.copy()
+    frame["ts"] = pd.to_datetime(frame["ts"], utc=True, errors="coerce")
+    frame = frame.dropna(subset=["ts"]).sort_values("ts")
+    frame = frame.drop_duplicates(subset="ts", keep="last")
+
+    freq = _interval_to_freq(interval)
+    start = frame["ts"].iloc[0]
+    end = frame["ts"].iloc[-1]
+    full_index = pd.date_range(start=start, end=end, freq=freq, tz="UTC")
+
+    existing_index = frame.set_index("ts").index
+    missing_index = full_index.difference(existing_index)
+
+    indexed = frame.set_index("ts").reindex(full_index)
+
+    numeric_cols = indexed.select_dtypes(include=["number"]).columns
+    if len(numeric_cols) > 0:
+        indexed[numeric_cols] = indexed[numeric_cols].ffill().bfill()
+
+    non_numeric_cols = indexed.select_dtypes(exclude=["number"]).columns
+    for column in non_numeric_cols:
+        indexed[column] = indexed[column].ffill().bfill()
+
+    if len(missing_index) > 0:
+        start_gap = missing_index[0].isoformat()
+        end_gap = missing_index[-1].isoformat()
+        print(
+            f"[{label}] Backfilled {len(missing_index)} missing bars between {start_gap} and {end_gap}.",
+        )
+
+    indexed = indexed.reset_index().rename(columns={"index": "ts"})
+    indexed["ts"] = pd.to_datetime(indexed["ts"], utc=True)
+    return indexed
+
+
 def fetch_binance_spot_klines(
     symbol: str,
     interval: str,
@@ -100,6 +151,8 @@ def fetch_binance_spot_klines(
     df["taker_buy_base_volume"] = df["taker_buy_base_asset_volume"].astype("float64")
     df["taker_buy_quote_volume"] = df["taker_buy_quote_asset_volume"].astype("float64")
     df["interval"] = interval
+
+    df = _normalize_hourly_frame(df, interval, label="binance_spot")
 
     return df[[
         "ts",

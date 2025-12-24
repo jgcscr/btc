@@ -1,0 +1,3 @@
+# Hourly realtime signal run (UTC) with refreshed ensemble defaults.
+# Adjust working directory, interpreter path, and log destination for your environment.
+5 * * * * cd /workspaces/btc && PYTHONPATH=/workspaces/btc /workspaces/btc/.venv/bin/python -m src.scripts.run_signal_realtime --log-path artifacts/live/paper_trade_realtime.csv >> logs/run_signal_realtime.log 2>&1

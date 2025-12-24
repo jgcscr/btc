@@ -46,7 +46,11 @@ from xgboost import XGBClassifier, XGBRegressor
 
 from src.config import PROJECT_ID, BQ_DATASET_CURATED, BQ_TABLE_FEATURES_1H
 from src.data.bq_loader import load_btc_features_1h
-from src.data.dataset_preparation import enforce_unique_hourly_index, make_features_and_target
+from src.data.dataset_preparation import (
+    enforce_unique_hourly_index,
+    make_features_and_target,
+    repair_hourly_continuity,
+)
 from src.data.onchain_loader import load_onchain_cached
 from src.data.targets_multi_horizon import add_multi_horizon_targets
 from src.scripts.build_training_dataset import PROCESSED_PATHS as REG_PROCESSED_PATHS
@@ -57,9 +61,6 @@ from src.trading.ensembles import simple_average, weighted_average
 
 
 EXCLUDED_FEATURES = {
-    "fut_volume",
-    "open_interest",
-    "funding_rate",
     "fut_volume_delta_1h",
     "fut_volume_pct_change_1h",
     "cq_daily_fallback_active",
@@ -71,9 +72,15 @@ def _fill_cryptoquant_features(df: pd.DataFrame) -> pd.DataFrame:
     cq_cols = [col for col in df.columns if col.startswith("cq_")]
     if not cq_cols:
         return df
-    filled = df[cq_cols].ffill().bfill().fillna(0.0)
+    filled = df[cq_cols].ffill().bfill()
     df.loc[:, cq_cols] = filled
-    print(f"Forward-filled {len(cq_cols)} cq_* features (ffill/bfill/zero).")
+    remaining_missing = int(filled.isna().sum().sum())
+    if remaining_missing:
+        print(
+            f"Forward/Backward-filled {len(cq_cols)} cq_* features; {remaining_missing} residual NaNs remain for live feeds.",
+        )
+    else:
+        print(f"Forward/Backward-filled {len(cq_cols)} cq_* features with full coverage.")
     return df
 
 
@@ -86,6 +93,18 @@ def _drop_coinapi_columns(df: pd.DataFrame) -> pd.DataFrame:
             ", ".join(sorted(coinapi_cols)),
         )
     return df
+
+
+def _recompute_return_targets(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    if "close" not in result.columns:
+        return result
+
+    log_close = np.log(result["close"].astype(float))
+    result["ret_1h"] = log_close.diff()
+    result["ret_fwd_3h"] = log_close.shift(-3) - log_close
+    result["ret_4h"] = log_close.shift(-4) - log_close
+    return result
 
 
 @dataclass
@@ -222,6 +241,7 @@ def prepare_data_for_signals(
             df_all_raw,
             label="curated_features_live",
             raise_on_gap=False,
+            normalize_to_hour=True,
         )
         if gap_live:
             print(f"[curated_features_live] Logged {gap_live} non-hourly intervals; upstream feed has gaps.")
@@ -232,10 +252,21 @@ def prepare_data_for_signals(
         df_all_augmented = merge_curated_features(df_all_sorted, REG_PROCESSED_PATHS)
         df_all_augmented = _fill_cryptoquant_features(df_all_augmented)
         df_all_augmented = _augment_price_features(df_all_augmented)
+        df_all_augmented, backfilled_live = repair_hourly_continuity(
+            df_all_augmented,
+            label="curated_features_live_reindexed",
+            expected_freq=pd.Timedelta(hours=1),
+        )
+        if backfilled_live:
+            print(
+                f"[curated_features_live_reindexed] Backfilled {backfilled_live} hourly gaps via forward/back fill.",
+            )
+        df_all_augmented = _recompute_return_targets(df_all_augmented)
         df_all_augmented, _, gap_live_merged = enforce_unique_hourly_index(
             df_all_augmented,
             label="curated_features_live_merged",
             raise_on_gap=False,
+            normalize_to_hour=True,
         )
         if gap_live_merged:
             print(
@@ -265,6 +296,19 @@ def prepare_data_for_signals(
 
     if feature_names is not None:
         feature_names = [col for col in feature_names if col not in EXCLUDED_FEATURES]
+
+    if feature_names is None:
+        feature_names = list(X_all.columns)
+    else:
+        ordered: List[str] = []
+        seen = set()
+        for column in feature_names:
+            if column in seen:
+                continue
+            seen.add(column)
+            ordered.append(column)
+        extras = [col for col in X_all.columns if col not in seen]
+        feature_names = ordered + extras
 
     missing_in_all = set(feature_names) - set(X_all.columns)
     if missing_in_all:
@@ -525,6 +569,8 @@ def load_models(
     models: Dict[str, Any] = {}
 
     reg = XGBRegressor()
+    if not getattr(reg, "_estimator_type", None):
+        reg._estimator_type = "regressor"
     reg.load_model(reg_model_path)
     models["reg"] = reg
     reg_meta_path = Path(reg_model_path).with_name("model_metadata.json")
@@ -539,6 +585,8 @@ def load_models(
 
     if dir_model_path:
         dir_model = XGBClassifier()
+        if not getattr(dir_model, "_estimator_type", None):
+            dir_model._estimator_type = "classifier"
         dir_model.load_model(dir_model_path)
         models["dir"] = dir_model
         dir_meta_path = Path(dir_model_path).with_name("model_metadata_direction.json")
@@ -574,15 +622,15 @@ def populate_sequence_cache_from_prepared(prepared: PreparedData, models: Dict[s
             continue
 
         model_feature_names = list(model_info.get("feature_names", []))
-        if model_feature_names and model_feature_names != list(prepared.feature_names):
-            raise RuntimeError("Feature names mismatch between sequence model and prepared data.")
-
         feature_frame = prepared.X_all_ordered
+
         if model_feature_names:
-            missing = set(model_feature_names) - set(feature_frame.columns)
+            missing = [name for name in model_feature_names if name not in feature_frame.columns]
             if missing:
-                raise RuntimeError(f"Prepared data missing required sequence feature columns: {sorted(missing)}")
-            feature_frame = feature_frame[model_feature_names]
+                raise RuntimeError(
+                    f"Prepared data missing required sequence feature columns: {sorted(missing)}",
+                )
+            feature_frame = feature_frame.reindex(columns=model_feature_names)
 
         scaler_mean = model_info.get("scaler_mean")
         scaler_std = model_info.get("scaler_std")

@@ -111,6 +111,9 @@ def train_and_evaluate(dataset_path: str, output_dir: str, params_json: Optional
         verbose=False,
     )
 
+    if not getattr(model, "_estimator_type", None):
+        model._estimator_type = "classifier"
+
     metrics = [
         _evaluate_split(model, "train", X_train, y_train),
         _evaluate_split(model, "val", X_val, y_val),

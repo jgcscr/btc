@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -22,6 +22,8 @@ except ImportError:  # pragma: no cover - environment without BigQuery support
     google = None  # type: ignore
     DefaultCredentialsError = Exception  # type: ignore
 
+from data.ingestors.binance_futures_metrics import ingest_futures_day_to_gcs
+from data.ingestors.binance_spot_klines import ingest_spot_day_to_gcs
 from data.ingestors.binance_us_spot import ingest_binance_us_spot
 from data.ingestors.alpha_vantage_macro import (
     AlphaVantageIngestionError,
@@ -46,6 +48,86 @@ DATASET_DIR = Path("artifacts/datasets")
 DATASET_1H_PATH = DATASET_DIR / "btc_features_1h_splits.npz"
 DATASET_MULTI_PATH = DATASET_DIR / "btc_features_multi_horizon_splits.npz"
 SQL_REFRESH_PATH = Path("sql/create_btc_features_1h.sql")
+DEFAULT_FUTURES_DAYS = 2
+
+
+def _date_range(days: int, anchor: Optional[date] = None) -> List[date]:
+    if days <= 0:
+        return []
+    end_date = anchor or datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=days - 1)
+    return [start_date + timedelta(days=offset) for offset in range(days)]
+
+
+def _spot_ingest_dates(hours: int) -> List[date]:
+    now = datetime.now(timezone.utc)
+    end_date = now.date()
+    start_date = (now - timedelta(hours=hours)).date()
+    total_days = (end_date - start_date).days + 1
+    total_days = max(total_days, 1)
+    return _date_range(total_days, anchor=end_date)
+
+
+def run_futures_ingest(
+    bucket: Optional[str],
+    interval: str,
+    pair: str,
+    days: int,
+    market: Optional[str] = None,
+    instrument: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    log_event(
+        "futures_ingest.start",
+        bucket=bucket,
+        interval=interval,
+        pair=pair,
+        days=days,
+        market=market,
+        instrument=instrument,
+    )
+    if not bucket:
+        log_event("futures_ingest.skipped", note="Futures bucket not provided; skipping upload")
+        return {}
+    target_dates = _date_range(days)
+    uploads: List[Dict[str, Any]] = []
+    for target_date in target_dates:
+        try:
+            blob_path = ingest_futures_day_to_gcs(
+                pair=pair,
+                interval=interval,
+                date=target_date,
+                bucket_name=bucket,
+                market=market,
+                instrument=instrument,
+                api_key=api_key,
+            )
+            uploads.append({
+                "date": target_date.isoformat(),
+                "blob_path": blob_path,
+            })
+            log_event(
+                "futures_ingest.uploaded",
+                date=target_date,
+                blob_path=blob_path,
+                bucket=bucket,
+            )
+        except Exception as exc:  # pragma: no cover - runtime safeguard
+            log_event(
+                "futures_ingest.error",
+                date=target_date,
+                error=str(exc),
+            )
+            raise
+    summary = {
+        "bucket": bucket,
+        "interval": interval,
+        "pair": pair,
+        "dates": [entry["date"] for entry in uploads],
+        "upload_count": len(uploads),
+    }
+    log_event("futures_ingest.complete", **summary)
+    return summary
 
 
 def iso_now() -> str:
@@ -62,6 +144,8 @@ def log_event(message: str, **fields: Any) -> None:
 def _stringify(value: Any) -> Any:
     if isinstance(value, (pd.Timestamp, datetime)):
         return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=timezone.utc).isoformat()
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
@@ -101,14 +185,90 @@ def _summarize_npz(path: Path) -> Dict[str, Any]:
     return {"rows_total": total, "feature_count": feature_count, "splits": splits}
 
 
-def run_binance_ingest(hours: int) -> Dict[str, Any]:
-    log_event("binance_ingest.start", hours=hours)
-    parquet_path = ingest_binance_us_spot(limit=hours, interval="1h")
+def upload_spot_history_to_gcs(
+    bucket: str,
+    symbol: str,
+    interval: str,
+    hours: int,
+) -> Dict[str, Any]:
+    log_event(
+        "spot_ingest.start",
+        bucket=bucket,
+        symbol=symbol,
+        interval=interval,
+        hours=hours,
+    )
+    target_dates = _spot_ingest_dates(hours)
+    if not target_dates:
+        summary = {
+            "bucket": bucket,
+            "symbol": symbol,
+            "interval": interval,
+            "dates": [],
+            "upload_count": 0,
+        }
+        log_event("spot_ingest.complete", **summary)
+        return summary
+
+    uploads: List[Dict[str, Any]] = []
+    for target_date in target_dates:
+        try:
+            blob_path = ingest_spot_day_to_gcs(
+                symbol=symbol,
+                interval=interval,
+                date=target_date,
+                bucket_name=bucket,
+            )
+            uploads.append({
+                "date": target_date.isoformat(),
+                "blob_path": blob_path,
+            })
+            log_event(
+                "spot_ingest.uploaded",
+                date=target_date,
+                blob_path=blob_path,
+                bucket=bucket,
+            )
+        except Exception as exc:  # pragma: no cover - runtime safeguard
+            log_event(
+                "spot_ingest.error",
+                date=target_date,
+                error=str(exc),
+            )
+            raise
+
+    summary = {
+        "bucket": bucket,
+        "symbol": symbol,
+        "interval": interval,
+        "dates": [entry["date"] for entry in uploads],
+        "upload_count": len(uploads),
+    }
+    log_event("spot_ingest.complete", **summary)
+    return summary
+
+
+def run_binance_ingest(hours: int, spot_bucket: Optional[str] = None, symbol: str = "BTCUSDT", interval: str = "1h") -> Dict[str, Any]:
+    log_event("binance_ingest.start", hours=hours, symbol=symbol, interval=interval)
+    parquet_path = ingest_binance_us_spot(symbol=symbol, interval=interval, limit=hours)
     tidy = pd.read_parquet(parquet_path)
     tidy["ts"] = pd.to_datetime(tidy["ts"], utc=True, errors="coerce")
     row_count = int(len(tidy))
     unique_hours = int(tidy["ts"].nunique())
     latest_ts = tidy["ts"].max().isoformat() if tidy["ts"].notna().any() else None
+    gcs_uploads = None
+    if spot_bucket:
+        try:
+            gcs_uploads = upload_spot_history_to_gcs(
+                bucket=spot_bucket,
+                symbol=symbol,
+                interval=interval,
+                hours=hours,
+            )
+        except Exception:
+            raise
+    else:
+        log_event("spot_ingest.skipped", note="Spot bucket not provided; skipping GCS upload")
     log_event(
         "binance_ingest.complete",
         path=parquet_path,
@@ -121,6 +281,7 @@ def run_binance_ingest(hours: int) -> Dict[str, Any]:
         "rows": row_count,
         "unique_hours": unique_hours,
         "latest": latest_ts,
+        "gcs_uploads": gcs_uploads,
     }
 
 
@@ -326,6 +487,47 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force RUN_WITHOUT_FUNDING=1 for this refresh run.",
     )
+    parser.add_argument(
+        "--skip-futures",
+        action="store_true",
+        help="Disable Binance futures ingestion step.",
+    )
+    parser.add_argument(
+        "--spot-bucket",
+        default=os.getenv("SPOT_GCS_BUCKET"),
+        help="GCS bucket for spot klines uploads (default: SPOT_GCS_BUCKET env).",
+    )
+    parser.add_argument(
+        "--futures-bucket",
+        default=os.getenv("FUTURES_GCS_BUCKET"),
+        help="GCS bucket for futures parquet uploads (default: FUTURES_GCS_BUCKET env).",
+    )
+    parser.add_argument(
+        "--futures-interval",
+        default="1h",
+        help="Futures interval to ingest (default: 1h).",
+    )
+    parser.add_argument(
+        "--futures-days",
+        type=int,
+        default=DEFAULT_FUTURES_DAYS,
+        help="Number of UTC days (including today) to ingest for futures metrics (default: 2).",
+    )
+    parser.add_argument(
+        "--futures-pair",
+        default="BTCUSDT",
+        help="Perpetual futures pair symbol (default: BTCUSDT).",
+    )
+    parser.add_argument(
+        "--futures-market",
+        default=os.getenv("CRYPTOCOMPARE_MARKET"),
+        help="Optional CryptoCompare market override (default: env CRYPTOCOMPARE_MARKET).",
+    )
+    parser.add_argument(
+        "--futures-instrument",
+        default=os.getenv("CRYPTOCOMPARE_INSTRUMENT"),
+        help="Optional CryptoCompare instrument override (default: env CRYPTOCOMPARE_INSTRUMENT).",
+    )
     return parser.parse_args()
 
 
@@ -336,7 +538,19 @@ def main() -> None:
         os.environ["RUN_WITHOUT_FUNDING"] = "1"
     log_event("refresh.start", hours=args.hours, horizons=args.horizons, run_without_funding=resolved_without_funding)
 
-    ingest_info = run_binance_ingest(args.hours)
+    futures_info = None
+    if not args.skip_futures:
+        futures_info = run_futures_ingest(
+            bucket=args.futures_bucket,
+            interval=args.futures_interval,
+            pair=args.futures_pair,
+            days=args.futures_days,
+            market=args.futures_market,
+            instrument=args.futures_instrument,
+            api_key=os.getenv("CRYPTOCOMPARE_API_KEY"),
+        )
+
+    ingest_info = run_binance_ingest(args.hours, spot_bucket=args.spot_bucket)
     feature_info = run_feature_builders(run_without_funding=resolved_without_funding)
 
     bq_info = run_bigquery_refresh(SQL_REFRESH_PATH)
@@ -351,12 +565,15 @@ def main() -> None:
             "dataset_multi": str(DATASET_MULTI_PATH),
         },
         "ingest_path": str(ingest_info["path"]),
+        "spot_uploads": ingest_info.get("gcs_uploads"),
+        "futures": futures_info,
     }
     log_event(
         "refresh.complete",
         latest_curated=final_summary["latest_curated"],
         dataset_artifacts=final_summary["dataset_artifacts"],
         ingest_path=final_summary["ingest_path"],
+        spot_uploads=_stringify(ingest_info.get("gcs_uploads")) if ingest_info.get("gcs_uploads") else None,
         bigquery_refreshed=bool(bq_info),
         feature_outputs=feature_info,
     )

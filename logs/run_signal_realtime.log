@@ -1,0 +1,86 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/workspaces/btc/src/scripts/run_signal_realtime.py", line 29, in <module>
+    from src.trading.signals import (
+  File "/workspaces/btc/src/trading/signals.py", line 45, in <module>
+    from xgboost import XGBClassifier, XGBRegressor
+ModuleNotFoundError: No module named 'xgboost'
+Added 54 feature columns from data/processed/macro/hourly_features.parquet: macro_DXY_close, macro_DXY_high, macro_DXY_low, macro_DXY_open, macro_DXY_volume...
+Processed features not found at data/processed/onchain/hourly_features.parquet; skipping.
+Processed features at data/processed/funding/hourly_features.parquet are empty; skipping.
+Added 20 feature columns from data/processed/coinapi/market_hourly_features.parquet: coinapi_futures_close, coinapi_futures_high, coinapi_futures_low, coinapi_futures_open, coinapi_futures_volume...
+Added 3 feature columns from data/processed/coinapi/funding_hourly_features.parquet: coinapi_funding_funding_rate, coinapi_funding_funding_rate_delta_1h, coinapi_funding_funding_rate_delta_24h
+Added 20 feature columns from data/processed/cryptoquant/hourly_features.parquet: cq_daily_exchange_netflow, cq_daily_exchange_reserve, cq_daily_miner_flow, cq_daily_stablecoin_reserve, cq_daily_whale_count...
+Logged 22 CryptoQuant fallback features (7 values, 5 deltas, 5 pct, 5 z-scores) to artifacts/monitoring/cryptoquant_feature_catalog.json
+Forward/Backward-filled 22 cq_* features with full coverage.
+Removed coinapi_* features from live feature matrix: coinapi_basis_spread_1h, coinapi_basis_spread_24h, coinapi_funding_funding_rate, coinapi_funding_funding_rate_delta_1h, coinapi_funding_funding_rate_delta_24h, coinapi_futures_close, coinapi_futures_high, coinapi_futures_low, coinapi_futures_open, coinapi_futures_realized_vol_1h, coinapi_futures_realized_vol_24h, coinapi_futures_volume, coinapi_spot_close, coinapi_spot_high, coinapi_spot_low, coinapi_spot_num_trades, coinapi_spot_open, coinapi_spot_quote_volume, coinapi_spot_realized_vol_1h, coinapi_spot_realized_vol_24h, coinapi_spot_taker_buy_base_volume, coinapi_spot_taker_buy_quote_volume, coinapi_spot_volume
+Forward/Backward-filled 22 cq_* features with full coverage.
+Removed excluded features from live feature matrix: cq_daily_fallback_active, cq_daily_fallback_complete, fut_volume_delta_1h, fut_volume_pct_change_1h
+{
+  "ts": "2025-12-17T03:00:00Z",
+  "p_up": 0.7332988679409027,
+  "ret_pred": 0.0009259512298740447,
+  "signal_ensemble": 1,
+  "signal_dir_only": 1,
+  "p_up_components": {
+    "xgb": 0.9247071743011475,
+    "lstm": 0.4874991178512573,
+    "transformer": 0.760494589805603
+  },
+  "p_up_xgb": 0.9247071743011475,
+  "p_up_lstm": 0.4874991178512573,
+  "p_up_transformer": 0.760494589805603,
+  "direction_model_kind": "ensemble",
+  "thresholds": {
+    "p_up_min": 0.45,
+    "ret_min": 0.0
+  },
+  "p_up_meta": 0.8273872480289257,
+  "signal_meta": 1,
+  "meta_expected_net": {
+    "fee_20_10": 0.0006259512298740447,
+    "fee_25_12": 0.0005559512298740447,
+    "fee_30_15": 0.00047595122987404467
+  }
+}
+Appended signal for ts=2025-12-17T03:00:00Z to artifacts/live/paper_trade_realtime.csv
+Added 54 feature columns from data/processed/macro/hourly_features.parquet: macro_DXY_close, macro_DXY_high, macro_DXY_low, macro_DXY_open, macro_DXY_volume...
+Processed features not found at data/processed/onchain/hourly_features.parquet; skipping.
+Processed features at data/processed/funding/hourly_features.parquet are empty; skipping.
+Added 20 feature columns from data/processed/coinapi/market_hourly_features.parquet: coinapi_futures_close, coinapi_futures_high, coinapi_futures_low, coinapi_futures_open, coinapi_futures_volume...
+Added 3 feature columns from data/processed/coinapi/funding_hourly_features.parquet: coinapi_funding_funding_rate, coinapi_funding_funding_rate_delta_1h, coinapi_funding_funding_rate_delta_24h
+Added 20 feature columns from data/processed/cryptoquant/hourly_features.parquet: cq_daily_exchange_netflow, cq_daily_exchange_reserve, cq_daily_miner_flow, cq_daily_stablecoin_reserve, cq_daily_whale_count...
+Logged 22 CryptoQuant fallback features (7 values, 5 deltas, 5 pct, 5 z-scores) to artifacts/monitoring/cryptoquant_feature_catalog.json
+Forward/Backward-filled 22 cq_* features with full coverage.
+Removed coinapi_* features from live feature matrix: coinapi_basis_spread_1h, coinapi_basis_spread_24h, coinapi_funding_funding_rate, coinapi_funding_funding_rate_delta_1h, coinapi_funding_funding_rate_delta_24h, coinapi_futures_close, coinapi_futures_high, coinapi_futures_low, coinapi_futures_open, coinapi_futures_realized_vol_1h, coinapi_futures_realized_vol_24h, coinapi_futures_volume, coinapi_spot_close, coinapi_spot_high, coinapi_spot_low, coinapi_spot_num_trades, coinapi_spot_open, coinapi_spot_quote_volume, coinapi_spot_realized_vol_1h, coinapi_spot_realized_vol_24h, coinapi_spot_taker_buy_base_volume, coinapi_spot_taker_buy_quote_volume, coinapi_spot_volume
+Forward/Backward-filled 22 cq_* features with full coverage.
+Removed excluded features from live feature matrix: cq_daily_fallback_active, cq_daily_fallback_complete, fut_volume_delta_1h, fut_volume_pct_change_1h
+{
+  "ts": "2025-12-17T03:00:00Z",
+  "p_up": 0.7332988679409027,
+  "ret_pred": 0.0009259512298740447,
+  "signal_ensemble": 1,
+  "signal_dir_only": 1,
+  "p_up_components": {
+    "xgb": 0.9247071743011475,
+    "lstm": 0.4874991178512573,
+    "transformer": 0.760494589805603
+  },
+  "p_up_xgb": 0.9247071743011475,
+  "p_up_lstm": 0.4874991178512573,
+  "p_up_transformer": 0.760494589805603,
+  "direction_model_kind": "ensemble",
+  "thresholds": {
+    "p_up_min": 0.45,
+    "ret_min": 0.0
+  },
+  "p_up_meta": 0.8273872480289257,
+  "signal_meta": 1,
+  "meta_expected_net": {
+    "fee_20_10": 0.0006259512298740447,
+    "fee_25_12": 0.0005559512298740447,
+    "fee_30_15": 0.00047595122987404467
+  }
+}
+No new bar; last ts=2025-12-17T03:00:00Z equal to current ts=2025-12-17T03:00:00Z; skipping append.

@@ -13,10 +13,15 @@ from src.config_trading import (
     DEFAULT_REG_MODEL_DIR_1H,
     DEFAULT_RET_MIN,
     DEFAULT_SLIPPAGE_BPS,
+    DEFAULT_TRANSFORMER_MODEL_DIR_1H,
+    DEFAULT_DIR_MODEL_WEIGHTS_1H,
     OPTUNA_DIR_MODEL_DIR_1H,
+    OPTUNA_DIR_MODEL_WEIGHTS_1H,
+    OPTUNA_LSTM_MODEL_DIR_1H,
     OPTUNA_P_UP_MIN_1H,
     OPTUNA_REG_MODEL_DIR_1H,
     OPTUNA_RET_MIN_1H,
+    OPTUNA_TRANSFORMER_MODEL_DIR_1H,
 )
 from src.trading.ensembles import parse_weight_spec
 from src.trading.signals import (
@@ -68,7 +73,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dir-model-weights",
         type=str,
-        default=None,
+        default=DEFAULT_DIR_MODEL_WEIGHTS_1H,
         help=(
             "Optional comma-separated weights for direction models, e.g. transformer:1,lstm:1,xgb:1. "
             "Weights are normalized automatically; unspecified models default to equal weighting."
@@ -129,6 +134,15 @@ def _apply_optuna_profile(args: argparse.Namespace) -> None:
 
     if args.dir_model_dir == DEFAULT_DIR_MODEL_DIR_1H:
         args.dir_model_dir = OPTUNA_DIR_MODEL_DIR_1H
+
+    if args.lstm_dir_model in (None, OPTUNA_LSTM_MODEL_DIR_1H):
+        args.lstm_dir_model = OPTUNA_LSTM_MODEL_DIR_1H
+
+    if args.transformer_dir_model in (None, DEFAULT_TRANSFORMER_MODEL_DIR_1H):
+        args.transformer_dir_model = OPTUNA_TRANSFORMER_MODEL_DIR_1H
+
+    if args.dir_model_weights in (None, "", DEFAULT_DIR_MODEL_WEIGHTS_1H):
+        args.dir_model_weights = OPTUNA_DIR_MODEL_WEIGHTS_1H
 
     if args.p_up_min == DEFAULT_P_UP_MIN:
         args.p_up_min = OPTUNA_P_UP_MIN_1H

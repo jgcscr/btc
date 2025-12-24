@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 pandas>=2.0.0
 pyarrow>=15.0.0
 requests>=2.31.0
@@ -10,6 +11,7 @@ db-dtypes>=1.2.0
 xgboost>=2.0.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
+gunicorn>=21.2.0
 torch>=2.0.0
 optuna>=3.6.0
 PyYAML>=6.0.0

@@ -12,11 +12,15 @@ import pandas as pd
 from src.config_trading import (
     DEFAULT_DIR_MODEL_DIR_1H,
     DEFAULT_LSTM_MODEL_DIR_1H,
+    DEFAULT_TRANSFORMER_MODEL_DIR_1H,
     DEFAULT_P_UP_MIN,
     DEFAULT_REG_MODEL_DIR_1H,
     DEFAULT_RET_MIN,
+    DEFAULT_DIR_MODEL_WEIGHTS_1H,
     OPTUNA_DIR_MODEL_DIR_1H,
     OPTUNA_LSTM_MODEL_DIR_1H,
+    OPTUNA_DIR_MODEL_WEIGHTS_1H,
+    OPTUNA_TRANSFORMER_MODEL_DIR_1H,
     OPTUNA_P_UP_MIN_1H,
     OPTUNA_REG_MODEL_DIR_1H,
     OPTUNA_RET_MIN_1H,
@@ -44,6 +48,8 @@ DEFAULT_N_BARS = 500
 DEFAULT_LOG_PATH = "artifacts/live/paper_trade_realtime.csv"
 DEFAULT_REG_MODEL_DIR = DEFAULT_REG_MODEL_DIR_1H
 DEFAULT_DIR_MODEL_DIR = DEFAULT_DIR_MODEL_DIR_1H
+DEFAULT_TRANSFORMER_MODEL_DIR = DEFAULT_TRANSFORMER_MODEL_DIR_1H
+DEFAULT_DIR_MODEL_WEIGHTS = DEFAULT_DIR_MODEL_WEIGHTS_1H
 DEFAULT_P_UP_MIN_4H_CONFIRM = 0.55
 LEGACY_LOG_COLUMNS = [
     "ts",
@@ -124,13 +130,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--transformer-dir-model",
         type=str,
-        default=None,
+        default=DEFAULT_TRANSFORMER_MODEL_DIR,
         help="Optional directory containing a transformer direction model (model.pt, summary.json).",
     )
     parser.add_argument(
         "--dir-model-weights",
         type=str,
-        default=None,
+        default=DEFAULT_DIR_MODEL_WEIGHTS,
         help="Optional comma-separated weights for direction models (e.g. transformer:2,lstm:1,xgb:1).",
     )
     parser.add_argument(
@@ -213,6 +219,12 @@ def _apply_optuna_profile(args: argparse.Namespace) -> None:
 
     if args.lstm_model_dir in (None, DEFAULT_LSTM_MODEL_DIR_1H):
         args.lstm_model_dir = OPTUNA_LSTM_MODEL_DIR_1H
+
+    if args.transformer_dir_model in (None, DEFAULT_TRANSFORMER_MODEL_DIR_1H):
+        args.transformer_dir_model = OPTUNA_TRANSFORMER_MODEL_DIR_1H
+
+    if args.dir_model_weights in (None, "", DEFAULT_DIR_MODEL_WEIGHTS):
+        args.dir_model_weights = OPTUNA_DIR_MODEL_WEIGHTS_1H
 
     if args.p_up_min == DEFAULT_P_UP_MIN:
         args.p_up_min = OPTUNA_P_UP_MIN_1H
