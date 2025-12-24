@@ -65,7 +65,7 @@ steps:
           --data '{"dry_run": false, "args": ["--targets", "1,4,8,12"]}' \
           | tee /workspace/run_signal.json
 
-    - id: build-report
+  - id: build-report
     name: python:3.11
     entrypoint: bash
     env:
@@ -75,7 +75,7 @@ steps:
       - -c
       - |
         set -euo pipefail
-      python -m src.scripts.build_trade_ready_report
+        python -m src.scripts.build_trade_ready_report
 
   - id: publish-report
     name: gcr.io/cloud-builders/gcloud
