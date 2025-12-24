@@ -1,0 +1,11 @@
+# Include runtime datasets for offline inference while keeping defaults lean.
+**/__pycache__/
+*.pyc
+.git/
+.gitignore
+.vscode/
+.env
+.venv/
+tmp_parquet/
+# Ensure artifacts/datasets ships with build context.
+!artifacts/datasets/**
