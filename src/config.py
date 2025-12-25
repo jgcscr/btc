@@ -9,9 +9,10 @@ ONCHAIN_API_KEY = os.getenv("ONCHAIN_API_KEY", "")
 ONCHAIN_DEFAULT_INTERVAL = os.getenv("ONCHAIN_DEFAULT_INTERVAL", "1h")
 ONCHAIN_METRICS = [
 	"active_addresses",
+	"new_addresses",
 	"transaction_count",
-	"hash_rate",
-	"market_cap",
+	"hashrate",
+	"difficulty",
 ]
 
 DEFAULT_ONCHAIN_CACHE_DIR = os.getenv("ONCHAIN_CACHE_DIR", "data")
