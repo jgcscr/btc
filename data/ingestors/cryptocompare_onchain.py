@@ -21,7 +21,15 @@ API_METRIC_BY_CANONICAL = {
     "hashrate": "hashrate",
     "difficulty": "difficulty",
 }
-SUPPORTED_METRICS = set(API_METRIC_BY_CANONICAL.keys())
+CANONICAL_BY_INPUT = {
+    "active_addresses": "active_addresses",
+    "new_addresses": "new_addresses",
+    "transaction_count": "transaction_count",
+    "hashrate": "hashrate",
+    "hash_rate": "hashrate",
+    "difficulty": "difficulty",
+}
+SUPPORTED_METRICS = set(CANONICAL_BY_INPUT.keys())
 
 
 class CryptoCompareIngestionError(RuntimeError):
@@ -51,7 +59,8 @@ def fetch_hourly_metrics(metric: str, limit: int = DEFAULT_LIMIT, api_key: Optio
         supported = ", ".join(sorted(SUPPORTED_METRICS))
         raise CryptoCompareIngestionError(f"Unsupported metric '{metric}'. Supported: {supported}")
 
-    api_metric = API_METRIC_BY_CANONICAL[metric]
+    canonical_metric = CANONICAL_BY_INPUT[metric]
+    api_metric = API_METRIC_BY_CANONICAL[canonical_metric]
     params = _build_params(metric=api_metric, limit=limit, api_key=api_key)
     try:
         response = requests.get(BASE_URL, params=params, timeout=30)
@@ -94,7 +103,7 @@ def fetch_hourly_metrics(metric: str, limit: int = DEFAULT_LIMIT, api_key: Optio
         ts = pd.to_datetime(ts_raw, unit="s", utc=True)
         tidy_rows.append({
             "ts": ts,
-            "metric": metric,
+            "metric": canonical_metric,
             "value": float(value) if value is not None else None,
             "source": SOURCE_NAME,
         })
