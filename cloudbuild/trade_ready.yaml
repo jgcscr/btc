@@ -16,21 +16,37 @@ substitutions:
 availableSecrets:
   secretManager:
     - versionName: projects/jc-financial-466902/secrets/trade-service-url/versions/latest
-      env: SERVICE_URL
+      env: service_url
+    - versionName: projects/jc-financial-466902/secrets/cryptocompare-api-key/versions/latest
+      env: CRYPTOCOMPARE_API_KEY
 
 steps:
+  - id: refresh-market-features
+    name: python:3.11
+    entrypoint: bash
+    secretEnv:
+      - CRYPTOCOMPARE_API_KEY
+    env:
+      - PYTHONPATH=/workspace
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        pip install --no-cache-dir -r requirements.txt
+        python -m src.scripts.refresh_market_features --onchain-limit 720 --funding-limit 1000
   - id: run-dataset-refresh
     name: gcr.io/cloud-builders/gcloud
     entrypoint: bash
     secretEnv:
-      - SERVICE_URL
+      - service_url
     args:
       - -c
       - |
         set -euo pipefail
         echo "Calling /run-dataset-refresh (72h window)"
+        service_url_value="$service_url"
         curl --fail --show-error --silent \
-          --request POST "${SERVICE_URL}/run-dataset-refresh" \
+          --request POST "$service_url_value/run-dataset-refresh" \
           --header "Content-Type: application/json" \
           --data '{"dry_run": false, "args": ["--hours", "72"]}' \
           | tee /workspace/run_dataset_refresh.json
@@ -53,14 +69,15 @@ steps:
     name: gcr.io/cloud-builders/gcloud
     entrypoint: bash
     secretEnv:
-      - SERVICE_URL
+      - service_url
     args:
       - -c
       - |
         set -euo pipefail
         echo "Calling /run-signal with horizons 1,4,8,12"
+        service_url_value="$service_url"
         curl --fail --show-error --silent \
-          --request POST "${SERVICE_URL}/run-signal" \
+          --request POST "$service_url_value/run-signal" \
           --header "Content-Type: application/json" \
           --data '{"dry_run": false, "args": ["--targets", "1,4,8,12"]}' \
           | tee /workspace/run_signal.json
@@ -84,5 +101,5 @@ steps:
       - -c
       - |
         set -euo pipefail
-        REPORT_URI=$(cat /workspace/report_uri.txt)
-        gsutil cp /workspace/trade_ready_report.json "${REPORT_URI}"
+        report_uri=$(cat /workspace/report_uri.txt)
+        gsutil cp /workspace/trade_ready_report.json "$report_uri"
