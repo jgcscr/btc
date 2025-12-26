@@ -6,6 +6,9 @@ from typing import Any, Dict
 
 import pytest
 
+from data.processed.compute_funding_features import FundingProcessingError
+from src.data.binance_klines import BinanceAPIError
+
 import src.scripts.refresh_market_features as refresh
 
 
@@ -90,6 +93,7 @@ def test_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pyt
     assert "onchain" in output
     assert "funding" in output
     assert "technical" in output
+    assert output["funding"]["status"] == "ok"
 
 
 def test_skip_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -132,3 +136,103 @@ def test_failure_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFix
 
     assert exit_code == 1
     assert "technical boom" in captured.err
+
+
+def test_funding_fallback_on_processing_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    funding_calls = []
+
+    def fake_ingest(*, metrics, limit, output_root, api_key):
+        return [tmp_path / f"raw_{metric}.parquet" for metric in metrics]
+
+    def fake_onchain_features() -> Path:
+        path = tmp_path / "onchain.parquet"
+        path.touch()
+        _write_summary(refresh.ONCHAIN_SUMMARY_PATH, {"latest_timestamp": "2024-01-01T00:00:00Z"})
+        return path
+
+    def fake_funding_features(**kwargs: Any) -> Path:
+        funding_calls.append(kwargs)
+        if len(funding_calls) == 1:
+            raise FundingProcessingError("no funding data")
+        path = tmp_path / "funding.parquet"
+        path.touch()
+        _write_summary(refresh.FUNDING_SUMMARY_PATH, {"latest_timestamp": "2024-01-02T00:00:00Z"})
+        return path
+
+    def fake_technical_features(**kwargs: Any) -> Path:
+        path = tmp_path / "technical.parquet"
+        path.touch()
+        _write_summary(refresh.TECHNICAL_SUMMARY_PATH, {"latest_timestamp": "2024-01-03T00:00:00Z"})
+        return path
+
+    monkeypatch.setattr(refresh, "ingest_cryptocompare_metrics", fake_ingest)
+    monkeypatch.setattr(refresh, "process_onchain_features", fake_onchain_features)
+    monkeypatch.setattr(refresh, "process_funding_features", fake_funding_features)
+    monkeypatch.setattr(refresh, "process_technical_features", fake_technical_features)
+
+    exit_code = refresh.main([])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert len(funding_calls) == 2
+    assert funding_calls[0]["allow_missing"] is False
+    assert funding_calls[1]["allow_missing"] is True
+    assert funding_calls[1]["live_fetch"] is False
+    assert "falling back" in captured.err
+
+    output = json.loads(captured.out)
+    funding_section = output["funding"]
+    assert funding_section["status"] == "fallback"
+    assert funding_section["error"] == "no funding data"
+
+
+def test_funding_fallback_on_451_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    funding_calls = []
+
+    def fake_ingest(*, metrics, limit, output_root, api_key):
+        return [tmp_path / f"raw_{metric}.parquet" for metric in metrics]
+
+    def fake_onchain_features() -> Path:
+        path = tmp_path / "onchain.parquet"
+        path.touch()
+        _write_summary(refresh.ONCHAIN_SUMMARY_PATH, {"latest_timestamp": "2024-01-01T00:00:00Z"})
+        return path
+
+    def fake_funding_features(**kwargs: Any) -> Path:
+        funding_calls.append(kwargs)
+        if len(funding_calls) == 1:
+            raise BinanceAPIError("Binance request failed: 451 Client Error: for url")
+        path = tmp_path / "funding.parquet"
+        path.touch()
+        _write_summary(refresh.FUNDING_SUMMARY_PATH, {"latest_timestamp": "2024-01-02T00:00:00Z"})
+        return path
+
+    def fake_technical_features(**kwargs: Any) -> Path:
+        path = tmp_path / "technical.parquet"
+        path.touch()
+        _write_summary(refresh.TECHNICAL_SUMMARY_PATH, {"latest_timestamp": "2024-01-03T00:00:00Z"})
+        return path
+
+    monkeypatch.setattr(refresh, "ingest_cryptocompare_metrics", fake_ingest)
+    monkeypatch.setattr(refresh, "process_onchain_features", fake_onchain_features)
+    monkeypatch.setattr(refresh, "process_funding_features", fake_funding_features)
+    monkeypatch.setattr(refresh, "process_technical_features", fake_technical_features)
+
+    exit_code = refresh.main([])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert len(funding_calls) == 2
+    assert funding_calls[1]["allow_missing"] is True
+    assert "451" in captured.err
+
+    output = json.loads(captured.out)
+    assert output["funding"]["status"] == "fallback"

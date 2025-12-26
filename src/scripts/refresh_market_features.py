@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 from data.processed.compute_funding_features import (
     SUMMARY_PATH as FUNDING_SUMMARY_PATH,
+    FundingProcessingError,
     process_funding_features,
 )
 from data.ingestors.cryptocompare_onchain import ingest_metrics as ingest_cryptocompare_metrics
@@ -19,6 +22,7 @@ from data.processed.compute_technical_features import (
     SUMMARY_PATH as TECHNICAL_SUMMARY_PATH,
     process_technical_features,
 )
+from src.data.binance_klines import BinanceAPIError
 from src.config import ONCHAIN_METRICS
 
 ONCHAIN_RAW_ROOT = Path("data/raw/onchain/cryptocompare")
@@ -28,6 +32,9 @@ TECHNICAL_HISTORY_LIMIT = 5000
 DEFAULT_ONCHAIN_LIMIT = 720
 DEFAULT_FUNDING_LIMIT = 1000
 FUNDING_PAIR = "BTCUSDT"
+
+
+logger = logging.getLogger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -101,23 +108,57 @@ def _refresh_onchain(limit: int) -> Dict[str, Any]:
 
 
 def _refresh_funding(limit: int) -> Dict[str, Any]:
+    try:
+        return _run_funding_job(limit, allow_missing=False, live_fetch=True)
+    except FundingProcessingError as exc:
+        return _funding_fallback(limit, exc)
+    except BinanceAPIError as exc:
+        message = str(exc)
+        if not _is_http_client_error(message):
+            raise
+        return _funding_fallback(limit, exc)
+
+
+def _run_funding_job(limit: int, *, allow_missing: bool, live_fetch: bool) -> Dict[str, Any]:
     features_path = process_funding_features(
         pair=FUNDING_PAIR,
-        live_fetch=True,
+        live_fetch=live_fetch,
         live_limit=limit,
-        allow_missing=False,
+        allow_missing=allow_missing,
         raw_root=FUNDING_RAW_ROOT,
         output_path=FUNDING_OUTPUT_PATH,
     )
     summary = _load_json(FUNDING_SUMMARY_PATH)
-    return {
+    status = "fallback" if allow_missing else "ok"
+    payload: Dict[str, Any] = {
         "pair": FUNDING_PAIR,
         "live_limit": limit,
         "features_path": str(features_path),
         "summary_path": str(FUNDING_SUMMARY_PATH),
         "latest_timestamp": _latest_timestamp(summary),
         "summary": summary,
+        "status": status,
     }
+    return payload
+
+
+def _funding_fallback(limit: int, error: Exception) -> Dict[str, Any]:
+    message = str(error)
+    logger.warning(
+        "refresh_market_features: funding refresh encountered an error (%s); falling back to allow-missing mode.",
+        message,
+    )
+    print(
+        f"refresh_market_features: funding refresh encountered an error ({message}); falling back to allow-missing mode.",
+        file=sys.stderr,
+    )
+    payload = _run_funding_job(limit, allow_missing=True, live_fetch=False)
+    payload["error"] = message
+    return payload
+
+
+def _is_http_client_error(message: str) -> bool:
+    return bool(re.search(r"\b4\d{2}\b", message))
 
 
 def _refresh_technical() -> Dict[str, Any]:
