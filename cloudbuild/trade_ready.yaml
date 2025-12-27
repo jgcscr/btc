@@ -19,6 +19,8 @@ availableSecrets:
       env: service_url
     - versionName: projects/jc-financial-466902/secrets/cryptocompare-api-key/versions/latest
       env: CRYPTOCOMPARE_API_KEY
+    - versionName: projects/jc-financial-466902/secrets/alpha-vantage-api-key/versions/latest
+      env: alpha_vantage_api_key
 
 steps:
   - id: refresh-market-features
@@ -26,12 +28,14 @@ steps:
     entrypoint: bash
     secretEnv:
       - CRYPTOCOMPARE_API_KEY
+      - alpha_vantage_api_key
     env:
       - PYTHONPATH=/workspace
     args:
       - -c
       - |
         set -euo pipefail
+        export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
         pip install --no-cache-dir -r requirements.txt
         python -m src.scripts.refresh_market_features --onchain-limit 720 --funding-limit 1000
   - id: run-dataset-refresh
@@ -39,12 +43,14 @@ steps:
     entrypoint: bash
     secretEnv:
       - service_url
+      - alpha_vantage_api_key
     args:
       - -c
       - |
         set -euo pipefail
         echo "Calling /run-dataset-refresh (72h window)"
         service_url_value="$service_url"
+        export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
         curl --fail --show-error --silent \
           --request POST "$service_url_value/run-dataset-refresh" \
           --header "Content-Type: application/json" \
@@ -58,10 +64,13 @@ steps:
       - PROJECT_ID=${_PROJECT_ID}
       - SPOT_GCS_BUCKET=${_SPOT_GCS_BUCKET}
       - PYTHONPATH=/workspace
+    secretEnv:
+      - alpha_vantage_api_key
     args:
       - -c
       - |
         set -euo pipefail
+        export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
         pip install --no-cache-dir google-cloud-bigquery >/dev/null
         python -m src.scripts.ensure_spot_raw_sync
 
@@ -70,12 +79,14 @@ steps:
     entrypoint: bash
     secretEnv:
       - service_url
+      - alpha_vantage_api_key
     args:
       - -c
       - |
         set -euo pipefail
         echo "Calling /run-signal with horizons 1,4,8,12"
         service_url_value="$service_url"
+        export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
         curl --fail --show-error --silent \
           --request POST "$service_url_value/run-signal" \
           --header "Content-Type: application/json" \
@@ -88,10 +99,13 @@ steps:
     env:
       - REPORT_BUCKET=${_REPORT_BUCKET}
       - PYTHONPATH=/workspace
+    secretEnv:
+      - alpha_vantage_api_key
     args:
       - -c
       - |
         set -euo pipefail
+        export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
         python -m src.scripts.build_trade_ready_report
 
   - id: publish-report

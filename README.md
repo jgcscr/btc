@@ -32,6 +32,14 @@ Set the following environment variables for premium data access:
 
 These providers are now in active use. Free endpoints are no longer sufficient for full feature coverage.
 
+Use the helper script to load the Alpha Vantage key from Secret Manager before local runs:
+
+```bash
+source env/load_alpha_vantage_secret.sh  # exports ALPHA_VANTAGE_API_KEY from GCP Secret Manager
+```
+
+The script defaults to project `jc-financial-466902` and secret `alpha-vantage-api-key`. Override `PROJECT_ID`, `ALPHA_VANTAGE_SECRET_NAME`, or `ALPHA_VANTAGE_SECRET_VERSION` if you keep the secret elsewhere.
+
 Macro ingestion defaults to Alpha Vantage; set `MACRO_PROVIDER=twelve` (or pass `--provider twelve`) to route through Twelve Data when the Twelve key is present. Clearing the flag falls back to Alpha Vantage automatically.
 
 
