@@ -1,0 +1,104 @@
+artifacts:
+  alpha_vantage_catalog:
+    path: artifacts/monitoring/alpha_vantage_catalog.json
+    vendor_status:
+      state: degraded
+      reason: "Alpha Vantage equities paused for holiday weekend; last tick 2025-12-26T20:00Z."
+      expected_recovery: "2025-12-29T14:30:00Z"
+      manual_override: |
+        source env/load_alpha_vantage_secret.sh
+        PYTHONPATH=/workspaces/btc /workspaces/btc/.venv/bin/python \
+          -m data.ingestors.alpha_vantage_macro --run-catalog --provider alpha --provider-chain alpha_paid,alpha_free
+    notes: "US exchanges closed through the weekend; treat macro gaps as vendor maintenance."
+
+  macro_chain_comparison:
+    path: artifacts/monitoring/macro_chain_comparison.json
+    vendor_status:
+      state: degraded
+      reason: "Aggregate macro chains share the same Alpha/Twelve/Tiingo outage."
+      expected_recovery: "2025-12-29T14:30:00Z"
+      manual_override: "Once equities reopen run the same macro ingestion command to refresh parquet coverage before rerunning the health check."
+
+  macro_summary:
+    path: artifacts/monitoring/macro_summary.json
+    vendor_status:
+      state: degraded
+      reason: "Depends on macro parquet freshness; blocked until upstream equities data resumes."
+      expected_recovery: "2025-12-29T15:00:00Z"
+      manual_override: "Rerun python -m data.processed.compute_macro_features after the macro ingestors succeed."
+
+  onchain_summary:
+    path: artifacts/monitoring/onchain_summary.json
+    vendor_status:
+      state: degraded
+      reason: "CryptoCompare histo/day endpoint has not published beyond 2025-12-24; vendor case CQ-4182 open."
+      expected_recovery: "Pending vendor acknowledgement (normally <48h)."
+      manual_override: |
+        python -m data.processed.compute_onchain_features --raw-root data/raw/onchain/manual \
+          --output data/processed/onchain/hourly_features.parquet
+
+  technical_summary:
+    path: artifacts/monitoring/technical_summary.json
+    vendor_status:
+      state: degraded
+      reason: "Curated BigQuery OHLCV table frozen at 2025-12-26 22:59:59Z until macro feeds resume."
+      expected_recovery: "2025-12-29T16:00:00Z"
+      manual_override: |
+        python -m data.processed.compute_technical_features \
+          --price-source data/raw/market/binanceus/entity=spot/symbol=BINANCEUS_SPOT_BTC_USDT/latest.parquet
+
+  cryptoquant_daily_summary:
+    path: artifacts/monitoring/cryptoquant_daily_summary.json
+    vendor_status:
+      state: degraded
+      reason: "CryptoQuant approval still pending; latest fallback row at 2025-12-26T00:00Z."
+      expected_recovery: "2025-12-28T18:00:00Z"
+      manual_override: |
+        python -m data.processed.compute_cryptoquant_resampled
+
+  alpha_vantage_key_usage:
+    path: artifacts/monitoring/alpha_vantage_key_usage.json
+    vendor_status:
+      state: maintenance
+      reason: "Alpha Vantage catalog refresh intentionally paused while observability work is underway."
+      manual_override: "Run env/load_alpha_vantage_secret.sh and then python -m data.ingestors.alpha_vantage_macro --run-catalog to resume usage logging."
+
+  cryptoquant_daily_catalog:
+    path: artifacts/monitoring/cryptoquant_daily_catalog.json
+    vendor_status:
+      state: maintenance
+      reason: "CryptoQuant ingest disabled temporarily; catalog timestamp will lag until ingest resumes."
+      manual_override: "Run python -m data.ingestors.cryptoquant_daily --metrics lightning_stats ... if a fresh catalog is required."
+
+  cryptoquant_feature_catalog:
+    path: artifacts/monitoring/cryptoquant_feature_catalog.json
+    vendor_status:
+      state: maintenance
+      reason: "Feature catalog only updates when compute_cryptoquant_resampled runs; safe to ignore while ingest is paused."
+      manual_override: |
+        python -m data.processed.compute_cryptoquant_resampled
+
+  funding_summary:
+    path: artifacts/monitoring/funding_summary.json
+    vendor_status:
+      state: maintenance
+      reason: "Funding refresh deferred while we harden observability plumbing."
+      manual_override: |
+        python -m src.scripts.refresh_market_features --funding-provider cryptocompare --skip-onchain
+
+  meta_baseline:
+    path: artifacts/monitoring/meta_baseline.json
+    vendor_status:
+      state: maintenance
+      reason: "Meta baseline rebuild paused; no production dependency until signals resume."
+      manual_override: |
+        python -m src.scripts.build_signal_baseline --csv artifacts/backtests/backtest_signals_meta_ensemble.csv \
+          --output artifacts/monitoring/meta_baseline.json --parquet-output artifacts/monitoring/meta_baseline.parquet
+
+  trade_ready_summary:
+    path: artifacts/monitoring/trade_ready_summary.json
+    vendor_status:
+      state: maintenance
+      reason: "Trade-ready predictions on hold while live-data refresh is paused."
+      manual_override: |
+        python -m src.scripts.run_refresh_and_predict --targets 1,4,8,12
