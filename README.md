@@ -139,6 +139,26 @@ Pipeline regression tests covering the CLI live in `tests/pipeline/` and can be 
 - **CryptoQuant daily fallback**: Ingests daily on-chain metrics (exchange flows, reserves, whale counts) using `CQ_TOKEN`. Hourly access is pending (see status below). Synthetic data is used for fallback if API is unavailable.
 - **FRED macro**: Loads macroeconomic indicators (e.g., trade-weighted USD) using `FRED_API_KEY`.
 
+#### On-chain API configuration
+
+Set these environment variables before running any on-chain loaders or `compute_onchain_features`:
+
+- `ONCHAIN_API_BASE_URL` (required): REST endpoint for the on-chain provider.
+- `ONCHAIN_API_KEY` (required): bearer/API key passed to the upstream service.
+- `ONCHAIN_DEFAULT_INTERVAL` (optional): interval string accepted by the provider (defaults to `1h`).
+
+Example shell exports for local development:
+
+```bash
+export ONCHAIN_API_BASE_URL="https://my-onchain-provider.example/v1"
+export ONCHAIN_API_KEY="sk-your-key"
+export ONCHAIN_DEFAULT_INTERVAL="1h"  # omit to inherit the default
+
+# now raw + processed on-chain stages will work
+python -m data.ingestors.onchain_loader --start "2025-12-23T00:00:00Z" --end "2025-12-30T00:00:00Z" --interval 1h
+python -m data.processed.compute_onchain_features
+```
+
 ### Feature Processors and Monitoring
 
 After raw ingestion, run the feature processors to generate hourly/daily Parquet and monitoring summaries:

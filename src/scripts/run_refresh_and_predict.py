@@ -546,14 +546,23 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"Dataset build failed: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    env_dir_lstm = os.getenv("DIR_LSTM_PATH") or args.dir_lstm_path
+    env_dir_transformer = os.getenv("DIR_TRANSFORMER_PATH") or args.dir_transformer_path
+    if env_dir_lstm or env_dir_transformer:
+        print(
+            "Sequence ensemble directories:"
+            f" LSTM={env_dir_lstm or 'None'}"
+            f", transformer={env_dir_transformer or 'None'}",
+        )
+
     try:
         summary = run_predictions(
             args.targets,
             args.p_up_min,
             args.ret_min,
             offline=args.dry_run,
-            dir_lstm_path=args.dir_lstm_path,
-            dir_transformer_path=args.dir_transformer_path,
+            dir_lstm_path=env_dir_lstm,
+            dir_transformer_path=env_dir_transformer,
         )
     except Exception as exc:  # pragma: no cover - runtime safety
         print(f"Prediction step failed: {exc}", file=sys.stderr)
