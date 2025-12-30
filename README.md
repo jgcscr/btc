@@ -3,7 +3,7 @@
 
 This repository provides a robust, multi-vendor pipeline for BTCUSDT forecasting, with premium macro, on-chain, and market data sources, resilient fallbacks, and transparent monitoring. It supports:
 
-- Ingestion of macro, spot, perp, and funding data from premium providers (Alpha Vantage, CoinAPI, CryptoQuant, FRED)
+- Ingestion of macro, spot, perp, and funding data from premium providers (Alpha Vantage, Binance, CryptoQuant, FRED)
 - Feature engineering and monitoring with provenance and fallback logic
 - Partitioned Parquet output for all processed features
 - BigQuery integration for raw and processed tables
@@ -27,7 +27,6 @@ Set the following environment variables for premium data access:
 - `FRED_API_KEY` (required for FRED macro ingestion)
 - `ALPHA_VANTAGE_API_KEY` (required for Alpha Vantage macro)
 - `TWELVE_DATA_API_KEY` (required when `MACRO_PROVIDER=twelve`)
-- `COINAPI_KEY` (required for CoinAPI spot, perp, and funding)
 - `CQ_TOKEN` (required for CryptoQuant daily metrics)
 
 These providers are now in active use. Free endpoints are no longer sufficient for full feature coverage.
@@ -51,6 +50,12 @@ Run the all-in-one refresh script to rebuild features, regenerate datasets, and 
 # Full refresh with live ingestion
 python -m src.scripts.run_refresh_and_predict --targets 1,4,8,12
 
+# Optional: include sequence ensembles for richer probability voting
+python -m src.scripts.run_refresh_and_predict \
+	--targets 1,4,8,12 \
+	--dir-lstm-path artifacts/models/lstm_dir_v1 \
+	--dir-transformer-path artifacts/models/transformer_dir_v1
+
 # CI-friendly smoke test (skips network calls and emits stub predictions)
 python -m src.scripts.run_refresh_and_predict --dry-run --targets 1,4,8,12
 ```
@@ -68,6 +73,10 @@ Example `latest.json` payload (values truncated):
 			"p_up": 0.4756,
 			"ret_pred": 0.0010,
 			"projected_price": 86573.57,
+			"p_up_components": {"xgb": 0.4756, "lstm": 0.5123},
+			"expected_value": -0.0003,
+			"stop_loss": 85608.34,
+			"take_profit": 87561.29,
 			"signal_ensemble": 1,
 			"signal_dir_only": 0
 		},
@@ -77,6 +86,11 @@ Example `latest.json` payload (values truncated):
 	}
 }
 ```
+
+Each horizon now surfaces:
+- `p_up_components`: raw probabilities from the direction models (XGBoost, LSTM, transformer) used in the ensemble vote.
+- `expected_value`: log-return EV computed from the ensemble probability and per-horizon residual bands.
+- `stop_loss` / `take_profit`: price targets derived from \(\pm 1\sigma\) residual bands, ensuring the CLI and monitoring payloads expose consistent trade risk parameters.
 
 Pipeline regression tests covering the CLI live in `tests/pipeline/` and can be executed via `pytest tests/pipeline -q`.
 
@@ -121,8 +135,7 @@ Pipeline regression tests covering the CLI live in `tests/pipeline/` and can be 
 	]
 	```
 
-	Pass `--audit` to summarize the most recent ingestions.
-- **CoinAPI spot/perp/funding**: Loads spot and perpetual BTCUSDT market data, plus funding rates. Funding endpoint is premium and currently under vendor investigation (see status below). Requires `COINAPI_KEY`.
+    Pass `--audit` to summarize the most recent ingestions.
 - **CryptoQuant daily fallback**: Ingests daily on-chain metrics (exchange flows, reserves, whale counts) using `CQ_TOKEN`. Hourly access is pending (see status below). Synthetic data is used for fallback if API is unavailable.
 - **FRED macro**: Loads macroeconomic indicators (e.g., trade-weighted USD) using `FRED_API_KEY`.
 
@@ -133,8 +146,8 @@ After raw ingestion, run the feature processors to generate hourly/daily Parquet
 ```bash
 # Macro features
 python -m data.processed.compute_macro_features
-# CoinAPI features (spot, perp, funding, realized vol, basis, deltas)
-python -m data.processed.compute_coinapi_features
+# Binance-derived funding + futures features
+python -m data.processed.compute_funding_features
 # CryptoQuant features (daily fallback, resampled to hourly)
 python -m data.processed.compute_cryptoquant_resampled
 # On-chain features (if needed)
@@ -185,11 +198,9 @@ Example summary when all keys remain under the threshold:
 
 **CryptoQuant**: Hourly API access is pending (ticket CQ-2025-1213). Daily fallback and synthetic data are in use for now.
 
-**CoinAPI**: Funding endpoint returns 404 for BTCUSDT perpetual (vendor escalation ongoing). Symbol resolution and diagnostics are logged for support.
-
 **Instructions when access is restored:**
-- Rerun the relevant ingestors (e.g., `data.ingestors.cryptoquant_daily`, `data.ingestors.coinapi_exchange`)
-- Rerun the processors (`compute_cryptoquant_resampled.py`, `compute_coinapi_features.py`)
+- Rerun the relevant ingestors (e.g., `data.ingestors.cryptoquant_daily`)
+- Rerun the processors (`compute_cryptoquant_resampled.py`)
 - Rebuild all dataset splits using the scripts in `src/scripts/` (e.g., `build_training_dataset.py`)
 
 ## 4. Create BigQuery dataset (once)

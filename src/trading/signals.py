@@ -1,9 +1,11 @@
 import json
+import math
 import os
+import sys
 from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -67,6 +69,36 @@ EXCLUDED_FEATURES = {
     "cq_daily_fallback_complete",
 }
 
+DEFAULT_RESIDUAL_STD = 0.01
+MIN_RESIDUAL_STD = 1e-6
+_RESIDUAL_STD_WARNED = False
+_MISSING_FEATURE_WARNINGS: Dict[str, Set[str]] = {}
+
+
+def _ensure_feature_columns(frame: pd.DataFrame, required: List[str], context: str) -> pd.DataFrame:
+    if not required:
+        return frame
+
+    missing = [col for col in required if col not in frame.columns]
+    if not missing:
+        return frame
+
+    for column in missing:
+        frame[column] = 0.0
+
+    warned = _MISSING_FEATURE_WARNINGS.setdefault(context, set())
+    unseen = [col for col in missing if col not in warned]
+    if unseen:
+        preview = ", ".join(sorted(unseen)[:5])
+        suffix = "..." if len(unseen) > 5 else ""
+        print(
+            f"Warning: {context} missing model columns {preview}{suffix}; filled with zeros for inference.",
+            file=sys.stderr,
+        )
+        warned.update(unseen)
+
+    return frame
+
 
 def _fill_cryptoquant_features(df: pd.DataFrame) -> pd.DataFrame:
     cq_cols = [col for col in df.columns if col.startswith("cq_")]
@@ -81,17 +113,6 @@ def _fill_cryptoquant_features(df: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         print(f"Forward/Backward-filled {len(cq_cols)} cq_* features with full coverage.")
-    return df
-
-
-def _drop_coinapi_columns(df: pd.DataFrame) -> pd.DataFrame:
-    coinapi_cols = [col for col in df.columns if col.startswith("coinapi_")]
-    if coinapi_cols:
-        df = df.drop(columns=coinapi_cols)
-        print(
-            "Removed coinapi_* features from live feature matrix:",
-            ", ".join(sorted(coinapi_cols)),
-        )
     return df
 
 
@@ -280,10 +301,6 @@ def prepare_data_for_signals(
 
         if feature_names is None:
             feature_names = list(X_all.columns)
-
-    X_all = _drop_coinapi_columns(X_all)
-    if feature_names is not None:
-        feature_names = [col for col in feature_names if not col.startswith("coinapi_")]
 
     X_all = _fill_cryptoquant_features(X_all)
     excluded_in_frame = [col for col in EXCLUDED_FEATURES if col in X_all.columns]
@@ -611,10 +628,76 @@ def load_models(
     return models
 
 
+def _extract_residual_series(dataset_npz: np.lib.npyio.NpzFile, horizon: int) -> Optional[np.ndarray]:
+    if horizon == 1:
+        candidates = ("y_val", "y_train", "y_test")
+    else:
+        prefix = f"y_ret{horizon}h"
+        candidates = (f"{prefix}_val", f"{prefix}_train", f"{prefix}_test")
+
+    for key in candidates:
+        if key in dataset_npz.files:
+            values = np.asarray(dataset_npz[key], dtype=np.float64)
+            if values.size > 1:
+                return values
+    return None
+
+
+def load_residual_std_from_dataset(
+    dataset_npz_path: str,
+    horizons: Iterable[int],
+    fallback_std: float = DEFAULT_RESIDUAL_STD,
+) -> Dict[int, float]:
+    if not os.path.exists(dataset_npz_path):
+        raise FileNotFoundError(f"Dataset NPZ not found at {dataset_npz_path}")
+
+    resolved_horizons = sorted({int(h) for h in horizons if int(h) > 0})
+    if not resolved_horizons:
+        return {}
+
+    residuals: Dict[int, float] = {}
+    fallback_triggered = False
+
+    with np.load(dataset_npz_path, allow_pickle=True) as dataset_npz:
+        available = set(dataset_npz.files)
+        for horizon in resolved_horizons:
+            metric_key = f"metrics_ret_std_{horizon}h"
+            residual_std: Optional[float] = None
+
+            if metric_key in available:
+                metric_value = np.asarray(dataset_npz[metric_key], dtype=np.float64)
+                if metric_value.size:
+                    residual_std = float(metric_value.reshape(-1)[0])
+
+            if residual_std is None:
+                series = _extract_residual_series(dataset_npz, horizon)
+                if series is not None:
+                    residual_std = float(np.std(series, ddof=1))
+
+            if residual_std is None or residual_std <= 0.0 or math.isnan(residual_std):
+                residual_std = float(fallback_std)
+                fallback_triggered = True
+
+            residuals[horizon] = max(residual_std, MIN_RESIDUAL_STD)
+
+    global _RESIDUAL_STD_WARNED
+    if fallback_triggered and not _RESIDUAL_STD_WARNED:
+        print(
+            f"Warning: missing residual std metrics in {dataset_npz_path}; using fallback {fallback_std:.4f}.",
+            file=sys.stderr,
+        )
+        _RESIDUAL_STD_WARNED = True
+
+    return residuals
+
+
 def populate_sequence_cache_from_prepared(prepared: PreparedData, models: Dict[str, Any]) -> None:
     """Populate cached scaled feature matrices required for sequence models."""
 
     sequence_keys = ["dir_lstm", "dir_transformer"]
+    base_features = prepared.X_all_ordered
+    default_scaled = prepared.scaler.transform(base_features).astype(np.float32)
+    default_scaled_df = pd.DataFrame(default_scaled, columns=prepared.feature_names)
 
     for key in sequence_keys:
         model_info = models.get(key)
@@ -622,27 +705,28 @@ def populate_sequence_cache_from_prepared(prepared: PreparedData, models: Dict[s
             continue
 
         model_feature_names = list(model_info.get("feature_names", []))
-        feature_frame = prepared.X_all_ordered
-
-        if model_feature_names:
-            missing = [name for name in model_feature_names if name not in feature_frame.columns]
-            if missing:
-                raise RuntimeError(
-                    f"Prepared data missing required sequence feature columns: {sorted(missing)}",
-                )
-            feature_frame = feature_frame.reindex(columns=model_feature_names)
+        context = f"sequence_model_{key}"
 
         scaler_mean = model_info.get("scaler_mean")
         scaler_std = model_info.get("scaler_std")
 
         if scaler_mean is not None and scaler_std is not None:
+            feature_frame = base_features.copy()
+            if model_feature_names:
+                feature_frame = _ensure_feature_columns(feature_frame, model_feature_names, context)
+                feature_frame = feature_frame.reindex(columns=model_feature_names)
+
             mean_arr = np.asarray(scaler_mean, dtype=np.float32)
             std_arr = np.asarray(scaler_std, dtype=np.float32)
             std_arr[std_arr == 0.0] = 1.0
             matrix = feature_frame.to_numpy(dtype=np.float32, copy=False)
             scaled_matrix = (matrix - mean_arr) / std_arr
         else:
-            scaled_matrix = prepared.scaler.transform(feature_frame).astype(np.float32)
+            scaled_frame = default_scaled_df.copy()
+            if model_feature_names:
+                scaled_frame = _ensure_feature_columns(scaled_frame, model_feature_names, context)
+                scaled_frame = scaled_frame.reindex(columns=model_feature_names)
+            scaled_matrix = scaled_frame.to_numpy(dtype=np.float32, copy=False)
 
         model_info["scaled_features"] = scaled_matrix
 
@@ -692,9 +776,7 @@ def compute_signal_for_index(
 
     reg_feature_names = models.get("reg_feature_names")
     if reg_feature_names:
-        missing = [name for name in reg_feature_names if name not in X_scaled_df.columns]
-        if missing:
-            raise RuntimeError(f"Prepared data missing regression feature columns: {missing}")
+        X_scaled_df = _ensure_feature_columns(X_scaled_df, reg_feature_names, "regression_model")
         reg_input = X_scaled_df[reg_feature_names].to_numpy()
     else:
         reg_input = X_scaled
@@ -708,9 +790,7 @@ def compute_signal_for_index(
     if dir_model is not None:
         dir_feature_names = models.get("dir_feature_names")
         if dir_feature_names:
-            missing_dir = [name for name in dir_feature_names if name not in X_scaled_df.columns]
-            if missing_dir:
-                raise RuntimeError(f"Prepared data missing direction feature columns: {missing_dir}")
+            X_scaled_df = _ensure_feature_columns(X_scaled_df, dir_feature_names, "direction_model")
             dir_input = X_scaled_df[dir_feature_names].to_numpy()
         else:
             dir_input = X_scaled

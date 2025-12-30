@@ -8,24 +8,33 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Sequence
 
 import numpy as np
 import pandas as pd
 
 from data.ingestors.binance_us_spot import ingest_binance_us_spot
-from data.processed.compute_coinapi_features import process_coinapi_features
+from data.ingestors.tiingo_spot import ingest_tiingo_spot
 from data.processed.compute_cryptoquant_resampled import process_cryptoquant_resampled
 from data.processed.compute_funding_features import process_funding_features
 from data.processed.compute_macro_features import process_macro_features
 from data.processed.compute_onchain_features import process_onchain_features
 from src.scripts.build_training_dataset import main as build_1h_dataset
 from src.scripts.build_training_dataset_multi_horizon import build_multi_horizon_dataset
+from src.scripts.build_signal_baseline import (
+    DEFAULT_COLUMNS as BASELINE_DEFAULT_COLUMNS,
+    _append_detected_meta_columns,
+    baseline_to_dataframe,
+    compute_baseline,
+    load_dataframe,
+)
 from src.trading.signals import (
     PreparedData,
     compute_signal_for_index,
     format_ts_iso,
+    load_residual_std_from_dataset,
     load_models,
+    populate_sequence_cache_from_prepared,
     prepare_data_for_signals,
     prepare_data_for_signals_from_ohlcv,
 )
@@ -40,6 +49,12 @@ LATEST_PREDICTION_PATH = Path("artifacts/predictions/latest.json")
 DATASET_1H_PATH = DATASET_DIR / "btc_features_1h_splits.npz"
 DATASET_MULTI_PATH = DATASET_DIR / "btc_features_multi_horizon_splits.npz"
 HISTORY_PREDICTION_PATH = Path("artifacts/predictions/history.json")
+MACRO_FEATURES_PATH = Path("data/processed/macro/hourly_features.parquet")
+ONCHAIN_FEATURES_PATH = Path("data/processed/onchain/hourly_features.parquet")
+TRADE_READY_MONITOR_PATH = Path("artifacts/monitoring/trade_ready_summary.json")
+META_BASELINE_JSON_PATH = Path("artifacts/monitoring/meta_baseline.json")
+META_BASELINE_PARQUET_PATH = Path("artifacts/monitoring/meta_baseline.parquet")
+META_BASELINE_SOURCE_CSV = Path("artifacts/backtests/backtest_signals_meta_ensemble.csv")
 
 
 def parse_targets(value: str) -> List[int]:
@@ -83,6 +98,10 @@ def _build_stub_summary(
             "projected_price": close,
             "signal_ensemble": 0,
             "signal_dir_only": 0,
+            "p_up_components": {},
+            "stop_loss": close,
+            "take_profit": close,
+            "expected_value": 0.0,
             "thresholds": {
                 "p_up_min": p_up_min,
                 "ret_min": ret_min,
@@ -91,7 +110,19 @@ def _build_stub_summary(
     return summary
 
 
-def run_ingestion(hours: int, symbol: str = "BTCUSDT", interval: str = "1h") -> Path:
+def run_ingestion(
+    hours: int,
+    symbol: str = "BTCUSDT",
+    interval: str = "1h",
+    provider: str = "binanceus",
+) -> Path:
+    if provider == "tiingo":
+        lookback_days = max(math.ceil(hours / 24), 1)
+        print(f"Fetching {lookback_days} day(s) of {interval} candles from Tiingo for BTCUSD...")
+        output_path = ingest_tiingo_spot(lookback_days=lookback_days)
+        print(f"Saved Tiingo spot tidy parquet to {output_path}")
+        return output_path
+
     limit = max(hours, 1)
     print(f"Fetching {limit} {interval} klines from Binance US for {symbol}...")
     output_path = ingest_binance_us_spot(symbol=symbol, interval=interval, limit=limit)
@@ -99,24 +130,39 @@ def run_ingestion(hours: int, symbol: str = "BTCUSDT", interval: str = "1h") -> 
     return output_path
 
 
-def run_feature_builders(run_without_funding: bool) -> Dict[str, str]:
+def run_feature_builders(
+    run_without_funding: bool,
+    macro_source: str,
+    onchain_source: str,
+    funding_provider: str,
+) -> Dict[str, str]:
     results: Dict[str, str] = {}
 
-    print("Recomputing CoinAPI-derived market features...")
-    market_path, _ = process_coinapi_features()
-    results["coinapi_market"] = str(market_path)
-
-    print("Recomputing macro features...")
-    macro_path = process_macro_features()
-    results["macro"] = str(macro_path)
+    if macro_source == "fallback":
+        print(
+            "Macro source set to fallback; reusing synthesized parquet at"
+            f" {MACRO_FEATURES_PATH.as_posix()}.",
+        )
+        results["macro"] = str(MACRO_FEATURES_PATH)
+    else:
+        print("Recomputing macro features...")
+        macro_path = process_macro_features()
+        results["macro"] = str(macro_path)
 
     print("Recomputing CryptoQuant hourly fallback features...")
     cq_path = process_cryptoquant_resampled()
     results["cryptoquant"] = str(cq_path)
 
-    print("Recomputing on-chain features...")
-    onchain_path = process_onchain_features()
-    results["onchain"] = str(onchain_path)
+    if onchain_source == "fallback":
+        print(
+            "On-chain source set to fallback; reusing synthesized parquet at"
+            f" {ONCHAIN_FEATURES_PATH.as_posix()}.",
+        )
+        results["onchain"] = str(ONCHAIN_FEATURES_PATH)
+    else:
+        print("Recomputing on-chain features...")
+        onchain_path = process_onchain_features()
+        results["onchain"] = str(onchain_path)
 
     print("Recomputing funding features...")
     funding_path = process_funding_features(
@@ -124,6 +170,7 @@ def run_feature_builders(run_without_funding: bool) -> Dict[str, str]:
         live_fetch=False,
         live_limit=1000,
         allow_missing=run_without_funding,
+        provider=funding_provider,
     )
     results["funding"] = str(funding_path)
 
@@ -222,6 +269,8 @@ def run_predictions(
     p_up_min: float,
     ret_min: float,
     offline: bool = False,
+    dir_lstm_path: str | None = None,
+    dir_transformer_path: str | None = None,
 ) -> Dict[str, Dict[str, float | str | int]]:
     dataset_path = DATASET_MULTI_PATH if DATASET_MULTI_PATH.exists() else DATASET_1H_PATH
     if not dataset_path.exists():
@@ -231,6 +280,7 @@ def run_predictions(
         raise FileNotFoundError(f"Dataset not found: {dataset_path}")
 
     prepared, index, close, ts_iso = _load_prepared(dataset_path, offline=offline)
+    residual_std_by_horizon = load_residual_std_from_dataset(str(dataset_path), targets)
 
     summary: Dict[str, Dict[str, float | str | int]] = {}
     for horizon in sorted(set(targets)):
@@ -242,7 +292,13 @@ def run_predictions(
             )
             continue
 
-        models = load_models(str(reg_path), str(dir_path))
+        models = load_models(
+            str(reg_path),
+            str(dir_path),
+            lstm_model_dir=dir_lstm_path,
+            transformer_model_dir=dir_transformer_path,
+        )
+        populate_sequence_cache_from_prepared(prepared, models)
         signal = compute_signal_for_index(
             prepared=prepared,
             index=index,
@@ -254,6 +310,10 @@ def run_predictions(
         ret_pred = float(signal.get("ret_pred", 0.0))
         p_up = float(signal.get("p_up", 0.0))
         signal_ts = str(signal.get("ts", ts_iso))
+        residual_std = float(residual_std_by_horizon.get(horizon, 0.01))
+        stop_loss_price = _project_price(close, ret_pred - residual_std)
+        take_profit_price = _project_price(close, ret_pred + residual_std)
+        expected_value = p_up * ret_pred - (1 - p_up) * residual_std
         result = {
             "timestamp": signal_ts,
             "horizon_hours": horizon,
@@ -263,6 +323,10 @@ def run_predictions(
             "projected_price": _project_price(close, ret_pred),
             "signal_ensemble": int(signal.get("signal_ensemble", 0)),
             "signal_dir_only": int(signal.get("signal_dir_only", 0)),
+            "p_up_components": signal.get("p_up_components", {}),
+            "stop_loss": stop_loss_price,
+            "take_profit": take_profit_price,
+            "expected_value": expected_value,
             "thresholds": {
                 "p_up_min": p_up_min,
                 "ret_min": ret_min,
@@ -277,7 +341,7 @@ def run_predictions(
     return summary
 
 
-def write_summary(summary: Dict[str, Dict[str, float | str | int]]) -> None:
+def write_summary(summary: Dict[str, Dict[str, float | str | int]]) -> dict[str, Any]:
     LATEST_PREDICTION_PATH.parent.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
     json_payload = {
@@ -302,6 +366,65 @@ def write_summary(summary: Dict[str, Dict[str, float | str | int]]) -> None:
     history.append(history_entry)
     HISTORY_PREDICTION_PATH.parent.mkdir(parents=True, exist_ok=True)
     HISTORY_PREDICTION_PATH.write_text(json.dumps(history, indent=2))
+    return json_payload
+
+
+def _build_trade_ready_monitoring_payload(predictions_payload: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    predictions = predictions_payload.get("predictions", {})
+    horizons: list[dict[str, Any]] = []
+    for horizon_key in sorted(
+        predictions.keys(),
+        key=lambda item: int(item.rstrip("h")) if item.rstrip("h").isdigit() else item,
+    ):
+        entry = predictions[horizon_key]
+        if isinstance(entry, dict):
+            horizons.append(entry)
+    request = {
+        "targets": args.targets,
+        "spot_provider": args.spot_provider,
+        "macro_source": args.macro_source,
+        "onchain_source": args.onchain_source,
+        "funding_provider": args.funding_provider,
+        "hours": args.hours,
+        "dry_run": bool(args.dry_run),
+    }
+    return {
+        "generated_at": predictions_payload.get("generated_at"),
+        "source": "run_refresh_and_predict",
+        "request": request,
+        "horizons": horizons,
+    }
+
+
+def _write_trade_ready_monitoring(predictions_payload: dict[str, Any], args: argparse.Namespace) -> None:
+    payload = _build_trade_ready_monitoring_payload(predictions_payload, args)
+    TRADE_READY_MONITOR_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TRADE_READY_MONITOR_PATH.write_text(json.dumps(payload, indent=2))
+
+
+def _refresh_meta_baseline() -> None:
+    if not META_BASELINE_SOURCE_CSV.exists():
+        print(
+            f"Meta baseline CSV not found at {META_BASELINE_SOURCE_CSV.as_posix()}; skipping baseline refresh.",
+            file=sys.stderr,
+        )
+        return
+    df = load_dataframe(META_BASELINE_SOURCE_CSV, limit=0)
+    if df.empty:
+        baseline = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "row_count": 0,
+            "columns": {},
+            "column_order": list(BASELINE_DEFAULT_COLUMNS),
+        }
+    else:
+        columns = _append_detected_meta_columns(df, BASELINE_DEFAULT_COLUMNS)
+        baseline = compute_baseline(df, columns)
+    META_BASELINE_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    META_BASELINE_JSON_PATH.write_text(json.dumps(baseline, indent=2))
+    META_BASELINE_PARQUET_PATH.parent.mkdir(parents=True, exist_ok=True)
+    baseline_df = baseline_to_dataframe(baseline)
+    baseline_df.to_parquet(META_BASELINE_PARQUET_PATH, index=False)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -344,6 +467,47 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Skip network-dependent steps and reuse cached datasets/models for smoke testing.",
     )
+    parser.add_argument(
+        "--spot-provider",
+        choices=("binanceus", "tiingo"),
+        default="binanceus",
+        help="Spot ingestion provider for hourly candles (default: binanceus).",
+    )
+    parser.add_argument(
+        "--macro-source",
+        choices=("vendor", "fallback"),
+        default="vendor",
+        help="Select whether macro features should come from vendor data or the fallback builder.",
+    )
+    parser.add_argument(
+        "--onchain-source",
+        choices=("cryptocompare", "fallback"),
+        default="cryptocompare",
+        help="Choose the on-chain feed used when rebuilding features (default: cryptocompare).",
+    )
+    parser.add_argument(
+        "--funding-provider",
+        choices=("binance", "cryptocompare"),
+        default="binance",
+        help="Funding provider to use during feature rebuilds (default: binance).",
+    )
+    parser.add_argument(
+        "--write-artifacts",
+        action="store_true",
+        help="Update monitoring artifacts (trade_ready_summary + meta baseline) after predictions complete.",
+    )
+    parser.add_argument(
+        "--dir-lstm-path",
+        type=str,
+        default=None,
+        help="Optional directory containing the LSTM direction model ensemble.",
+    )
+    parser.add_argument(
+        "--dir-transformer-path",
+        type=str,
+        default=None,
+        help="Optional directory containing the transformer direction model ensemble.",
+    )
     return parser.parse_args(argv)
 
 
@@ -360,13 +524,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         print("Dry run enabled: using cached datasets and skipping ingestion, feature rebuild, and dataset regeneration.")
     else:
         try:
-            run_ingestion(hours=args.hours)
+            run_ingestion(hours=args.hours, provider=args.spot_provider)
         except Exception as exc:  # pragma: no cover - runtime safety
             print(f"Ingestion failed: {exc}", file=sys.stderr)
             sys.exit(1)
 
         try:
-            run_feature_builders(run_without_funding=run_without_funding)
+            run_feature_builders(
+                run_without_funding=run_without_funding,
+                macro_source=args.macro_source,
+                onchain_source=args.onchain_source,
+                funding_provider=args.funding_provider,
+            )
         except Exception as exc:  # pragma: no cover - runtime safety
             print(f"Feature rebuild failed: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -383,12 +552,18 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.p_up_min,
             args.ret_min,
             offline=args.dry_run,
+            dir_lstm_path=args.dir_lstm_path,
+            dir_transformer_path=args.dir_transformer_path,
         )
     except Exception as exc:  # pragma: no cover - runtime safety
         print(f"Prediction step failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    write_summary(summary)
+    predictions_payload = write_summary(summary)
+
+    if args.write_artifacts:
+        _write_trade_ready_monitoring(predictions_payload, args)
+        _refresh_meta_baseline()
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
