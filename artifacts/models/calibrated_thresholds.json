@@ -1,0 +1,27 @@
+{
+  "generated_at": "2025-12-31T01:00:20.996252+00:00",
+  "source_summary": "artifacts/walkforward/monthly_cpu/summary_latest.json",
+  "window": "test_20251201_1m",
+  "thresholds": {
+    "p_up_min": 0.6,
+    "ret_min": 0.0005
+  },
+  "horizons": {
+    "1": {
+      "p_up_min": 0.6,
+      "ret_min": 0.0005
+    },
+    "4": {
+      "p_up_min": 0.6,
+      "ret_min": 0.0005
+    },
+    "8": {
+      "p_up_min": 0.6,
+      "ret_min": 0.0005
+    },
+    "12": {
+      "p_up_min": 0.6,
+      "ret_min": 0.0005
+    }
+  }
+}

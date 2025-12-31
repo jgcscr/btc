@@ -8,7 +8,7 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -38,6 +38,7 @@ from src.trading.signals import (
     prepare_data_for_signals,
     prepare_data_for_signals_from_ohlcv,
 )
+from src.trading.thresholds import load_calibrated_thresholds
 
 DEFAULT_HOURS = 360
 DEFAULT_TARGETS = (1, 4, 8, 12)
@@ -79,16 +80,41 @@ def _bool_env(value: str | None) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_thresholds_for_horizon(
+    horizon: int,
+    default_p_up: float,
+    default_ret: float,
+    overrides: Mapping[int | str, Dict[str, float]] | None,
+) -> tuple[float, float]:
+    if not overrides:
+        return default_p_up, default_ret
+    entry: Dict[str, float] | None = overrides.get(horizon)  # type: ignore[arg-type]
+    if entry is None:
+        entry = overrides.get(str(horizon))  # type: ignore[arg-type]
+    if not entry:
+        return default_p_up, default_ret
+    p_up_value = entry.get("p_up_min", default_p_up)
+    ret_value = entry.get("ret_min", default_ret)
+    return float(p_up_value), float(ret_value)
+
+
 def _build_stub_summary(
     targets: Iterable[int],
     p_up_min: float,
     ret_min: float,
     close: float = 0.0,
     ts_iso: str | None = None,
+    thresholds_by_horizon: Mapping[int | str, Dict[str, float]] | None = None,
 ) -> Dict[str, Dict[str, float | str | int]]:
     generated_ts = ts_iso or datetime.now(timezone.utc).isoformat()
     summary: Dict[str, Dict[str, float | str | int]] = {}
     for horizon in sorted({int(h) for h in targets}):
+        horizon_p_up, horizon_ret = _resolve_thresholds_for_horizon(
+            horizon,
+            p_up_min,
+            ret_min,
+            thresholds_by_horizon,
+        )
         summary[f"{horizon}h"] = {
             "timestamp": generated_ts,
             "horizon_hours": horizon,
@@ -103,8 +129,8 @@ def _build_stub_summary(
             "take_profit": close,
             "expected_value": 0.0,
             "thresholds": {
-                "p_up_min": p_up_min,
-                "ret_min": ret_min,
+                "p_up_min": horizon_p_up,
+                "ret_min": horizon_ret,
             },
         }
     return summary
@@ -271,12 +297,18 @@ def run_predictions(
     offline: bool = False,
     dir_lstm_path: str | None = None,
     dir_transformer_path: str | None = None,
+    thresholds_by_horizon: Mapping[int | str, Dict[str, float]] | None = None,
 ) -> Dict[str, Dict[str, float | str | int]]:
     dataset_path = DATASET_MULTI_PATH if DATASET_MULTI_PATH.exists() else DATASET_1H_PATH
     if not dataset_path.exists():
         if offline:
             print("Dry run: dataset not found, emitting stub predictions.")
-            return _build_stub_summary(targets, p_up_min, ret_min)
+            return _build_stub_summary(
+                targets,
+                p_up_min,
+                ret_min,
+                thresholds_by_horizon=thresholds_by_horizon,
+            )
         raise FileNotFoundError(f"Dataset not found: {dataset_path}")
 
     prepared, index, close, ts_iso = _load_prepared(dataset_path, offline=offline)
@@ -299,12 +331,18 @@ def run_predictions(
             transformer_model_dir=dir_transformer_path,
         )
         populate_sequence_cache_from_prepared(prepared, models)
+        horizon_p_up, horizon_ret = _resolve_thresholds_for_horizon(
+            horizon,
+            p_up_min,
+            ret_min,
+            thresholds_by_horizon,
+        )
         signal = compute_signal_for_index(
             prepared=prepared,
             index=index,
             models=models,
-            p_up_min=p_up_min,
-            ret_min=ret_min,
+            p_up_min=horizon_p_up,
+            ret_min=horizon_ret,
         )
 
         ret_pred = float(signal.get("ret_pred", 0.0))
@@ -328,15 +366,22 @@ def run_predictions(
             "take_profit": take_profit_price,
             "expected_value": expected_value,
             "thresholds": {
-                "p_up_min": p_up_min,
-                "ret_min": ret_min,
+                "p_up_min": horizon_p_up,
+                "ret_min": horizon_ret,
             },
         }
         summary[f"{horizon}h"] = result
     if not summary:
         if offline:
             print("Dry run: model artifacts missing, emitting stub predictions.")
-            return _build_stub_summary(targets, p_up_min, ret_min, close=close, ts_iso=ts_iso)
+            return _build_stub_summary(
+                targets,
+                p_up_min,
+                ret_min,
+                close=close,
+                ts_iso=ts_iso,
+                thresholds_by_horizon=thresholds_by_horizon,
+            )
         raise RuntimeError("No predictions were produced; ensure model artifacts exist.")
     return summary
 
@@ -458,6 +503,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Return threshold for ensemble activation (default: 0.0).",
     )
     parser.add_argument(
+        "--thresholds-json",
+        type=str,
+        default=str(Path("artifacts/models/calibrated_thresholds.json")),
+        help="Optional JSON file containing per-horizon thresholds; set to an empty string to disable.",
+    )
+    parser.add_argument(
         "--run-without-funding",
         action="store_true",
         help="Force RUN_WITHOUT_FUNDING=1 for the duration of this script.",
@@ -555,6 +606,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             f", transformer={env_dir_transformer or 'None'}",
         )
 
+    thresholds_path = args.thresholds_json or None
+    thresholds_by_horizon = load_calibrated_thresholds(thresholds_path)
+    if thresholds_by_horizon:
+        print(
+            "Loaded calibrated thresholds for horizons"
+            f" {sorted(thresholds_by_horizon.keys())}"
+            f" from {thresholds_path}.",
+        )
+
     try:
         summary = run_predictions(
             args.targets,
@@ -563,6 +623,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             offline=args.dry_run,
             dir_lstm_path=env_dir_lstm,
             dir_transformer_path=env_dir_transformer,
+            thresholds_by_horizon=thresholds_by_horizon,
         )
     except Exception as exc:  # pragma: no cover - runtime safety
         print(f"Prediction step failed: {exc}", file=sys.stderr)
