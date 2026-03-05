@@ -8,7 +8,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -20,6 +20,8 @@ from src.trading.signals import (
     compute_signal_for_index,
     load_models,
     prepare_data_for_signals_from_ohlcv,
+    _apply_funding_rate_features,
+    _augment_price_features,
 )
 from src.data.dataset_preparation import enforce_unique_hourly_index
 from src.trading.thresholds import load_calibrated_thresholds
@@ -56,37 +58,6 @@ FEATURE_FALLBACK = [
 ]
 
 
-def _augment_price_features(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame.copy()
-
-    def _safe_diff(series: pd.Series) -> pd.Series:
-        return series.diff().fillna(0.0)
-
-    def _safe_pct(series: pd.Series) -> pd.Series:
-        return series.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    for base in ("close", "volume", "fut_close", "fut_volume"):
-        if base not in result.columns:
-            continue
-        result[f"{base}_delta_1h"] = _safe_diff(result[base])
-        result[f"{base}_pct_change_1h"] = _safe_pct(result[base])
-
-    if "close" in result.columns:
-        std_7 = result["close"].rolling(window=7, min_periods=3).std(ddof=0)
-        std_24 = result["close"].rolling(window=24, min_periods=6).std(ddof=0)
-        if "ma_close_7h" in result.columns:
-            denom = std_7.replace(0.0, np.nan)
-            result["close_zscore_7h"] = ((result["close"] - result["ma_close_7h"]) / denom).fillna(0.0)
-        if "ma_close_24h" in result.columns:
-            denom = std_24.replace(0.0, np.nan)
-            result["close_zscore_24h"] = ((result["close"] - result["ma_close_24h"]) / denom).fillna(0.0)
-
-    if "fut_close" in result.columns:
-        rolling_mean = result["fut_close"].rolling(window=7, min_periods=3).mean()
-        rolling_std = result["fut_close"].rolling(window=7, min_periods=3).std(ddof=0).replace(0.0, np.nan)
-        result["fut_close_zscore_7h"] = ((result["fut_close"] - rolling_mean) / rolling_std).fillna(0.0)
-
-    return result
 
 
 def parse_targets(value: str) -> List[int]:
@@ -167,6 +138,8 @@ def _build_spot_features(hours: int, feature_names: List[str]) -> tuple[pd.DataF
         "spot_volume": "volume",
         "spot_quote_volume": "quote_volume",
         "spot_num_trades": "num_trades",
+        "spot_taker_buy_base_volume": "taker_buy_base_volume",
+        "spot_taker_buy_quote_volume": "taker_buy_quote_volume",
     }
     pivot = pivot.rename(columns=rename_map)
 
@@ -200,6 +173,7 @@ def _build_spot_features(hours: int, feature_names: List[str]) -> tuple[pd.DataF
 
     pivot = pivot.reset_index()
     pivot = _augment_price_features(pivot)
+    pivot = _apply_funding_rate_features(pivot)
 
     latest_row = pivot.iloc[-1]
     missing_columns = [col for col in feature_names if col not in pivot or pivot[col].isna().all()]

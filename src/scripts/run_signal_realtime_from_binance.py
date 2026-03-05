@@ -10,13 +10,17 @@ import numpy as np
 import pandas as pd
 
 from src.config_trading import (
+    DEFAULT_BILSTM_MODEL_DIR_1H,
+    DEFAULT_CNN_LSTM_MODEL_DIR_1H,
     DEFAULT_DIR_MODEL_DIR_1H,
+    DEFAULT_DIR_MODEL_WEIGHTS_1H,
+    DEFAULT_DIR_MODELS_1H,
+    DEFAULT_GRU_MODEL_DIR_1H,
     DEFAULT_LSTM_MODEL_DIR_1H,
     DEFAULT_TRANSFORMER_MODEL_DIR_1H,
     DEFAULT_P_UP_MIN,
     DEFAULT_REG_MODEL_DIR_1H,
     DEFAULT_RET_MIN,
-    DEFAULT_DIR_MODEL_WEIGHTS_1H,
     OPTUNA_DIR_MODEL_DIR_1H,
     OPTUNA_LSTM_MODEL_DIR_1H,
     OPTUNA_DIR_MODEL_WEIGHTS_1H,
@@ -32,6 +36,11 @@ from src.data.binance_klines import (
     fetch_open_interest,
     fetch_spot_klines,
 )
+from src.trading.direction_config import (
+    direction_configs_to_weight_map,
+    log_direction_model_configs,
+    resolve_direction_model_configs,
+)
 from src.trading.signals import (
     PreparedData,
     compute_signal_for_index,
@@ -39,7 +48,6 @@ from src.trading.signals import (
     populate_sequence_cache_from_prepared,
     prepare_data_for_signals_from_ohlcv,
 )
-from src.trading.ensembles import parse_weight_spec
 
 
 DEFAULT_SYMBOL = "BTCUSDT"
@@ -128,10 +136,34 @@ def _parse_args() -> argparse.Namespace:
         help="Optional directory containing an LSTM direction model (model.pt, summary.json).",
     )
     parser.add_argument(
+        "--bilstm-model-dir",
+        type=str,
+        default=DEFAULT_BILSTM_MODEL_DIR_1H,
+        help="Optional directory containing a bidirectional LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--gru-model-dir",
+        type=str,
+        default=DEFAULT_GRU_MODEL_DIR_1H,
+        help="Optional directory containing a GRU direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--cnn-lstm-model-dir",
+        type=str,
+        default=DEFAULT_CNN_LSTM_MODEL_DIR_1H,
+        help="Optional directory containing a CNN-LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
         "--transformer-dir-model",
         type=str,
         default=DEFAULT_TRANSFORMER_MODEL_DIR,
         help="Optional directory containing a transformer direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--dir-model-config-json",
+        type=str,
+        default=None,
+        help="Optional JSON file describing direction-model entries (type/path/weight list).",
     )
     parser.add_argument(
         "--dir-model-weights",
@@ -455,35 +487,65 @@ def _append_to_log(log_path: str, row: Dict[str, Any], columns: List[str]) -> No
     df_row.to_csv(log_path, mode="a", header=False, index=False)
 
 
+def _build_direction_config_bundle(
+    *,
+    config_json_path: Optional[str],
+    weight_spec: Optional[str],
+    dir_model_dir: Optional[str],
+    lstm_model_dir: Optional[str],
+    bilstm_model_dir: Optional[str],
+    gru_model_dir: Optional[str],
+    cnn_lstm_model_dir: Optional[str],
+    transformer_model_dir: Optional[str],
+) -> tuple[List[Dict[str, Any]], Dict[str, float]]:
+    overrides = {
+        "xgb": os.path.join(dir_model_dir, "xgb_dir1h_model.json") if dir_model_dir else None,
+        "lstm": lstm_model_dir,
+        "bilstm": bilstm_model_dir,
+        "gru": gru_model_dir,
+        "cnn_lstm": cnn_lstm_model_dir,
+        "transformer": transformer_model_dir,
+    }
+    configs = resolve_direction_model_configs(
+        DEFAULT_DIR_MODELS_1H,
+        config_json_path=config_json_path,
+        weight_spec=weight_spec,
+        path_overrides=overrides,
+    )
+    log_direction_model_configs(configs, label="[run_signal_realtime_from_binance] direction models")
+    weight_map = direction_configs_to_weight_map(configs)
+    return configs, weight_map
+
+
 def _load_models(
     reg_dir: str,
-    dir_dir: Optional[str],
-    lstm_dir: Optional[str],
+    direction_configs: List[Dict[str, Any]],
     lstm_device: Optional[str],
-    transformer_dir: Optional[str],
 ) -> Dict[str, Any]:
     reg_model_path = os.path.join(reg_dir, "xgb_ret1h_model.json")
     if not os.path.exists(reg_model_path):
         raise FileNotFoundError(f"Regression model not found: {reg_model_path}")
 
-    dir_model_path: Optional[str] = None
-    if dir_dir:
-        candidate = os.path.join(dir_dir, "xgb_dir1h_model.json")
-        if not os.path.exists(candidate):
-            raise FileNotFoundError(f"Direction model not found: {candidate}")
-        dir_model_path = candidate
-
     return load_models(
         reg_model_path=reg_model_path,
-        dir_model_path=dir_model_path,
-        lstm_model_dir=lstm_dir,
-        transformer_model_dir=transformer_dir,
+        direction_model_configs=direction_configs,
         device=lstm_device,
     )
 
 
 def run_realtime_from_binance(args: argparse.Namespace) -> None:
     _apply_optuna_profile(args)
+
+    direction_configs, dir_weight_map = _build_direction_config_bundle(
+        config_json_path=args.dir_model_config_json or None,
+        weight_spec=(args.dir_model_weights or None),
+        dir_model_dir=args.dir_model_dir,
+        lstm_model_dir=args.lstm_model_dir,
+        bilstm_model_dir=args.bilstm_model_dir,
+        gru_model_dir=args.gru_model_dir,
+        cnn_lstm_model_dir=args.cnn_lstm_model_dir,
+        transformer_model_dir=args.transformer_dir_model,
+    )
 
     try:
         raw_df = _merge_market_data(symbol=args.symbol, interval=args.interval, limit=args.n_bars)
@@ -497,24 +559,25 @@ def run_realtime_from_binance(args: argparse.Namespace) -> None:
 
     models = _load_models(
         reg_dir=args.reg_model_dir,
-        dir_dir=args.dir_model_dir,
-        lstm_dir=args.lstm_model_dir,
+        direction_configs=direction_configs,
         lstm_device=args.lstm_device,
-        transformer_dir=args.transformer_dir_model,
     )
 
     populate_sequence_cache_from_prepared(prepared, models)
-
-    dir_model_weights = None
-    if args.dir_model_weights:
-        dir_model_weights = parse_weight_spec(args.dir_model_weights)
 
     if args.seq_len is not None:
         if len(prepared.df_all) < args.seq_len:
             raise SystemExit(
                 f"Insufficient rows after preprocessing ({len(prepared.df_all)}) for seq-len={args.seq_len}.",
             )
-        for key in ("dir_lstm", "dir_transformer"):
+        for key in (
+            "dir_lstm",
+            "dir_bilstm",
+            "dir_gru",
+            "dir_cnn_lstm",
+            "dir_transformer",
+            "dir_transformer_large",
+        ):
             model_info = models.get(key)
             if model_info is None:
                 continue
@@ -538,7 +601,7 @@ def run_realtime_from_binance(args: argparse.Namespace) -> None:
         models=models,
         p_up_min=args.p_up_min,
         ret_min=args.ret_min,
-        dir_model_weights=dir_model_weights,
+        dir_model_weights=dir_weight_map,
     )
 
     if (

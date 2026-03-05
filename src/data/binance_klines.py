@@ -1,13 +1,14 @@
 """Helpers for fetching Binance klines and derivatives needed for realtime signals."""
 from __future__ import annotations
 
+import os
 from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 import requests
 
-_BINANCE_API_BASE = "https://api.binance.us"
-_BINANCE_FUTURES_API_BASE = "https://fapi.binance.com"
+_BINANCE_API_BASE = os.getenv("BINANCE_SPOT_API_BASE", "https://api.binance.us")
+_BINANCE_FUTURES_API_BASE = os.getenv("BINANCE_FUTURES_API_BASE", "https://fapi.binance.com")
 
 
 class BinanceAPIError(RuntimeError):

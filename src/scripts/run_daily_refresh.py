@@ -25,20 +25,7 @@ except ImportError:  # pragma: no cover - environment without BigQuery support
 from data.ingestors.binance_futures_metrics import ingest_futures_day_to_gcs
 from data.ingestors.binance_spot_klines import ingest_spot_day_to_gcs
 from data.ingestors.binance_us_spot import ingest_binance_us_spot
-from data.ingestors.alpha_vantage_macro import (
-    AlphaVantageIngestionError,
-    AlphaVantageInvalidKeyError,
-    AlphaVantageRateLimitError,
-    ingest_catalog as ingest_alpha_vantage_catalog,
-)
-from data.processed.compute_coinapi_features import process_coinapi_features
-from data.processed.compute_cryptoquant_resampled import process_cryptoquant_resampled
-from data.processed.compute_funding_features import (
-    FundingProcessingError,
-    process_funding_features,
-)
-from data.processed.compute_macro_features import process_macro_features
-from data.processed.compute_onchain_features import process_onchain_features
+from data.processed.compute_technical_features import process_technical_features
 from src.config import BQ_DATASET_CURATED, BQ_TABLE_FEATURES_1H, PROJECT_ID
 from src.data.bq_loader import load_btc_features_1h
 from src.scripts.build_training_dataset import main as build_1h_dataset
@@ -285,81 +272,23 @@ def run_binance_ingest(hours: int, spot_bucket: Optional[str] = None, symbol: st
     }
 
 
-def run_feature_builders(run_without_funding: bool) -> Dict[str, Dict[str, Any]]:
-    log_event("feature_builders.start", run_without_funding=run_without_funding)
-    outputs: Dict[str, Dict[str, Any]] = {}
-
-    alpha_catalog_result: List[Dict[str, Any]] | None = None
-    try:
-        alpha_catalog_result = ingest_alpha_vantage_catalog()
-    except AlphaVantageInvalidKeyError as exc:
-        log_event(
-            "feature_builders.error",
-            note="Alpha Vantage API keys invalid; skipping catalog",
-            error=str(exc),
-        )
-    except AlphaVantageRateLimitError as exc:
-        log_event(
-            "feature_builders.warning",
-            note="Alpha Vantage rate limit encountered; catalog ingestion deferred",
-            error=str(exc),
-            wait_seconds=getattr(exc, "wait_seconds", None),
-        )
-    except AlphaVantageIngestionError as exc:
-        log_event(
-            "feature_builders.warning",
-            note="Alpha Vantage catalog ingestion skipped",
-            error=str(exc),
-        )
-
-    if alpha_catalog_result:
-        outputs["alpha_vantage"] = {
-            "calls": len(alpha_catalog_result),
-            "success": sum(1 for row in alpha_catalog_result if row.get("status") == "success"),
-            "latest_timestamps": {
-                f"{row['symbol']}_{row['function']}": row.get("latest_timestamp")
-                for row in alpha_catalog_result
-                if row.get("status") == "success"
-            },
-        }
-
-    market_path, funding_optional = process_coinapi_features()
-    outputs["coinapi_market"] = {"path": market_path, **_summarize_parquet(market_path)}
-    if funding_optional:
-        outputs["coinapi_funding"] = {"path": funding_optional, **_summarize_parquet(Path(funding_optional))}
+def run_feature_builders(price_source: Optional[str | Path] = None) -> Dict[str, Dict[str, Any]]:
+    price_source_str = str(price_source) if price_source else None
+    log_event("feature_builders.start", price_source=price_source_str)
+    resolved_price_source: Optional[Path]
+    if price_source is None:
+        resolved_price_source = None
     else:
-        log_event("feature_builders.warning", note="CoinAPI funding parquet missing; continuing with market-only data")
+        resolved_price_source = Path(price_source)
 
-    macro_path = process_macro_features()
-    outputs["macro"] = {"path": macro_path, **_summarize_parquet(macro_path)}
-
-    cq_path = process_cryptoquant_resampled()
-    outputs["cryptoquant"] = {"path": cq_path, **_summarize_parquet(cq_path)}
-
-    onchain_path = process_onchain_features()
-    outputs["onchain"] = {"path": onchain_path, **_summarize_parquet(onchain_path)}
-
-    try:
-        funding_path = process_funding_features(
-            pair="BTCUSDT",
-            live_fetch=False,
-            live_limit=1000,
-            allow_missing=run_without_funding,
-        )
-    except FundingProcessingError as exc:
-        log_event(
-            "feature_builders.warning",
-            note="Funding features missing; rerunning with allow_missing",
-            error=str(exc),
-        )
-        funding_path = process_funding_features(
-            pair="BTCUSDT",
-            live_fetch=False,
-            live_limit=1000,
-            allow_missing=True,
-        )
-    outputs["funding"] = {"path": funding_path, **_summarize_parquet(funding_path)}
-
+    technical_path = process_technical_features(price_source=resolved_price_source)
+    summary = _summarize_parquet(Path(technical_path))
+    outputs = {
+        "technical": {
+            "path": technical_path,
+            **summary,
+        },
+    }
     log_event("feature_builders.complete", outputs=outputs)
     return outputs
 
@@ -426,10 +355,6 @@ def rebuild_datasets(horizons: Iterable[int]) -> Dict[str, Dict[str, Any]]:
         horizons=horizons,
         train_frac=0.7,
         val_frac=0.15,
-        onchain_path=None,
-        fetch_onchain=False,
-        onchain_interval="1h",
-        features_path=None,
         output_path=str(DATASET_MULTI_PATH),
     )
     summary_multi = _summarize_npz(Path(multi_path))
@@ -443,9 +368,8 @@ def rebuild_datasets(horizons: Iterable[int]) -> Dict[str, Dict[str, Any]]:
 
 
 def load_curated_latest(window_hours: int = 720) -> Optional[Dict[str, Any]]:
-    where_clause = f"ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {window_hours} HOUR)"
     try:
-            df = load_btc_features_1h()
+        df = load_btc_features_1h()
     except Exception as exc:  # pragma: no cover - guard against missing credentials
         log_event("curated_latest.warning", note="Failed to load curated table", error=str(exc))
         return None
@@ -481,11 +405,6 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=[1, 4, 8, 12],
         help="Prediction horizons to include when rebuilding datasets (default: 1 4 8 12).",
-    )
-    parser.add_argument(
-        "--run-without-funding",
-        action="store_true",
-        help="Force RUN_WITHOUT_FUNDING=1 for this refresh run.",
     )
     parser.add_argument(
         "--skip-futures",
@@ -533,10 +452,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    resolved_without_funding = args.run_without_funding or os.getenv("RUN_WITHOUT_FUNDING") in {"1", "true", "yes", "on"}
-    if resolved_without_funding:
-        os.environ["RUN_WITHOUT_FUNDING"] = "1"
-    log_event("refresh.start", hours=args.hours, horizons=args.horizons, run_without_funding=resolved_without_funding)
+    log_event("refresh.start", hours=args.hours, horizons=args.horizons)
 
     futures_info = None
     if not args.skip_futures:
@@ -551,7 +467,7 @@ def main() -> None:
         )
 
     ingest_info = run_binance_ingest(args.hours, spot_bucket=args.spot_bucket)
-    feature_info = run_feature_builders(run_without_funding=resolved_without_funding)
+    feature_info = run_feature_builders(price_source=ingest_info.get("path"))
 
     bq_info = run_bigquery_refresh(SQL_REFRESH_PATH)
     dataset_info = rebuild_datasets(args.horizons)

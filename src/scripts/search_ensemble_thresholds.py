@@ -3,6 +3,8 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -17,9 +19,14 @@ from src.config_trading import (
 )
 from src.training.lstm_data import build_sequence_splits, estimate_feature_stats
 from src.trading.signals import _load_transformer_direction_model
+from src.scripts.run_refresh_and_predict import (
+    _format_horizon_label,
+    _model_paths_for_horizon,
+    _normalize_horizon_value,
+)
 
 
-def _load_npz_dataset(path: str) -> Dict[str, Any]:
+def _load_npz_dataset(path: str, target_key: Optional[str] = None) -> Dict[str, Any]:
     """Load train/val/test splits and feature names from an npz file."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Dataset npz not found: {path}")
@@ -41,18 +48,35 @@ def _load_npz_dataset(path: str) -> Dict[str, Any]:
 
     feature_names = data["feature_names"].tolist()
 
+    target_prefix = target_key or "y"
+    def _target_key(split: str) -> str:
+        if target_key:
+            return f"{target_prefix}_{split}"
+        return f"y_{split}"
+
+    target_arrays: Dict[str, Any] = {}
+    for split in ("train", "val", "test"):
+        key = _target_key(split)
+        if key not in data:
+            if target_key:
+                raise KeyError(
+                    f"Missing target key '{key}' derived from '{target_key}' in dataset npz: {path}"
+                )
+            raise KeyError(f"Missing target key '{key}' in dataset npz: {path}")
+        target_arrays[split] = data[key]
+
     return {
         "X_train": data["X_train"],
-        "y_train": data["y_train"],
+        "y_train": target_arrays["train"],
         "X_val": data["X_val"],
-        "y_val": data["y_val"],
+        "y_val": target_arrays["val"],
         "X_test": data["X_test"],
-        "y_test": data["y_test"],
+        "y_test": target_arrays["test"],
         "feature_names": feature_names,
     }
 
 
-def _load_xgb_booster(model_dir: str, model_filename: str, meta_filename: str) -> Tuple[Booster, List[str]]:
+def _load_xgb_booster(model_dir: str, model_filename: str, meta_filename: str) -> Tuple[Booster, List[str], Dict[str, Any]]:
     """Load an XGBoost Booster and its feature names from metadata."""
     model_path = os.path.join(model_dir, model_filename)
     meta_path = os.path.join(model_dir, meta_filename)
@@ -72,23 +96,47 @@ def _load_xgb_booster(model_dir: str, model_filename: str, meta_filename: str) -
     if not isinstance(feature_names, list) or not feature_names:
         raise RuntimeError(f"Invalid or missing 'feature_names' in {meta_path}")
 
-    return booster, feature_names
+    return booster, feature_names, meta
 
 
-def _align_features(X: np.ndarray, dataset_feature_names: List[str], model_feature_names: List[str]) -> np.ndarray:
+def _align_features(
+    X: np.ndarray,
+    dataset_feature_names: List[str],
+    model_feature_names: List[str],
+    *,
+    fill_missing_with_zero: bool = False,
+) -> np.ndarray:
     """Reorder columns of X to match the model's expected feature order."""
     if X.ndim != 2:
         raise ValueError(f"Expected X to have shape [N, F], got {X.shape}")
 
     name_to_idx = {name: i for i, name in enumerate(dataset_feature_names)}
 
-    indices: List[int] = []
-    for name in model_feature_names:
-        if name not in name_to_idx:
-            raise KeyError(f"Feature '{name}' required by model is missing from dataset")
-        indices.append(name_to_idx[name])
+    if not fill_missing_with_zero:
+        indices: List[int] = []
+        for name in model_feature_names:
+            if name not in name_to_idx:
+                raise KeyError(f"Feature '{name}' required by model is missing from dataset")
+            indices.append(name_to_idx[name])
+        return X[:, indices]
 
-    return X[:, indices]
+    aligned = np.zeros((X.shape[0], len(model_feature_names)), dtype=X.dtype)
+    missing: List[str] = []
+    for col_idx, name in enumerate(model_feature_names):
+        idx = name_to_idx.get(name)
+        if idx is None:
+            missing.append(name)
+            continue
+        aligned[:, col_idx] = X[:, idx]
+
+    if missing:
+        print(
+            "Warning: dataset missing %d feature(s) expected by model; filled with zeros: %s"
+            % (len(missing), ", ".join(missing[:10])),
+            file=sys.stderr,
+        )
+
+    return aligned
 
 
 def _apply_costs(ret: np.ndarray, signal: np.ndarray, fee_bps: float, slippage_bps: float) -> np.ndarray:
@@ -296,6 +344,38 @@ def _parse_float_list(values: Optional[str], default: List[float]) -> List[float
     return out
 
 
+def _parse_targets_arg(values: Optional[str]) -> List[float]:
+    if values is None:
+        return []
+    parts = [v.strip() for v in values.split(",") if v.strip()]
+    parsed: List[float] = []
+    for part in parts:
+        try:
+            parsed.append(float(part))
+        except ValueError as exc:
+            raise ValueError(f"Invalid horizon value '{part}' in --targets.") from exc
+    return parsed
+
+
+def _resolve_dataset_for_target(
+    horizon_hours: float,
+    dataset_1h: str,
+    dataset_multi: str,
+) -> tuple[str, Optional[str]]:
+    normalized = _normalize_horizon_value(horizon_hours)
+    if normalized <= 1.0:
+        return dataset_1h, None
+
+    if not float(normalized).is_integer():
+        raise ValueError(
+            "Non-integer multi-hour horizons require an explicit dataset mapping."
+        )
+
+    suffix = int(normalized)
+    target_key = f"y_ret{suffix}h"
+    return dataset_multi, target_key
+
+
 def search_ensemble_thresholds(
     dataset_path: str,
     reg_model_dir: str,
@@ -312,6 +392,9 @@ def search_ensemble_thresholds(
     objective: str = "cumret",
     max_dd: Optional[float] = None,
     min_trades_constraint: Optional[int] = None,
+    model_suffix: str = "1h",
+    target_key: Optional[str] = None,
+    label: Optional[str] = None,
 ) -> None:
     """Grid-search ensemble thresholds on validation and report test metrics."""
     if dir_model_dir:
@@ -326,7 +409,7 @@ def search_ensemble_thresholds(
     if not dir_model_dir and not transformer_model_dir:
         raise ValueError("At least one direction model must be provided.")
 
-    data = _load_npz_dataset(dataset_path)
+    data = _load_npz_dataset(dataset_path, target_key=target_key)
     X_val = data["X_val"]
     y_val = data["y_val"]
     X_test = data["X_test"]
@@ -334,23 +417,38 @@ def search_ensemble_thresholds(
     dataset_feature_names = data["feature_names"]
 
     # Load regression model
-    reg_booster, reg_feature_names = _load_xgb_booster(
+    reg_booster, reg_feature_names, reg_meta = _load_xgb_booster(
         model_dir=reg_model_dir,
-        model_filename="xgb_ret1h_model.json",
+        model_filename=f"xgb_ret{model_suffix}_model.json",
         meta_filename="model_metadata.json",
     )
+    reg_target_scale = float(reg_meta.get("target_scale", 1.0)) or 1.0
 
     # Align features for each model separately (validation and test)
-    X_val_reg = _align_features(X_val, dataset_feature_names, reg_feature_names)
-    X_test_reg = _align_features(X_test, dataset_feature_names, reg_feature_names)
+    X_val_reg = _align_features(
+        X_val,
+        dataset_feature_names,
+        reg_feature_names,
+        fill_missing_with_zero=True,
+    )
+    X_test_reg = _align_features(
+        X_test,
+        dataset_feature_names,
+        reg_feature_names,
+        fill_missing_with_zero=True,
+    )
 
     # Predictions on validation
     dmat_val_reg = DMatrix(X_val_reg, feature_names=reg_feature_names)
     ret_pred_val = reg_booster.predict(dmat_val_reg)
+    if reg_target_scale != 0:
+        ret_pred_val = ret_pred_val / reg_target_scale
 
     # Predictions on test (for the final recommended thresholds)
     dmat_test_reg = DMatrix(X_test_reg, feature_names=reg_feature_names)
     ret_pred_test = reg_booster.predict(dmat_test_reg)
+    if reg_target_scale != 0:
+        ret_pred_test = ret_pred_test / reg_target_scale
 
     ret_val = y_val.astype(float)
     ret_test = y_test.astype(float)
@@ -372,14 +470,24 @@ def search_ensemble_thresholds(
         )
     else:
         # Load direction model predictions using XGBoost classifier
-        dir_booster, dir_feature_names = _load_xgb_booster(
+        dir_booster, dir_feature_names, _ = _load_xgb_booster(
             model_dir=dir_model_dir,
-            model_filename="xgb_dir1h_model.json",
+            model_filename=f"xgb_dir{model_suffix}_model.json",
             meta_filename="model_metadata_direction.json",
         )
 
-        X_val_dir = _align_features(X_val, dataset_feature_names, dir_feature_names)
-        X_test_dir = _align_features(X_test, dataset_feature_names, dir_feature_names)
+        X_val_dir = _align_features(
+            X_val,
+            dataset_feature_names,
+            dir_feature_names,
+            fill_missing_with_zero=True,
+        )
+        X_test_dir = _align_features(
+            X_test,
+            dataset_feature_names,
+            dir_feature_names,
+            fill_missing_with_zero=True,
+        )
 
         dmat_val_dir = DMatrix(X_val_dir, feature_names=dir_feature_names)
         dmat_test_dir = DMatrix(X_test_dir, feature_names=dir_feature_names)
@@ -556,26 +664,29 @@ def search_ensemble_thresholds(
     print(f"  avg_ret_per_trade_test: {stats_test_dir_only['avg_ret_per_trade']:.6f}")
     print(f"  cum_ret_test: {stats_test_dir_only['cum_ret']:.6f}")
 
+    best_config = {
+        "p_up_min": float(p_up_star),
+        "ret_min": float(ret_star),
+        "objective": objective,
+        "fee_bps": float(fee_bps),
+        "slippage_bps": float(slippage_bps),
+        "validation": {
+            "n_trades": float(recommended.n_trades_val),
+            "hit_rate": float(recommended.hit_rate_val),
+            "avg_ret_per_trade": float(recommended.avg_ret_per_trade_val),
+            "cum_ret": float(recommended.cum_ret_val),
+            "ret_std": float(recommended.ret_std_val),
+            "max_drawdown": float(recommended.max_drawdown_val),
+        },
+        "test_ensemble": stats_test_ensemble,
+        "test_direction_baseline": stats_test_dir_only,
+    }
+
+    if label:
+        best_config["label"] = label
+
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-
-        best_config = {
-            "p_up_min": float(p_up_star),
-            "ret_min": float(ret_star),
-            "objective": objective,
-            "fee_bps": float(fee_bps),
-            "slippage_bps": float(slippage_bps),
-            "validation": {
-                "n_trades": float(recommended.n_trades_val),
-                "hit_rate": float(recommended.hit_rate_val),
-                "avg_ret_per_trade": float(recommended.avg_ret_per_trade_val),
-                "cum_ret": float(recommended.cum_ret_val),
-                "ret_std": float(recommended.ret_std_val),
-                "max_drawdown": float(recommended.max_drawdown_val),
-            },
-            "test_ensemble": stats_test_ensemble,
-            "test_direction_baseline": stats_test_dir_only,
-        }
 
         best_config_path = os.path.join(output_dir, "best_config.json")
         with open(best_config_path, "w", encoding="utf-8") as handle:
@@ -607,6 +718,8 @@ def search_ensemble_thresholds(
         with open(summary_path, "w", encoding="utf-8") as handle:
             handle.write("\n".join(summary_lines))
 
+    return best_config
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -620,6 +733,12 @@ def main() -> None:
         type=str,
         default="artifacts/datasets/btc_features_1h_splits.npz",
         help="Path to the regression npz file with train/val/test splits.",
+    )
+    parser.add_argument(
+        "--dataset-multi-path",
+        type=str,
+        default="artifacts/datasets/btc_features_multi_horizon_splits.npz",
+        help="Path to the multi-horizon npz file (used for horizons > 1h).",
     )
     parser.add_argument(
         "--reg-model-dir",
@@ -638,6 +757,16 @@ def main() -> None:
         type=str,
         default=None,
         help="Optional directory containing a transformer direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--targets",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list of horizons (in hours) to calibrate. When provided,"
+            " the script resolves dataset/model inputs per horizon automatically and"
+            " writes consolidated output via --output."
+        ),
     )
     parser.add_argument(
         "--p-up-grid",
@@ -745,8 +874,17 @@ def main() -> None:
         default=None,
         help="Optional directory to write search artifacts (best_config.json, summary.txt).",
     )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Optional consolidated JSON output path when --targets is used.",
+    )
 
     args = parser.parse_args()
+
+    targets_list = _parse_targets_arg(args.targets)
+    multi_target_mode = bool(targets_list)
 
     dir_model_default = parser.get_default("dir_model_dir")
     dir_model_dir = args.dir_model_dir
@@ -778,6 +916,77 @@ def main() -> None:
         ret_min_list = _parse_float_list(ret_min_grid_normalized, default_ret_min)
     else:
         ret_min_list = _parse_float_list(_normalize_grid_arg(args.ret_min_list), default_ret_min)
+
+    if multi_target_mode:
+        horizons_out: Dict[str, Any] = {}
+        for target in targets_list:
+            normalized = _normalize_horizon_value(target)
+            suffix_label = _format_horizon_label(normalized)
+            dataset_path, target_key = _resolve_dataset_for_target(
+                normalized,
+                args.dataset_path,
+                args.dataset_multi_path,
+            )
+            reg_model_path, dir_model_path = _model_paths_for_horizon(normalized)
+            reg_model_dir_resolved = str(Path(reg_model_path).parent)
+            dir_model_dir_resolved = str(Path(dir_model_path).parent)
+
+            horizon_output_dir = None
+            if args.output_dir:
+                horizon_output_dir = os.path.join(args.output_dir, suffix_label)
+
+            best_config = search_ensemble_thresholds(
+                dataset_path=dataset_path,
+                reg_model_dir=reg_model_dir_resolved,
+                dir_model_dir=dir_model_dir_resolved,
+                transformer_model_dir=None,
+                p_up_min_list=p_up_min_list,
+                ret_min_list=ret_min_list,
+                fee_bps=args.fee_bps,
+                slippage_bps=args.slippage_bps,
+                output_dir=horizon_output_dir,
+                min_trades_preferred=args.min_trades_preferred,
+                min_trades_fallback=args.min_trades_fallback,
+                top_k=args.top_k,
+                objective=args.objective,
+                max_dd=args.max_dd,
+                min_trades_constraint=args.min_trades,
+                model_suffix=suffix_label,
+                target_key=target_key,
+                label=suffix_label,
+            )
+
+            horizon_key = (
+                str(int(normalized)) if float(normalized).is_integer() else f"{normalized:g}"
+            )
+            horizons_out[horizon_key] = {
+                "p_up_min": best_config["p_up_min"],
+                "ret_min": best_config["ret_min"],
+                "reg_model_dir": reg_model_dir_resolved,
+                "dir_model_dir": dir_model_dir_resolved,
+                "dataset_path": dataset_path,
+                "validation": best_config.get("validation", {}),
+                "test_ensemble": best_config.get("test_ensemble", {}),
+                "test_direction_baseline": best_config.get("test_direction_baseline", {}),
+            }
+
+        payload = {
+            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "targets": targets_list,
+            "dataset_single_path": args.dataset_path,
+            "dataset_multi_path": args.dataset_multi_path,
+            "horizons": horizons_out,
+        }
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(payload, indent=2))
+            print(f"Wrote consolidated thresholds to {output_path}")
+        else:
+            print(json.dumps(payload, indent=2))
+
+        return
 
     search_ensemble_thresholds(
         dataset_path=args.dataset_path,

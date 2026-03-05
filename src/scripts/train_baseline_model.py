@@ -95,7 +95,13 @@ def _evaluate_split(model, name: str, X: np.ndarray, y: np.ndarray) -> Dict[str,
     return {"split": name, "rmse": rmse, "mae": mae}
 
 
-def train_and_evaluate(dataset_path: str, output_dir: str, params_path: Optional[str]) -> None:
+def train_and_evaluate(
+    dataset_path: str,
+    output_dir: str,
+    params_path: Optional[str],
+    *,
+    model_filename: Optional[str] = None,
+) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     dataset = _load_dataset(dataset_path)
@@ -110,6 +116,8 @@ def train_and_evaluate(dataset_path: str, output_dir: str, params_path: Optional
     params_override = _load_params_json(params_path)
     model_type, model, params_used = _create_model(params_override)
 
+    resolved_model_filename = None
+
     if model_type == "xgboost":
         # XGBoost supports eval_set for basic monitoring
         model.fit(
@@ -118,9 +126,13 @@ def train_and_evaluate(dataset_path: str, output_dir: str, params_path: Optional
             eval_set=[(X_train, y_train), (X_val, y_val)],
             verbose=False,
         )
+        if not getattr(model, "_estimator_type", None):
+            model._estimator_type = "regressor"
+        resolved_model_filename = model_filename or "xgb_ret1h_model.json"
     else:
         # RandomForestRegressor has no eval_set
         model.fit(X_train, y_train)
+        resolved_model_filename = model_filename or "rf_ret1h_model.joblib"
 
     metrics = [
         _evaluate_split(model, "train", X_train, y_train),
@@ -135,15 +147,13 @@ def train_and_evaluate(dataset_path: str, output_dir: str, params_path: Optional
 
     # Save model
     if model_type == "xgboost":
-        model_filename = "xgb_ret1h_model.json"
-        model_path = os.path.join(output_dir, model_filename)
+        model_path = os.path.join(output_dir, resolved_model_filename)
         model.save_model(model_path)
     else:
         # Fallback: sklearn model via joblib
         from joblib import dump  # type: ignore
 
-        model_filename = "rf_ret1h_model.joblib"
-        model_path = os.path.join(output_dir, model_filename)
+        model_path = os.path.join(output_dir, resolved_model_filename)
         dump(model, model_path)
 
     # Save metadata
@@ -198,9 +208,20 @@ def main() -> None:
         default=None,
         help="Optional JSON file containing XGBoost hyperparameters to override defaults.",
     )
+    parser.add_argument(
+        "--model-filename",
+        type=str,
+        default=None,
+        help="Optional override for the saved model filename (e.g., xgb_ret15m_model.json).",
+    )
     args = parser.parse_args()
 
-    train_and_evaluate(args.dataset_path, args.output_dir, args.params_json)
+    train_and_evaluate(
+        args.dataset_path,
+        args.output_dir,
+        args.params_json,
+        model_filename=args.model_filename,
+    )
 
 
 if __name__ == "__main__":

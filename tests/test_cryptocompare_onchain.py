@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import pandas as pd
+from pandas import DatetimeTZDtype
 import pytest
 
 from data.ingestors import cryptocompare_onchain as cc
@@ -47,7 +48,7 @@ def test_fetch_hourly_metrics_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert frame.iloc[0]["metric"] == "active_addresses"
     assert frame.iloc[0]["value"] == 5.0
     assert frame.iloc[0]["source"] == cc.SOURCE_NAME
-    assert pd.api.types.is_datetime64tz_dtype(frame["ts"])
+    assert isinstance(frame["ts"].dtype, DatetimeTZDtype)
 
 
 def test_fetch_hourly_metrics_api_error(monkeypatch: pytest.MonkeyPatch) -> None:

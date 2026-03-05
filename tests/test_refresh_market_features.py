@@ -236,3 +236,31 @@ def test_funding_fallback_on_451_error(
 
     output = json.loads(captured.out)
     assert output["funding"]["status"] == "fallback"
+
+
+def test_main_routes_helper_output_to_stderr(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def make_stub(section: str):
+        def _impl(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+            print(f"{section}-noise")
+            return {"section": section}
+
+        return _impl
+
+    monkeypatch.setattr(refresh, "_refresh_onchain", make_stub("onchain"))
+    monkeypatch.setattr(refresh, "_refresh_funding", make_stub("funding"))
+    monkeypatch.setattr(refresh, "_refresh_macro", make_stub("macro"))
+    monkeypatch.setattr(refresh, "_refresh_technical", make_stub("technical"))
+
+    exit_code = refresh.main([])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    payload = json.loads(captured.out)
+    assert payload["onchain"]["section"] == "onchain"
+    assert payload["funding"]["section"] == "funding"
+    assert payload["macro"]["section"] == "macro"
+    assert payload["technical"]["section"] == "technical"
+
+    stderr_text = captured.err
+    for section in ("onchain", "funding", "macro", "technical"):
+        assert f"{section}-noise" in stderr_text

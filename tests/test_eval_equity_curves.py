@@ -35,8 +35,8 @@ def _train_tiny_models(tmp_dir: str) -> Dict[str, str]:
 
     reg_path = os.path.join(tmp_dir, "xgb_ret1h_model.json")
     dir_path = os.path.join(tmp_dir, "xgb_dir1h_model.json")
-    reg.save_model(reg_path)
-    clf.save_model(dir_path)
+    reg.get_booster().save_model(reg_path)
+    clf.get_booster().save_model(dir_path)
 
     return {"reg": reg_path, "dir": dir_path}
 

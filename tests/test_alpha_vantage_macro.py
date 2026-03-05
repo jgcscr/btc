@@ -53,7 +53,7 @@ def test_twelve_ingest_maps_alias_and_persists(tmp_path: Path, monkeypatch: pyte
         ]))
 
     monkeypatch.setenv(macro.TWELVE_DATA_API_KEY_ENV, "test-key")
-    monkeypatch.setattr("data.ingestors.alpha_vantage_macro.requests.get", fake_get)
+    monkeypatch.setattr("data.ingestors.twelvedata_macro.requests.get", fake_get)
 
     output_root = tmp_path / "macro"
     path, summary = macro.ingest_series(
@@ -101,7 +101,7 @@ def test_twelve_ingest_falls_back_to_secondary_symbol(tmp_path: Path, monkeypatc
         return responses.pop(0)
 
     monkeypatch.setenv(macro.TWELVE_DATA_API_KEY_ENV, "test-key")
-    monkeypatch.setattr("data.ingestors.alpha_vantage_macro.requests.get", fake_get)
+    monkeypatch.setattr("data.ingestors.twelvedata_macro.requests.get", fake_get)
 
     path, summary = macro.ingest_series(
         function="TIME_SERIES_DAILY",
@@ -137,7 +137,7 @@ def test_provider_resolves_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: P
             },
         ]))
 
-    monkeypatch.setattr("data.ingestors.alpha_vantage_macro.requests.get", fake_get)
+    monkeypatch.setattr("data.ingestors.twelvedata_macro.requests.get", fake_get)
 
     output_path = macro.ingest_series(
         function="TIME_SERIES_DAILY",
@@ -156,7 +156,7 @@ def test_twelve_non_200_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     def fake_get(url: str, params: Dict[str, Any], timeout: int) -> _FakeResponse:
         return _FakeResponse(500, {"status": "error", "message": "Internal error"})
 
-    monkeypatch.setattr("data.ingestors.alpha_vantage_macro.requests.get", fake_get)
+    monkeypatch.setattr("data.ingestors.twelvedata_macro.requests.get", fake_get)
 
     with pytest.raises(macro.TwelveDataIngestionError, match="Internal error"):
         macro.ingest_series(

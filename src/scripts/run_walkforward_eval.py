@@ -27,13 +27,17 @@ from src.scripts.build_training_dataset import (
     _reconcile_funding_rate_features,
     _fill_cryptoquant_features,
     _augment_price_features,
+    _append_futures_feature_columns,
+    _append_return_feature_columns,
+    _append_technical_feature_columns,
     _drop_constant_features,
-    _drop_coinapi_columns,
     _drop_excluded_features,
+    _recompute_return_targets,
     _enforce_feature_coverage,
 )
 from src.scripts.build_training_dataset_direction import make_direction_labels
 from src.training.lstm_data import save_sequence_dataset
+from src.trading.volatility import DEFAULT_REALIZED_WINDOWS, add_volatility_columns
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +78,8 @@ class BacktestConfig:
     name: str
     script: str
     thresholds: Dict[str, float]
+    volatility_metric: Optional[str]
+    volatility_ceiling: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,7 @@ class DatasetArtifacts:
     direction_path: Path
     multi_horizon_path: Path
     sequence_path: Path
+    raw_features_path: Path
     stats: Dict[str, Dict[str, int]]
 
 
@@ -132,6 +139,8 @@ REQUIRED_FEATURES = [
     "vol_24h",
 ]
 
+REGRESSION_TARGET_SCALE = 1e5
+
 
 def _load_feature_source(where_clause: str, data_config: DataConfig) -> pd.DataFrame:
     if data_config.features_path is None:
@@ -158,23 +167,6 @@ def _load_feature_source(where_clause: str, data_config: DataConfig) -> pd.DataF
 def _augment_required_features(df: pd.DataFrame) -> pd.DataFrame:
     result = df.copy()
 
-    rename_map: Dict[str, List[str]] = {
-        "fut_open": ["coinapi_futures_open"],
-        "fut_high": ["coinapi_futures_high"],
-        "fut_low": ["coinapi_futures_low"],
-        "fut_close": ["coinapi_futures_close"],
-        "fut_volume": ["coinapi_futures_volume"],
-        "funding_rate": ["coinapi_funding_funding_rate"],
-    }
-
-    for target, sources in rename_map.items():
-        if target in result.columns:
-            continue
-        for source in sources:
-            if source in result.columns:
-                result[target] = result[source]
-                break
-
     if "quote_volume" not in result.columns:
         if {"close", "volume"}.issubset(result.columns):
             result["quote_volume"] = result["close"].astype(float) * result["volume"].astype(float)
@@ -189,15 +181,11 @@ def _augment_required_features(df: pd.DataFrame) -> pd.DataFrame:
             result["num_trades"] = 0.0
 
     if "open_interest" not in result.columns:
-        fallback = result.get("coinapi_futures_open_interest")
-        if fallback is not None:
-            result["open_interest"] = fallback
+        volume_series = result.get("volume")
+        if volume_series is not None:
+            result["open_interest"] = volume_series.rolling(window=12, min_periods=1).sum()
         else:
-            volume_series = result.get("volume")
-            if volume_series is not None:
-                result["open_interest"] = volume_series.rolling(window=12, min_periods=1).sum()
-            else:
-                result["open_interest"] = 0.0
+            result["open_interest"] = 0.0
 
     close_series = result.get("close")
     if close_series is not None:
@@ -305,11 +293,17 @@ def _load_config(path: Path) -> HarnessConfig:
     backtests: List[BacktestConfig] = []
     for name, cfg in backtests_raw.items():
         thresholds = cfg.get("thresholds", {})
+        guard_cfg = cfg.get("volatility_guard") or {}
+        guard_metric = guard_cfg.get("metric")
+        guard_ceiling = guard_cfg.get("ceiling")
+        guard_ceiling_val = float(guard_ceiling) if guard_ceiling is not None else None
         backtests.append(
             BacktestConfig(
                 name=name,
                 script=str(cfg["script"]),
                 thresholds={k: float(v) for k, v in thresholds.items()},
+                volatility_metric=str(guard_metric) if guard_metric else None,
+                volatility_ceiling=guard_ceiling_val,
             )
         )
 
@@ -445,11 +439,21 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
     df_merged = _reconcile_funding_rate_features(df_merged)
     df_merged = _fill_cryptoquant_features(df_merged)
     df_merged = _augment_price_features(df_merged)
+    df_merged, volatility_columns = add_volatility_columns(
+        df_merged,
+        realized_windows=DEFAULT_REALIZED_WINDOWS,
+    )
     df_merged, _ = _drop_constant_features(df_merged, REG_ZERO_VARIANCE)
-    df_merged = _drop_coinapi_columns(df_merged)
     df_merged = _drop_excluded_features(df_merged)
+    df_merged = _recompute_return_targets(df_merged)
 
     allowed_features: List[str] = [feature for feature in REG_CORE_MODEL_FEATURES if feature in df_merged.columns]
+    for column in volatility_columns:
+        if column in df_merged.columns and column not in allowed_features:
+            allowed_features.append(column)
+    allowed_features = _append_futures_feature_columns(df_merged, allowed_features)
+    allowed_features = _append_return_feature_columns(df_merged, allowed_features)
+    allowed_features = _append_technical_feature_columns(df_merged, allowed_features)
     cq_features = [col for col in df_merged.columns if col.startswith("cq_")]
     for feature in cq_features:
         if feature not in allowed_features:
@@ -495,6 +499,11 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
     y_val = y_ret.loc[val_mask].to_numpy(dtype=np.float32)
     y_test = y_ret.loc[test_mask].to_numpy(dtype=np.float32)
 
+    target_scale = REGRESSION_TARGET_SCALE
+    y_train_scaled = (y_train * target_scale).astype(np.float32)
+    y_val_scaled = (y_val * target_scale).astype(np.float32)
+    y_test_scaled = (y_test * target_scale).astype(np.float32)
+
     regression_path = datasets_dir / "btc_features_1h_splits.npz"
     _save_npz(
         regression_path,
@@ -506,6 +515,10 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
             "X_test": X_test,
             "y_test": y_test,
             "feature_names": np.array(X_df.columns.to_list()),
+            "y_train_scaled": y_train_scaled,
+            "y_val_scaled": y_val_scaled,
+            "y_test_scaled": y_test_scaled,
+            "target_scale": np.array([target_scale], dtype=np.float32),
         },
     )
 
@@ -605,6 +618,9 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
         },
     )
 
+    raw_features_path = datasets_dir / "merged_features.parquet"
+    df_filtered.to_parquet(raw_features_path, index=False)
+
     stats = {
         "regression": {
             "train": int(train_mask.sum()),
@@ -623,6 +639,7 @@ def _build_datasets(window: Window, seq_len: int, datasets_dir: Path, data_confi
         direction_path=direction_path,
         multi_horizon_path=multi_path,
         sequence_path=seq_path,
+        raw_features_path=raw_features_path,
         stats=stats,
     )
 
@@ -688,6 +705,8 @@ def _handle_models(models: List[ModelConfig], datasets: DatasetArtifacts, models
                 ])
                 if cfg.timeout_seconds:
                     cmd.extend(["--timeout", str(cfg.timeout_seconds)])
+                if mode == "reg":
+                    cmd.extend(["--target-scale", str(REGRESSION_TARGET_SCALE)])
             else:
                 cmd.extend([
                     "--dataset-path",
@@ -752,6 +771,53 @@ def _run_backtests(backtests: List[BacktestConfig], datasets: DatasetArtifacts, 
     return outputs
 
 
+def _evaluate_volatility_guards(
+    backtests: List[BacktestConfig],
+    datasets: DatasetArtifacts,
+    window: Window,
+) -> Dict[str, Dict[str, object]]:
+    guards: Dict[str, Dict[str, object]] = {}
+    if not backtests:
+        return guards
+    metric_configs = [cfg for cfg in backtests if cfg.volatility_metric and cfg.volatility_ceiling is not None]
+    if not metric_configs:
+        return guards
+    raw_path = datasets.raw_features_path
+    if not raw_path.exists():
+        logger.warning("Raw features parquet missing at %s; skipping volatility checks", raw_path)
+        return guards
+
+    df = pd.read_parquet(raw_path)
+    if "ts" not in df.columns:
+        logger.warning("Raw features parquet missing 'ts' column; skipping volatility checks for %s", raw_path)
+        return guards
+
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df = df.dropna(subset=["ts"]).reset_index(drop=True)
+    test_df = df[(df["ts"] >= window.test_start) & (df["ts"] < window.test_end)]
+
+    for cfg in metric_configs:
+        metric = cfg.volatility_metric
+        ceiling = cfg.volatility_ceiling
+        if metric not in test_df.columns or ceiling is None:
+            continue
+        series = pd.to_numeric(test_df[metric], errors="coerce").dropna()
+        if series.empty:
+            max_value = None
+            violations = 0
+        else:
+            max_value = float(series.max())
+            violations = int((series > ceiling).sum())
+        guards[cfg.name] = {
+            "metric": metric,
+            "ceiling": ceiling,
+            "max_value": max_value,
+            "violations": violations,
+        }
+
+    return guards
+
+
 def _enforce_retention(root_dir: Path, max_windows: int) -> None:
     windows = sorted([p for p in root_dir.iterdir() if p.is_dir()], key=lambda p: p.name)
     if len(windows) <= max_windows:
@@ -794,12 +860,23 @@ def _parse_backtest_metrics(output_text: str) -> Dict[str, Dict[str, float]]:
     return sections
 
 
-def _write_window_summary(window_dir: Path, window: Window, datasets: DatasetArtifacts, model_notes: Dict[str, str], backtest_outputs: Dict[str, str]) -> Dict[str, object]:
+def _write_window_summary(
+    window_dir: Path,
+    window: Window,
+    datasets: DatasetArtifacts,
+    model_notes: Dict[str, str],
+    backtest_outputs: Dict[str, str],
+    volatility_results: Dict[str, Dict[str, object]],
+) -> Dict[str, object]:
     metrics_payload = {
         "datasets": datasets.stats,
         "models": model_notes,
         "backtests": {name: _parse_backtest_metrics(text) for name, text in backtest_outputs.items()},
     }
+
+    for name, info in volatility_results.items():
+        entry = metrics_payload.setdefault("backtests", {}).setdefault(name, {})
+        entry["volatility_guard"] = info
 
     summary = {
         "window": window.label,
@@ -816,6 +893,7 @@ def _write_window_summary(window_dir: Path, window: Window, datasets: DatasetArt
         },
         "models": model_notes,
         "backtests": backtest_outputs,
+        "volatility_guards": volatility_results,
         "metrics": metrics_payload,
     }
 
@@ -839,6 +917,20 @@ def _update_schedule_summary(schedule_dir: Path, summaries: List[Dict[str, objec
     filtered = [entry for entry in existing if entry.get("window") not in {s["window"] for s in summaries}]
     filtered.extend(summaries)
     summary_path.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
+
+
+def _mirror_schedule_summary(schedule_dir: Path) -> None:
+    """Copy the latest schedule summary into the shared analysis location."""
+    summary_path = schedule_dir / "summary_latest.json"
+    if not summary_path.exists():
+        logger.warning("Schedule summary not found at %s; skipping analysis mirror.", summary_path)
+        return
+
+    analysis_dir = Path("artifacts") / "analysis" / "walkforward"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    destination = analysis_dir / "summary_latest.json"
+    shutil.copy2(summary_path, destination)
+    logger.info("Mirrored schedule summary to %s", destination)
 
 
 def run_harness(config: HarnessConfig, force: bool, dry_run: bool, only_windows: Optional[set[str]] = None) -> None:
@@ -890,8 +982,9 @@ def run_harness(config: HarnessConfig, force: bool, dry_run: bool, only_windows:
         datasets = _build_datasets(window, config.seq_len, window_dir / "datasets", config.data)
         model_notes = _handle_models(config.models, datasets, window_dir / "models", config.seq_len)
         backtest_outputs = _run_backtests(config.backtests, datasets, window_dir / "models", window_dir / "backtests")
+        volatility_results = _evaluate_volatility_guards(config.backtests, datasets, window)
 
-        summary = _write_window_summary(window_dir, window, datasets, model_notes, backtest_outputs)
+        summary = _write_window_summary(window_dir, window, datasets, model_notes, backtest_outputs, volatility_results)
         summaries.append(summary)
 
         _enforce_retention(schedule_dir, config.schedule.max_windows)
@@ -902,6 +995,7 @@ def run_harness(config: HarnessConfig, force: bool, dry_run: bool, only_windows:
 
     if summaries:
         _update_schedule_summary(schedule_dir, summaries)
+        _mirror_schedule_summary(schedule_dir)
     else:
         logger.info("No new windows processed; nothing to update.")
 

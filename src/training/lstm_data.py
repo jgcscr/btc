@@ -153,6 +153,7 @@ def create_dataloader(
 
 def save_sequence_dataset(input_path: str, output_path: str, seq_len: int) -> None:
     splits = build_sequence_splits(input_path, seq_len)
+    volatility_arrays = _load_volatility_arrays(input_path)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     np.savez_compressed(
         output_path,
@@ -165,6 +166,7 @@ def save_sequence_dataset(input_path: str, output_path: str, seq_len: int) -> No
         feature_names=np.array(splits.feature_names),
         seq_len=np.array([splits.seq_len], dtype=int),
         threshold=np.array([splits.threshold], dtype=float),
+        **volatility_arrays,
     )
     print(f"Saved sequence direction dataset to {output_path}")
 
@@ -186,3 +188,12 @@ __all__ = [
     "make_sequences",
     "save_sequence_dataset",
 ]
+
+
+def _load_volatility_arrays(dataset_path: str) -> dict[str, np.ndarray]:
+    volatility_arrays: dict[str, np.ndarray] = {}
+    with np.load(dataset_path, allow_pickle=True) as data:
+        for key in data.files:
+            if key.startswith("volatility_"):
+                volatility_arrays[key] = np.asarray(data[key]).copy()
+    return volatility_arrays

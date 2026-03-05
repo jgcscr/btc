@@ -8,6 +8,10 @@ __pycache__/
 
 # Data / artifacts
 artifacts/
+# ignore all data; we'll recreate needed inputs dynamically
+data/
+
+# legacy granular ignores (covered by above rule)
 data/spot_klines/
 data/futures_metrics/
 

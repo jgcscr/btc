@@ -41,6 +41,7 @@ class MissingRatioInfo:
 
 
 DEGRADED_STATES = frozenset({"degraded", "outage", "maintenance", "partial"})
+TOLERABLE_CRITICAL_STATES = frozenset({"degraded", "maintenance"})
 
 
 @dataclass
@@ -161,6 +162,13 @@ def parse_args() -> argparse.Namespace:
         "--job-id",
         default=None,
         help="Optional scheduler/build job identifier recorded inside alert payloads.",
+    )
+    parser.add_argument(
+        "--tolerate-known-critical",
+        action="store_true",
+        help=(
+            "Exit 0 when every failing artifact is tagged as vendor degraded/maintenance and FALLBACK_MODE is true."
+        ),
     )
     return parser.parse_args()
 
@@ -365,6 +373,16 @@ def _git_metadata() -> dict[str, str | None]:
     }
 
 
+def _is_truthy_env(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _fallback_mode_enabled() -> bool:
+    return _is_truthy_env(os.getenv("FALLBACK_MODE") or os.getenv("_FALLBACK_MODE"))
+
+
 def _detect_job_id(explicit: str | None) -> str | None:
     if explicit:
         return explicit
@@ -470,6 +488,7 @@ def run_check(
     alert: AlertOptions | None = None,
     run_metadata: dict[str, Any] | None = None,
     started_at: datetime | None = None,
+    tolerate_known_critical: bool = False,
 ) -> int:
     artifact_root = artifact_root.resolve()
     json_paths = sorted(p for p in artifact_root.rglob("*.json") if p.is_file())
@@ -486,6 +505,7 @@ def run_check(
         metadata["duration_seconds"] = max((now - started_at).total_seconds(), 0.0)
     critical_messages: list[str] = []
     warning_messages: list[str] = []
+    critical_vendor_statuses: list[VendorStatus | None] = []
     alert_entries: list[dict[str, Any]] = []
 
     for path in json_paths:
@@ -531,12 +551,34 @@ def run_check(
             warning_messages.append(message)
         else:
             critical_messages.append(message)
+            critical_vendor_statuses.append(vendor_status)
 
     summary = (
         f"Checked {len(json_paths)} artifact(s) with staleness <= {staleness_hours:.2f}h "
         f"and missing_ratio <= {missing_ratio_limit:.4f}."
     )
     print(summary)
+
+    fallback_mode_active = _fallback_mode_enabled()
+    tolerance_note: str | None = None
+    if (
+        critical_messages
+        and tolerate_known_critical
+        and fallback_mode_active
+        and critical_vendor_statuses
+    ):
+        all_tolerable = all(
+            status is not None
+            and status.state
+            and status.state.lower() in TOLERABLE_CRITICAL_STATES
+            for status in critical_vendor_statuses
+        )
+        if all_tolerable:
+            tolerance_note = (
+                "All critical artifacts map to vendor-degraded feeds; tolerating them because FALLBACK_MODE=true "
+                "and --tolerate-known-critical is set."
+            )
+            critical_messages.clear()
 
     overall_status = "critical" if critical_messages else ("warning" if warning_messages else "ok")
 
@@ -563,6 +605,8 @@ def run_check(
         return 1
 
     if warning_messages:
+        if tolerance_note:
+            print(tolerance_note)
         print("Degraded artifacts (vendor-reported outages):")
         for message in warning_messages:
             print(f"- {message}")
@@ -601,6 +645,7 @@ def main() -> None:
         alert=alert_options,
         run_metadata=run_metadata,
         started_at=started_at,
+        tolerate_known_critical=bool(args.tolerate_known_critical),
     )
     sys.exit(exit_code)
 

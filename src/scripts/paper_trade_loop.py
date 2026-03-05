@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 
 from src.config_trading import (
+    DEFAULT_BILSTM_MODEL_DIR_1H,
+    DEFAULT_CNN_LSTM_MODEL_DIR_1H,
     DEFAULT_DIR_MODEL_DIR_1H,
+    DEFAULT_DIR_MODEL_WEIGHTS_1H,
+    DEFAULT_DIR_MODELS_1H,
+    DEFAULT_GRU_MODEL_DIR_1H,
     DEFAULT_LSTM_MODEL_DIR_1H,
     DEFAULT_FEE_BPS,
     DEFAULT_P_UP_MIN,
@@ -14,7 +19,6 @@ from src.config_trading import (
     DEFAULT_RET_MIN,
     DEFAULT_SLIPPAGE_BPS,
     DEFAULT_TRANSFORMER_MODEL_DIR_1H,
-    DEFAULT_DIR_MODEL_WEIGHTS_1H,
     OPTUNA_DIR_MODEL_DIR_1H,
     OPTUNA_DIR_MODEL_WEIGHTS_1H,
     OPTUNA_LSTM_MODEL_DIR_1H,
@@ -23,7 +27,11 @@ from src.config_trading import (
     OPTUNA_RET_MIN_1H,
     OPTUNA_TRANSFORMER_MODEL_DIR_1H,
 )
-from src.trading.ensembles import parse_weight_spec
+from src.trading.direction_config import (
+    direction_configs_to_weight_map,
+    log_direction_model_configs,
+    resolve_direction_model_configs,
+)
 from src.trading.signals import (
     PreparedData,
     compute_signal_for_index,
@@ -65,10 +73,34 @@ def _parse_args() -> argparse.Namespace:
         help="Optional directory containing an LSTM direction model (model.pt, summary.json).",
     )
     parser.add_argument(
+        "--bilstm-model-dir",
+        type=str,
+        default=DEFAULT_BILSTM_MODEL_DIR_1H,
+        help="Optional directory containing a BiLSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--gru-model-dir",
+        type=str,
+        default=DEFAULT_GRU_MODEL_DIR_1H,
+        help="Optional directory containing a GRU direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--cnn-lstm-model-dir",
+        type=str,
+        default=DEFAULT_CNN_LSTM_MODEL_DIR_1H,
+        help="Optional directory containing a CNN-LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
         "--transformer-dir-model",
         type=str,
         default=DEFAULT_TRANSFORMER_MODEL_DIR_1H,
         help="Optional directory containing a transformer direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--dir-model-config-json",
+        type=str,
+        default=None,
+        help="Optional JSON file describing direction-model entries (type/path/weight list).",
     )
     parser.add_argument(
         "--dir-model-weights",
@@ -120,6 +152,26 @@ def _parse_args() -> argparse.Namespace:
         help="Optional directory to write a per-bar CSV log of the paper trading run.",
     )
     return parser.parse_args()
+
+
+def _build_direction_config_bundle(args: argparse.Namespace) -> tuple[List[Dict[str, Any]], Dict[str, float]]:
+    overrides = {
+        "xgb": os.path.join(args.dir_model_dir, "xgb_dir1h_model.json") if args.dir_model_dir else None,
+        "lstm": args.lstm_model_dir,
+        "bilstm": args.bilstm_model_dir,
+        "gru": args.gru_model_dir,
+        "cnn_lstm": args.cnn_lstm_model_dir,
+        "transformer": args.transformer_dir_model,
+    }
+    configs = resolve_direction_model_configs(
+        DEFAULT_DIR_MODELS_1H,
+        config_json_path=args.dir_model_config_json or None,
+        weight_spec=(args.dir_model_weights or None),
+        path_overrides=overrides,
+    )
+    log_direction_model_configs(configs, label="[paper_trade_loop] direction models")
+    weight_map = direction_configs_to_weight_map(configs)
+    return configs, weight_map
 
 
 def _apply_optuna_profile(args: argparse.Namespace) -> None:
@@ -223,14 +275,11 @@ def paper_trade_loop(args: argparse.Namespace) -> None:
 
     # Prepare data and models shared with run_signal_once/backtest_signals
     prepared: PreparedData = prepare_data_for_signals(args.dataset_path, target_column="ret_1h")
+    direction_configs, dir_weight_map = _build_direction_config_bundle(args)
     models = load_models(
         reg_model_path=os.path.join(args.reg_model_dir, "xgb_ret1h_model.json"),
-        dir_model_path=os.path.join(args.dir_model_dir, "xgb_dir1h_model.json"),
-        lstm_model_dir=args.lstm_model_dir,
-        transformer_model_dir=args.transformer_dir_model,
+        direction_model_configs=direction_configs,
     )
-
-    dir_model_weights = parse_weight_spec(args.dir_model_weights) if args.dir_model_weights else None
 
     populate_sequence_cache_from_prepared(prepared, models)
 
@@ -265,7 +314,7 @@ def paper_trade_loop(args: argparse.Namespace) -> None:
             models=models,
             p_up_min=args.p_up_min,
             ret_min=args.ret_min,
-            dir_model_weights=dir_model_weights,
+            dir_model_weights=dir_weight_map,
         )
 
         ts = sig["ts"]

@@ -168,14 +168,14 @@ def make_features_and_target(
 
     y = df[target_column].copy()
 
-    non_feature_cols = {"ts", target_column, "ret_fwd_3h", "ret_4h"}
-    feature_cols = [c for c in df.columns if c not in non_feature_cols]
+    non_feature_cols = {"ts", "ret_fwd_3h"}
+    feature_cols = [c for c in df.columns if c not in non_feature_cols and c != target_column]
 
     if allowed_features is not None:
-        missing = [col for col in allowed_features if col not in feature_cols]
+        missing = [col for col in allowed_features if col not in df.columns]
         if missing:
             raise ValueError(f"Missing required feature columns: {missing}")
-        feature_cols = list(allowed_features)
+        feature_cols = [col for col in allowed_features if col != "ts"]
 
     X = df[feature_cols].copy()
     if return_ts:

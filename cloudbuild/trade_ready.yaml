@@ -13,6 +13,17 @@ substitutions:
   _SPOT_GCS_BUCKET: "jc-financial-466902-btc-forecast-data"
   _REPORT_BUCKET: "gs://jc-financial-466902-btc-forecast-data"
   _ALERT_DRY_RUN: "false"
+  _SPOT_PROVIDER: "tiingo"
+  _ONCHAIN_SOURCE: "fallback"
+  _FUNDING_PROVIDER: "cryptocompare"
+  _REG_MODEL_DIR_1H: "gs://jc-financial-models-prod/tiingo_fallback_20251229/xgb_ret1h_with_ta"
+  _DIR_MODEL_DIR_1H: "gs://jc-financial-models-prod/tiingo_fallback_20251229/xgb_dir1h_with_ta"
+  _LSTM_MODEL_DIR_1H: "gs://jc-financial-models-prod/tiingo_fallback_20251229/lstm_dir1h"
+  _TRANSFORMER_MODEL_DIR_1H: "gs://jc-financial-models-prod/tiingo_fallback_20251229/transformer_dir1h"
+  _REG_MODEL_DIR_4H: "gs://jc-financial-models-prod/tiingo_fallback_20251229/xgb_ret4h_v1"
+  _DIR_MODEL_DIR_4H: "gs://jc-financial-models-prod/tiingo_fallback_20251229/xgb_dir4h_v1"
+  _RUN_DATASET_MAX_RETRIES: "5"
+  _FALLBACK_MODE: "false"
 
 availableSecrets:
   secretManager:
@@ -26,10 +37,16 @@ availableSecrets:
       env: alpha_vantage_free_api_key
     - versionName: projects/jc-financial-466902/secrets/twelvedata-api-key/versions/latest
       env: twelvedata_api_key
+    - versionName: projects/jc-financial-466902/secrets/twelvedata-premium-api-key/versions/latest
+      env: twelvedata_premium_api_key
     - versionName: projects/jc-financial-466902/secrets/tiingo-api-key/versions/latest
       env: tiingo_api_key
     - versionName: projects/jc-financial-466902/secrets/fred-api-key/versions/latest
       env: fred_api_key
+    - versionName: projects/jc-financial-466902/secrets/kaiko-api-key/versions/latest
+      env: kaiko_api_key
+    - versionName: projects/jc-financial-466902/secrets/kaiko-api-secret/versions/latest
+      env: kaiko_api_secret
     - versionName: projects/jc-financial-466902/secrets/trade-ready-alert-webhook/versions/latest
       env: TRADE_READY_ALERT_WEBHOOK
 
@@ -42,14 +59,31 @@ steps:
       - alpha_vantage_api_key
       - alpha_vantage_free_api_key
       - twelvedata_api_key
+      - twelvedata_premium_api_key
       - tiingo_api_key
       - fred_api_key
+      - kaiko_api_key
+      - kaiko_api_secret
     env:
       - PYTHONPATH=/workspace
+      - SPOT_PROVIDER=${_SPOT_PROVIDER}
+      - ONCHAIN_SOURCE=${_ONCHAIN_SOURCE}
+      - FUNDING_PROVIDER=${_FUNDING_PROVIDER}
+      - FALLBACK_MODE=${_FALLBACK_MODE}
+      - REG_MODEL_DIR_1H=${_REG_MODEL_DIR_1H}
+      - DIR_MODEL_DIR_1H=${_DIR_MODEL_DIR_1H}
+      - LSTM_MODEL_DIR_1H=${_LSTM_MODEL_DIR_1H}
+      - TRANSFORMER_MODEL_DIR_1H=${_TRANSFORMER_MODEL_DIR_1H}
+      - REG_MODEL_DIR_4H=${_REG_MODEL_DIR_4H}
+      - DIR_MODEL_DIR_4H=${_DIR_MODEL_DIR_4H}
     args:
       - -c
       - |
         set -euo pipefail
+        if [[ "$${FALLBACK_MODE}" == "true" ]]; then
+          echo "FALLBACK_MODE=true; skipping refresh-market-features."
+          exit 0
+        fi
         export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
         export ALPHA_VANTAGE_KEYS="$alpha_vantage_api_key"
         export ALPHA_VANTAGE_PAID_KEYS="$alpha_vantage_api_key"
@@ -57,25 +91,52 @@ steps:
         export ALPHA_VANTAGE_FREE_KEYS="$alpha_vantage_free_api_key"
         export ALPHA_VANTAGE_FREE_API_KEY="$alpha_vantage_free_api_key"
         export TWELVE_DATA_API_KEY="$twelvedata_api_key"
+        export TWELVEDATA_PREMIUM_API_KEY="${twelvedata_premium_api_key:-}"
         export TIINGO_API_KEY="$tiingo_api_key"
         export FRED_API_KEY="$fred_api_key"
-        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-alpha,alpha_free,twelve,tiingo,fred}"
+        export KAIKO_API_KEY="${kaiko_api_key:-}"
+        export KAIKO_API_SECRET="${kaiko_api_secret:-}"
+        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-kaiko_reference,kaiko_market,alpha,alpha_free,twelvedata_premium,twelve,tiingo,fred}"
         pip install --no-cache-dir -r requirements.txt
-        python -m src.scripts.refresh_market_features --onchain-limit 720 --funding-limit 1000
+        python -m src.scripts.refresh_market_features \
+          --technical-price-source "$${SPOT_PROVIDER}" \
+          --onchain-source "$${ONCHAIN_SOURCE}" \
+          --funding-provider "$${FUNDING_PROVIDER}" \
+          --onchain-limit 720 \
+          --funding-limit 1000
   - id: run-dataset-refresh
     name: gcr.io/cloud-builders/gcloud
     entrypoint: bash
+    env:
+      - SPOT_PROVIDER=${_SPOT_PROVIDER}
+      - ONCHAIN_SOURCE=${_ONCHAIN_SOURCE}
+      - FUNDING_PROVIDER=${_FUNDING_PROVIDER}
+      - FALLBACK_MODE=${_FALLBACK_MODE}
+      - REG_MODEL_DIR_1H=${_REG_MODEL_DIR_1H}
+      - DIR_MODEL_DIR_1H=${_DIR_MODEL_DIR_1H}
+      - LSTM_MODEL_DIR_1H=${_LSTM_MODEL_DIR_1H}
+      - TRANSFORMER_MODEL_DIR_1H=${_TRANSFORMER_MODEL_DIR_1H}
+      - REG_MODEL_DIR_4H=${_REG_MODEL_DIR_4H}
+      - DIR_MODEL_DIR_4H=${_DIR_MODEL_DIR_4H}
+      - RUN_DATASET_MAX_RETRIES=${_RUN_DATASET_MAX_RETRIES}
     secretEnv:
       - service_url
       - alpha_vantage_api_key
       - alpha_vantage_free_api_key
       - twelvedata_api_key
+      - twelvedata_premium_api_key
       - tiingo_api_key
       - fred_api_key
+      - kaiko_api_key
+      - kaiko_api_secret
     args:
       - -c
       - |
         set -euo pipefail
+        if [[ "$${FALLBACK_MODE}" == "true" ]]; then
+          echo "FALLBACK_MODE=true; skipping run-dataset-refresh."
+          exit 0
+        fi
         echo "Calling /run-dataset-refresh (72h window)"
         service_url_value="$service_url"
         export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
@@ -85,14 +146,49 @@ steps:
         export ALPHA_VANTAGE_FREE_KEYS="$alpha_vantage_free_api_key"
         export ALPHA_VANTAGE_FREE_API_KEY="$alpha_vantage_free_api_key"
         export TWELVE_DATA_API_KEY="$twelvedata_api_key"
+        export TWELVEDATA_PREMIUM_API_KEY="${twelvedata_premium_api_key:-}"
         export TIINGO_API_KEY="$tiingo_api_key"
         export FRED_API_KEY="$fred_api_key"
-        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-alpha,alpha_free,twelve,tiingo,fred}"
-        curl --fail --show-error --silent \
-          --request POST "$service_url_value/run-dataset-refresh" \
-          --header "Content-Type: application/json" \
-          --data '{"dry_run": false, "args": ["--hours", "72"]}' \
-          | tee /workspace/run_dataset_refresh.json
+        export KAIKO_API_KEY="${kaiko_api_key:-}"
+        export KAIKO_API_SECRET="${kaiko_api_secret:-}"
+        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-kaiko_reference,kaiko_market,alpha,alpha_free,twelvedata_premium,twelve,tiingo,fred}"
+        payload='{"dry_run": false, "args": ["--hours", "72"]}'
+        max_attempts=${RUN_DATASET_MAX_RETRIES:-5}
+        backoff_seconds=${RUN_DATASET_BACKOFF_SECONDS:-5}
+        attempt=1
+        tmp_response=$(mktemp)
+        success=0
+        while (( attempt <= max_attempts )); do
+          echo "Attempt ${attempt}/${max_attempts} hitting /run-dataset-refresh"
+          http_code_file=$(mktemp)
+          if curl --silent --show-error --write-out "%{http_code}" --output "$tmp_response" \
+            --request POST "$service_url_value/run-dataset-refresh" \
+            --header "Content-Type: application/json" \
+            --data "$payload" >"$http_code_file"; then
+            curl_exit=0
+          else
+            curl_exit=$?
+          fi
+          http_status=$(cat "$http_code_file" 2>/dev/null || true)
+          rm -f "$http_code_file"
+          if [[ "$curl_exit" -eq 0 && "$http_status" =~ ^2 ]]; then
+            cat "$tmp_response" | tee /workspace/run_dataset_refresh.json
+            success=1
+            break
+          fi
+          echo "run-dataset-refresh call failed (exit=$curl_exit status=$http_status); backing off ${backoff_seconds}s" >&2
+          if (( attempt == max_attempts )); then
+            break
+          fi
+          sleep "$backoff_seconds"
+          backoff_seconds=$(( backoff_seconds * 2 ))
+          attempt=$(( attempt + 1 ))
+        done
+        rm -f "$tmp_response"
+        if [[ "$success" != 1 ]]; then
+          echo "run-dataset-refresh failed after ${max_attempts} attempts" >&2
+          exit 1
+        fi
 
   - id: sync-spot-raw-table
     name: python:3.11
@@ -101,16 +197,33 @@ steps:
       - PROJECT_ID=${_PROJECT_ID}
       - SPOT_GCS_BUCKET=${_SPOT_GCS_BUCKET}
       - PYTHONPATH=/workspace
+      - SPOT_PROVIDER=${_SPOT_PROVIDER}
+      - ONCHAIN_SOURCE=${_ONCHAIN_SOURCE}
+      - FUNDING_PROVIDER=${_FUNDING_PROVIDER}
+      - FALLBACK_MODE=${_FALLBACK_MODE}
+      - REG_MODEL_DIR_1H=${_REG_MODEL_DIR_1H}
+      - DIR_MODEL_DIR_1H=${_DIR_MODEL_DIR_1H}
+      - LSTM_MODEL_DIR_1H=${_LSTM_MODEL_DIR_1H}
+      - TRANSFORMER_MODEL_DIR_1H=${_TRANSFORMER_MODEL_DIR_1H}
+      - REG_MODEL_DIR_4H=${_REG_MODEL_DIR_4H}
+      - DIR_MODEL_DIR_4H=${_DIR_MODEL_DIR_4H}
     secretEnv:
       - alpha_vantage_api_key
       - alpha_vantage_free_api_key
       - twelvedata_api_key
+      - twelvedata_premium_api_key
       - tiingo_api_key
       - fred_api_key
+      - kaiko_api_key
+      - kaiko_api_secret
     args:
       - -c
       - |
         set -euo pipefail
+        if [[ "$${FALLBACK_MODE}" == "true" ]]; then
+          echo "FALLBACK_MODE=true; skipping sync-spot-raw-table."
+          exit 0
+        fi
         export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
         export ALPHA_VANTAGE_KEYS="$alpha_vantage_api_key"
         export ALPHA_VANTAGE_PAID_KEYS="$alpha_vantage_api_key"
@@ -118,26 +231,47 @@ steps:
         export ALPHA_VANTAGE_FREE_KEYS="$alpha_vantage_free_api_key"
         export ALPHA_VANTAGE_FREE_API_KEY="$alpha_vantage_free_api_key"
         export TWELVE_DATA_API_KEY="$twelvedata_api_key"
+        export TWELVEDATA_PREMIUM_API_KEY="${twelvedata_premium_api_key:-}"
         export TIINGO_API_KEY="$tiingo_api_key"
         export FRED_API_KEY="$fred_api_key"
-        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-alpha,alpha_free,twelve,tiingo,fred}"
+        export KAIKO_API_KEY="${kaiko_api_key:-}"
+        export KAIKO_API_SECRET="${kaiko_api_secret:-}"
+        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-kaiko_reference,kaiko_market,alpha,alpha_free,twelvedata_premium,twelve,tiingo,fred}"
         pip install --no-cache-dir google-cloud-bigquery >/dev/null
         python -m src.scripts.ensure_spot_raw_sync
 
   - id: run-signal
     name: gcr.io/cloud-builders/gcloud
     entrypoint: bash
+    env:
+      - SPOT_PROVIDER=${_SPOT_PROVIDER}
+      - ONCHAIN_SOURCE=${_ONCHAIN_SOURCE}
+      - FUNDING_PROVIDER=${_FUNDING_PROVIDER}
+      - FALLBACK_MODE=${_FALLBACK_MODE}
+      - REG_MODEL_DIR_1H=${_REG_MODEL_DIR_1H}
+      - DIR_MODEL_DIR_1H=${_DIR_MODEL_DIR_1H}
+      - LSTM_MODEL_DIR_1H=${_LSTM_MODEL_DIR_1H}
+      - TRANSFORMER_MODEL_DIR_1H=${_TRANSFORMER_MODEL_DIR_1H}
+      - REG_MODEL_DIR_4H=${_REG_MODEL_DIR_4H}
+      - DIR_MODEL_DIR_4H=${_DIR_MODEL_DIR_4H}
     secretEnv:
       - service_url
       - alpha_vantage_api_key
       - alpha_vantage_free_api_key
       - twelvedata_api_key
+      - twelvedata_premium_api_key
       - tiingo_api_key
       - fred_api_key
+      - kaiko_api_key
+      - kaiko_api_secret
     args:
       - -c
       - |
         set -euo pipefail
+        if [[ "$${FALLBACK_MODE}" == "true" ]]; then
+          echo "FALLBACK_MODE=true; skipping run-signal."
+          exit 0
+        fi
         echo "Calling /run-signal with horizons 1,4,8,12"
         service_url_value="$service_url"
         export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
@@ -147,13 +281,17 @@ steps:
         export ALPHA_VANTAGE_FREE_KEYS="$alpha_vantage_free_api_key"
         export ALPHA_VANTAGE_FREE_API_KEY="$alpha_vantage_free_api_key"
         export TWELVE_DATA_API_KEY="$twelvedata_api_key"
+        export TWELVEDATA_PREMIUM_API_KEY="${twelvedata_premium_api_key:-}"
         export TIINGO_API_KEY="$tiingo_api_key"
         export FRED_API_KEY="$fred_api_key"
-        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-alpha,alpha_free,twelve,tiingo,fred}"
+        export KAIKO_API_KEY="${kaiko_api_key:-}"
+        export KAIKO_API_SECRET="${kaiko_api_secret:-}"
+        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-kaiko_reference,kaiko_market,alpha,alpha_free,twelvedata_premium,twelve,tiingo,fred}"
+        payload="{\"dry_run\": false, \"args\": [\"--targets\", \"1,4,8,12\", \"--reg-model-dir\", \"$${REG_MODEL_DIR_1H}\", \"--dir-model-dir\", \"$${DIR_MODEL_DIR_1H}\", \"--lstm-model-dir\", \"$${LSTM_MODEL_DIR_1H}\", \"--transformer-dir-model\", \"$${TRANSFORMER_MODEL_DIR_1H}\", \"--reg-model-dir-4h\", \"$${REG_MODEL_DIR_4H}\", \"--dir-model-dir-4h\", \"$${DIR_MODEL_DIR_4H}\"]}"
         curl --fail --show-error --silent \
           --request POST "$service_url_value/run-signal" \
           --header "Content-Type: application/json" \
-          --data '{"dry_run": false, "args": ["--targets", "1,4,8,12"]}' \
+          --data "$payload" \
           | tee /workspace/run_signal.json
 
   - id: build-report
@@ -162,16 +300,33 @@ steps:
     env:
       - REPORT_BUCKET=${_REPORT_BUCKET}
       - PYTHONPATH=/workspace
+      - SPOT_PROVIDER=${_SPOT_PROVIDER}
+      - ONCHAIN_SOURCE=${_ONCHAIN_SOURCE}
+      - FUNDING_PROVIDER=${_FUNDING_PROVIDER}
+      - FALLBACK_MODE=${_FALLBACK_MODE}
+      - REG_MODEL_DIR_1H=${_REG_MODEL_DIR_1H}
+      - DIR_MODEL_DIR_1H=${_DIR_MODEL_DIR_1H}
+      - LSTM_MODEL_DIR_1H=${_LSTM_MODEL_DIR_1H}
+      - TRANSFORMER_MODEL_DIR_1H=${_TRANSFORMER_MODEL_DIR_1H}
+      - REG_MODEL_DIR_4H=${_REG_MODEL_DIR_4H}
+      - DIR_MODEL_DIR_4H=${_DIR_MODEL_DIR_4H}
     secretEnv:
       - alpha_vantage_api_key
       - alpha_vantage_free_api_key
       - twelvedata_api_key
+      - twelvedata_premium_api_key
       - tiingo_api_key
       - fred_api_key
+      - kaiko_api_key
+      - kaiko_api_secret
     args:
       - -c
       - |
         set -euo pipefail
+        if [[ "$${FALLBACK_MODE}" == "true" ]]; then
+          echo "FALLBACK_MODE=true; skipping build-report."
+          exit 0
+        fi
         export ALPHA_VANTAGE_API_KEY="$alpha_vantage_api_key"
         export ALPHA_VANTAGE_KEYS="$alpha_vantage_api_key"
         export ALPHA_VANTAGE_PAID_KEYS="$alpha_vantage_api_key"
@@ -179,37 +334,95 @@ steps:
         export ALPHA_VANTAGE_FREE_KEYS="$alpha_vantage_free_api_key"
         export ALPHA_VANTAGE_FREE_API_KEY="$alpha_vantage_free_api_key"
         export TWELVE_DATA_API_KEY="$twelvedata_api_key"
+        export TWELVEDATA_PREMIUM_API_KEY="${twelvedata_premium_api_key:-}"
         export TIINGO_API_KEY="$tiingo_api_key"
         export FRED_API_KEY="$fred_api_key"
-        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-alpha,alpha_free,twelve,tiingo,fred}"
+        export KAIKO_API_KEY="${kaiko_api_key:-}"
+        export KAIKO_API_SECRET="${kaiko_api_secret:-}"
+        export MACRO_PROVIDER_CHAIN="${MACRO_PROVIDER_CHAIN:-kaiko_reference,kaiko_market,alpha,alpha_free,twelvedata_premium,twelve,tiingo,fred}"
         python -m src.scripts.build_trade_ready_report
 
   - id: publish-report
     name: gcr.io/cloud-builders/gcloud
     entrypoint: bash
+    env:
+      - SPOT_PROVIDER=${_SPOT_PROVIDER}
+      - ONCHAIN_SOURCE=${_ONCHAIN_SOURCE}
+      - FUNDING_PROVIDER=${_FUNDING_PROVIDER}
+      - FALLBACK_MODE=${_FALLBACK_MODE}
+      - REG_MODEL_DIR_1H=${_REG_MODEL_DIR_1H}
+      - DIR_MODEL_DIR_1H=${_DIR_MODEL_DIR_1H}
+      - LSTM_MODEL_DIR_1H=${_LSTM_MODEL_DIR_1H}
+      - TRANSFORMER_MODEL_DIR_1H=${_TRANSFORMER_MODEL_DIR_1H}
+      - REG_MODEL_DIR_4H=${_REG_MODEL_DIR_4H}
+      - DIR_MODEL_DIR_4H=${_DIR_MODEL_DIR_4H}
     args:
       - -c
       - |
         set -euo pipefail
+        if [[ "$${FALLBACK_MODE}" == "true" ]]; then
+          echo "FALLBACK_MODE=true; skipping publish-report."
+          exit 0
+        fi
         report_uri=$(cat /workspace/report_uri.txt)
         gsutil cp /workspace/trade_ready_report.json "$report_uri"
+  - id: fallback-refresh
+    name: python:3.11
+    entrypoint: bash
+    secretEnv:
+      - CRYPTOCOMPARE_API_KEY
+    env:
+      - PYTHONPATH=/workspace
+      - FALLBACK_MODE=${_FALLBACK_MODE}
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [[ "$${FALLBACK_MODE}" != "true" ]]; then
+          echo "FALLBACK_MODE=false; skipping fallback-refresh."
+          exit 0
+        fi
+        pip install --no-cache-dir -r requirements.txt
+        if [[ -n "$${CRYPTOCOMPARE_API_KEY:-}" ]]; then
+          export CRYPTOCOMPARE_API_KEY="$${CRYPTOCOMPARE_API_KEY}"
+        fi
+        python -m src.scripts.run_refresh_and_predict \
+          --config configs/run_refresh_and_predict.default.yaml \
+          --spot-provider binanceus \
+          --write-artifacts
   - id: monitor-artifacts
     name: python:3.11
     entrypoint: bash
     env:
       - PYTHONPATH=/workspace
+      - SPOT_PROVIDER=${_SPOT_PROVIDER}
+      - ONCHAIN_SOURCE=${_ONCHAIN_SOURCE}
+      - FUNDING_PROVIDER=${_FUNDING_PROVIDER}
+      - FALLBACK_MODE=${_FALLBACK_MODE}
+      - REG_MODEL_DIR_1H=${_REG_MODEL_DIR_1H}
+      - DIR_MODEL_DIR_1H=${_DIR_MODEL_DIR_1H}
+      - LSTM_MODEL_DIR_1H=${_LSTM_MODEL_DIR_1H}
+      - TRANSFORMER_MODEL_DIR_1H=${_TRANSFORMER_MODEL_DIR_1H}
+      - REG_MODEL_DIR_4H=${_REG_MODEL_DIR_4H}
+      - DIR_MODEL_DIR_4H=${_DIR_MODEL_DIR_4H}
     args:
       - -c
       - |
         set -euo pipefail
         pip install --no-cache-dir -r requirements.txt >/dev/null
         mkdir -p /workspace/tmp
-        python -m src.scripts.check_pipeline_health \
-          --artifact-root artifacts/monitoring \
-          --config configs/monitoring_sla_overrides.yaml \
-          --alert-output /workspace/tmp/health_alert.json \
-          --emit-alert-json \
+        check_args=(
+          -m src.scripts.check_pipeline_health
+          --artifact-root artifacts/monitoring
+          --config configs/monitoring_sla_overrides.yaml
+          --alert-output /workspace/tmp/health_alert.json
+          --emit-alert-json
           --job-id "${BUILD_ID:-trade-ready}"
+        )
+        if [[ "$${FALLBACK_MODE}" == "true" ]]; then
+          check_args+=(--tolerate-known-critical)
+        fi
+        python "${check_args[@]}"
   - id: post-health-alert
     name: python:3.11
     entrypoint: bash
@@ -218,23 +431,32 @@ steps:
     env:
       - PYTHONPATH=/workspace
       - ALERT_DRY_RUN=${_ALERT_DRY_RUN}
+      - SPOT_PROVIDER=${_SPOT_PROVIDER}
+      - ONCHAIN_SOURCE=${_ONCHAIN_SOURCE}
+      - FUNDING_PROVIDER=${_FUNDING_PROVIDER}
+      - REG_MODEL_DIR_1H=${_REG_MODEL_DIR_1H}
+      - DIR_MODEL_DIR_1H=${_DIR_MODEL_DIR_1H}
+      - LSTM_MODEL_DIR_1H=${_LSTM_MODEL_DIR_1H}
+      - TRANSFORMER_MODEL_DIR_1H=${_TRANSFORMER_MODEL_DIR_1H}
+      - REG_MODEL_DIR_4H=${_REG_MODEL_DIR_4H}
+      - DIR_MODEL_DIR_4H=${_DIR_MODEL_DIR_4H}
     args:
       - -c
       - |
         set -euo pipefail
-        ALERT_PATH=/workspace/tmp/health_alert.json
-        if [[ ! -s "$ALERT_PATH" ]]; then
+        alert_path=/workspace/tmp/health_alert.json
+        if [[ ! -s "$alert_path" ]]; then
           echo "No alert payload emitted; skipping webhook."
           exit 0
         fi
-        DRY_RUN_FLAG=""
-        if [[ "${ALERT_DRY_RUN}" == "true" ]]; then
-          DRY_RUN_FLAG="--dry-run"
+        dry_run_flag=""
+        if [[ "$${ALERT_DRY_RUN}" == "true" ]]; then
+          dry_run_flag="--dry-run"
         fi
         python -m src.scripts.post_alert_to_webhook \
-          --alert-path "$ALERT_PATH" \
-          --webhook-url "$TRADE_READY_ALERT_WEBHOOK" \
+          --alert-path "$alert_path" \
+          --webhook-url "$${TRADE_READY_ALERT_WEBHOOK}" \
           --max-retries 5 \
           --initial-backoff 5 \
           --timeout 15 \
-          ${DRY_RUN_FLAG}
+          ${dry_run_flag}

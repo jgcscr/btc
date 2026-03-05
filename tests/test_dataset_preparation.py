@@ -11,7 +11,7 @@ from src.data.dataset_preparation import (
 def test_make_features_and_target_excludes_ts_target_and_ret_fwd_3h() -> None:
     df = pd.DataFrame(
         {
-            "ts": pd.date_range("2024-01-01", periods=5, freq="H"),
+            "ts": pd.date_range("2024-01-01", periods=5, freq="h"),
             "ret_1h": np.linspace(-0.01, 0.01, 5),
             "ret_fwd_3h": np.linspace(0.0, 0.02, 5),
             "feat_a": np.arange(5),
@@ -34,7 +34,7 @@ def test_time_series_train_val_test_split_order_and_sizes() -> None:
     n = 10
     df = pd.DataFrame(
         {
-            "ts": pd.date_range("2024-01-01", periods=n, freq="H"),
+            "ts": pd.date_range("2024-01-01", periods=n, freq="h"),
             "ret_1h": np.arange(n, dtype=float),
             "feat": np.arange(n, dtype=float) * 2.0,
         },

@@ -178,6 +178,7 @@ This script:
 - Loads the previous walkforward.json (if present) and flags deviations > threshold in `walkforward_diff.json`.
 - Generates a Markdown summary (`summary.md`) in the same folder.
 - Logs all command output to `walkforward.log`.
+- As part of the underlying `run_walkforward_eval` harness, each schedule now emits `summary_latest.json` inside the schedule folder (for example `artifacts/walkforward/mock_local_octnov/summary_latest.json`) **and** mirrors the same payload to `artifacts/analysis/walkforward/summary_latest.json`. Downstream jobs should read from the analysis mirror when they only need the latest run, regardless of which schedule produced it.
 
 You can schedule this script via cron or workflow automation. Example cron entry (every Monday at 6:00 UTC):
 

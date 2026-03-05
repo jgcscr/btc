@@ -64,11 +64,13 @@ def train_epoch(
     device: torch.device,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
+    max_steps: Optional[int] = None,
 ) -> float:
     model.train()
     running_loss = 0.0
     total = 0
-    for features, labels in loader:
+    step_limit = max_steps if (max_steps is not None and max_steps > 0) else None
+    for step_index, (features, labels) in enumerate(loader, start=1):
         features = features.to(device)
         labels = labels.to(device)
         optimizer.zero_grad()
@@ -79,6 +81,8 @@ def train_epoch(
         batch_size = labels.size(0)
         running_loss += float(loss.item()) * batch_size
         total += batch_size
+        if step_limit is not None and step_index >= step_limit:
+            break
     return running_loss / max(total, 1)
 
 

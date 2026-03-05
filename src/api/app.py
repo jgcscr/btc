@@ -13,6 +13,7 @@ app = FastAPI(title="BTC Forecast API", version="1.0.0")
 MODEL: Optional[Booster] = None
 FEATURE_NAMES: List[str] = []
 TARGET_NAME: str = "ret_1h"
+TARGET_SCALE: float = 1.0
 
 DIR_MODEL: Optional[Booster] = None
 DIR_FEATURE_NAMES: List[str] = []
@@ -39,7 +40,7 @@ def load_model(model_dir: Optional[str] = None) -> None:
     If ``model_dir`` is not absolute, it is resolved relative to this file's
     directory, so that ``src/api/model`` works in both local runs and Docker.
     """
-    global MODEL, FEATURE_NAMES, TARGET_NAME
+    global MODEL, FEATURE_NAMES, TARGET_NAME, TARGET_SCALE
 
     base_dir = os.path.dirname(__file__)
     if model_dir is None:
@@ -72,6 +73,7 @@ def load_model(model_dir: Optional[str] = None) -> None:
     FEATURE_NAMES.clear()
     FEATURE_NAMES.extend(feature_names)
     TARGET_NAME = target_name
+    TARGET_SCALE = float(meta.get("target_scale", 1.0)) or 1.0
 
 
 def load_direction_model(model_dir: Optional[str] = None) -> None:
@@ -155,6 +157,8 @@ def predict(req: PredictRequest) -> PredictResponse:
     X = np.asarray(rows, dtype=float)
     dmatrix = DMatrix(X, feature_names=FEATURE_NAMES)
     preds = MODEL.predict(dmatrix)
+    if TARGET_SCALE != 0:
+        preds = preds / TARGET_SCALE
     return PredictResponse(predictions=preds.tolist())
 
 

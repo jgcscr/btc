@@ -45,7 +45,7 @@ The current BTC trading stack reliably produces hourly ensemble signals augmente
 ## Near-Term Task Queue (Next 4–6 Weeks)
 1. Evaluate alternate macro providers (e.g., FRED premium, Twelve Data) and prepare phase-in plan alongside Alpha Vantage catalog.
 2. Automate Alpha Vantage quota alerts (Slack/SNS) using the new usage monitor and integrate with nightly scheduler.
-3. Restore premium CryptoQuant hourly metrics and CoinAPI funding coverage; rerun feature pipelines once vendor access returns.
+3. Restore premium CryptoQuant hourly metrics and continue hardening Binance-based funding coverage; rerun feature pipelines once vendor access returns.
 4. Extend LSTM/Optuna experiments from Phase 2 backlog after data reliability items above are cleared.
 5. Document alert runbooks and verify incident routing for macro/quota failures.
 

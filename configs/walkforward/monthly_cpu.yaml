@@ -32,6 +32,11 @@ models:
 backtests:
   ensemble:
     script: src/scripts/evaluate_ensemble_signals.py
+    direction_model_registry: artifacts/models/direction_models_latest.json
+    thresholds_json: artifacts/models/calibrated_thresholds.json
     thresholds:
-      p_up_min: 0.6
-      ret_min: 0.0005
+      p_up_min: 0.62
+      ret_min: 0.00045
+    volatility_guard:
+      metric: volatility_realized_24h
+      ceiling: 0.032

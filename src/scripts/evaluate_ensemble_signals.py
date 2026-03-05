@@ -24,7 +24,7 @@ def _load_npz_dataset(path: str) -> Dict[str, Any]:
     }
 
 
-def _load_xgb_booster(model_dir: str, model_filename: str, meta_filename: str) -> Tuple[Booster, List[str]]:
+def _load_xgb_booster(model_dir: str, model_filename: str, meta_filename: str) -> Tuple[Booster, List[str], Dict[str, Any]]:
     model_path = os.path.join(model_dir, model_filename)
     meta_path = os.path.join(model_dir, meta_filename)
 
@@ -43,7 +43,7 @@ def _load_xgb_booster(model_dir: str, model_filename: str, meta_filename: str) -
     if not isinstance(feature_names, list) or not feature_names:
         raise RuntimeError(f"Invalid or missing 'feature_names' in {meta_path}")
 
-    return booster, feature_names
+    return booster, feature_names, meta
 
 
 def _align_features(X: np.ndarray, dataset_feature_names: List[str], model_feature_names: List[str]) -> np.ndarray:
@@ -111,14 +111,15 @@ def evaluate_ensemble_signals(
     dataset_feature_names = data["feature_names"]
 
     # Load regression model
-    reg_booster, reg_feature_names = _load_xgb_booster(
+    reg_booster, reg_feature_names, reg_meta = _load_xgb_booster(
         model_dir=reg_model_dir,
         model_filename="xgb_ret1h_model.json",
         meta_filename="model_metadata.json",
     )
+    target_scale = float(reg_meta.get("target_scale", 1.0)) or 1.0
 
     # Load direction model
-    dir_booster, dir_feature_names = _load_xgb_booster(
+    dir_booster, dir_feature_names, _ = _load_xgb_booster(
         model_dir=dir_model_dir,
         model_filename="xgb_dir1h_model.json",
         meta_filename="model_metadata_direction.json",
@@ -132,7 +133,9 @@ def evaluate_ensemble_signals(
     dmat_reg = DMatrix(X_test_reg, feature_names=reg_feature_names)
     dmat_dir = DMatrix(X_test_dir, feature_names=dir_feature_names)
 
-    ret_pred = reg_booster.predict(dmat_reg)  # predicted ret_1h
+    ret_pred = reg_booster.predict(dmat_reg)  # predicted ret_1h (scaled)
+    if target_scale != 0:
+        ret_pred = ret_pred / target_scale
     p_up = dir_booster.predict(dmat_dir)      # P(up), since objective=binary:logistic
 
     # Ensemble signal: require both high p_up and sufficiently positive ret_pred

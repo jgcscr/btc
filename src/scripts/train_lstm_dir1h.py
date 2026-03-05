@@ -4,7 +4,7 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 from joblib import dump
 def _apply_params_overrides(args: argparse.Namespace) -> None:
     params_path = getattr(args, "params_json", None)
@@ -33,6 +33,8 @@ from src.training.lstm_data import (
     estimate_feature_stats,
 )
 from src.training.lstm_model import LSTMDirectionClassifier
+
+ModelBuilder = Callable[[int, argparse.Namespace], nn.Module]
 
 
 def set_seed(seed: int) -> None:
@@ -112,6 +114,7 @@ def _evaluate(
             logits = model(X_batch)
             loss = criterion(logits, y_batch)
             batch_size = X_batch.size(0)
+
             loss_sum += loss.item() * batch_size
             count += batch_size
             probs = torch.sigmoid(logits).detach().cpu().numpy()
@@ -153,7 +156,23 @@ def _train_one_epoch(
     return loss_sum / max(count, 1)
 
 
-def train_model(args: argparse.Namespace) -> None:
+def _default_model_builder(input_size: int, args: argparse.Namespace) -> nn.Module:
+    return LSTMDirectionClassifier(
+        input_size=input_size,
+        hidden_size=args.hidden_size,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        norm_type=args.norm_type,
+    )
+
+
+def train_model(
+    args: argparse.Namespace,
+    *,
+    model_builder: ModelBuilder | None = None,
+    model_label: str = "lstm_direction_classifier",
+    extra_hyperparams: Dict[str, Any] | None = None,
+) -> None:
     set_seed(args.seed)
     device = _effective_device(args.device)
 
@@ -165,13 +184,8 @@ def train_model(args: argparse.Namespace) -> None:
     val_loader = create_dataloader(splits.X_val_seq, splits.y_val_seq, args.batch_size, shuffle=False)
     test_loader = create_dataloader(splits.X_test_seq, splits.y_test_seq, args.batch_size, shuffle=False)
 
-    model = LSTMDirectionClassifier(
-        input_size=input_size,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        norm_type=args.norm_type,
-    ).to(device)
+    builder = model_builder or _default_model_builder
+    model = builder(input_size, args).to(device)
 
     optimizer = Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     criterion = _bce_loss()
@@ -237,25 +251,29 @@ def train_model(args: argparse.Namespace) -> None:
     scaler_path = output_dir / "scaler.joblib"
     dump({"mean": feature_mean, "std": feature_std}, scaler_path)
 
+    hyperparams = {
+        "hidden_size": args.hidden_size,
+        "num_layers": args.num_layers,
+        "dropout": args.dropout,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "weight_decay": args.weight_decay,
+        "patience": args.patience,
+        "seed": args.seed,
+        "norm_type": args.norm_type,
+    }
+    if extra_hyperparams:
+        hyperparams.update(extra_hyperparams)
+
     summary = {
-        "model_type": "lstm_direction_classifier",
+        "model_type": model_label,
         "dataset_path": args.dataset_path,
         "seq_len": args.seq_len,
         "feature_names": splits.feature_names,
         "threshold": splits.threshold,
         "device": str(device),
-        "hyperparams": {
-            "hidden_size": args.hidden_size,
-            "num_layers": args.num_layers,
-            "dropout": args.dropout,
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "learning_rate": args.learning_rate,
-            "weight_decay": args.weight_decay,
-            "patience": args.patience,
-            "seed": args.seed,
-            "norm_type": args.norm_type,
-        },
+        "hyperparams": hyperparams,
         "metrics": {
             "train": {**train_metrics, "loss": train_loss},
             "val": {**val_metrics, "loss": val_loss},
@@ -277,7 +295,15 @@ def train_model(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train an LSTM classifier for 1h BTC direction.")
+    parser = build_arg_parser(
+        description="Train an LSTM classifier for 1h BTC direction.",
+        default_output_dir="artifacts/models/lstm_dir1h_v2",
+    )
+    return parser.parse_args()
+
+
+def build_arg_parser(description: str, default_output_dir: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--dataset-path",
         type=str,
@@ -287,7 +313,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="artifacts/models/lstm_dir1h_v2",
+        default=default_output_dir,
         help="Directory to store the trained model and summary.",
     )
     parser.add_argument("--seq-len", type=int, default=24, help="Sequence length (timesteps).")
@@ -304,7 +330,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None, help="Optional torch device override (e.g., 'cpu', 'cuda:0').")
     parser.add_argument("--params-json", type=str, default=None, help="Optional JSON file with hyperparameter overrides.")
     parser.add_argument("--metric-interval", type=int, default=2, help="Epoch interval for detailed metric logging.")
-    return parser.parse_args()
+    return parser
 
 
 def main() -> None:

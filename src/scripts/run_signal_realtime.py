@@ -17,7 +17,12 @@ from google.auth.exceptions import DefaultCredentialsError
 from sklearn.preprocessing import StandardScaler
 
 from src.config_trading import (
+    DEFAULT_BILSTM_MODEL_DIR_1H,
+    DEFAULT_CNN_LSTM_MODEL_DIR_1H,
     DEFAULT_DIR_MODEL_DIR_1H,
+    DEFAULT_DIR_MODEL_WEIGHTS_1H,
+    DEFAULT_DIR_MODELS_1H,
+    DEFAULT_GRU_MODEL_DIR_1H,
     DEFAULT_LSTM_MODEL_DIR_1H,
     DEFAULT_P_UP_MIN,
     DEFAULT_REG_MODEL_DIR_1H,
@@ -28,6 +33,11 @@ from src.config_trading import (
     OPTUNA_REG_MODEL_DIR_1H,
     OPTUNA_RET_MIN_1H,
 )
+from src.trading.direction_config import (
+    direction_configs_to_weight_map,
+    log_direction_model_configs,
+    resolve_direction_model_configs,
+)
 from src.trading.signals import (
     PreparedData,
     compute_signal_for_index,
@@ -36,7 +46,6 @@ from src.trading.signals import (
     populate_sequence_cache_from_prepared,
     prepare_data_for_signals,
 )
-from src.trading.ensembles import parse_weight_spec
 from src.utils import cloud_io
 
 DEFAULT_REG_MODEL_DIR = DEFAULT_REG_MODEL_DIR_1H
@@ -68,6 +77,9 @@ LOG_COLUMNS = [
     "p_up",
     "p_up_xgb",
     "p_up_lstm",
+    "p_up_bilstm",
+    "p_up_gru",
+    "p_up_cnn_lstm",
     "p_up_transformer",
     "p_up_meta",
     "ret_pred",
@@ -267,6 +279,7 @@ def _prepared_data_from_npz(dataset_path: str) -> PreparedData:
         X_all_ordered=X_all_ordered,
         scaler=scaler,
         feature_names=feature_names_list,
+        volatility_columns=[],
     )
 
 
@@ -301,7 +314,7 @@ def _ensure_model_feature_coverage(prepared: PreparedData, models: Dict[str, Any
     if dir_feature_names:
         required_columns.extend(dir_feature_names)
 
-    for key in ("dir_lstm", "dir_transformer"):
+    for key in ("dir_lstm", "dir_bilstm", "dir_gru", "dir_cnn_lstm", "dir_transformer", "dir_transformer_large"):
         model_info = models.get(key) or {}
         feature_names = model_info.get("feature_names")
         if feature_names:
@@ -339,6 +352,36 @@ def _ensure_model_feature_coverage(prepared: PreparedData, models: Dict[str, Any
         + "\n",
     )
     sys.stderr.flush()
+
+
+def _build_direction_config_bundle(
+    *,
+    config_json_path: Optional[str],
+    weight_spec: Optional[str],
+    dir_model_dir: Optional[str],
+    lstm_model_dir: Optional[str],
+    bilstm_model_dir: Optional[str],
+    gru_model_dir: Optional[str],
+    cnn_lstm_model_dir: Optional[str],
+    transformer_model_dir: Optional[str],
+) -> tuple[List[Dict[str, Any]], Dict[str, float]]:
+    overrides = {
+        "xgb": os.path.join(dir_model_dir, "xgb_dir1h_model.json") if dir_model_dir else None,
+        "lstm": lstm_model_dir,
+        "bilstm": bilstm_model_dir,
+        "gru": gru_model_dir,
+        "cnn_lstm": cnn_lstm_model_dir,
+        "transformer": transformer_model_dir,
+    }
+    configs = resolve_direction_model_configs(
+        DEFAULT_DIR_MODELS_1H,
+        config_json_path=config_json_path,
+        weight_spec=weight_spec,
+        path_overrides=overrides,
+    )
+    log_direction_model_configs(configs, label="[run_signal_realtime] direction models")
+    weight_map = direction_configs_to_weight_map(configs)
+    return configs, weight_map
 
 
 def _load_feature_config_for_4h(dataset_path: str) -> tuple[List[str], np.ndarray, np.ndarray]:
@@ -384,6 +427,24 @@ def _parse_args() -> argparse.Namespace:
         help="Directory containing regression model JSON (xgb_ret1h_model.json).",
     )
     parser.add_argument(
+        "--bilstm-model-dir",
+        type=str,
+        default=DEFAULT_BILSTM_MODEL_DIR_1H,
+        help="Optional directory containing a bidirectional LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--gru-model-dir",
+        type=str,
+        default=DEFAULT_GRU_MODEL_DIR_1H,
+        help="Optional directory containing a GRU direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--cnn-lstm-model-dir",
+        type=str,
+        default=DEFAULT_CNN_LSTM_MODEL_DIR_1H,
+        help="Optional directory containing a CNN-LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
         "--dir-model-dir",
         type=str,
         default=os.environ.get("DIR_MODEL_DIR_1H", DEFAULT_DIR_MODEL_DIR),
@@ -402,9 +463,15 @@ def _parse_args() -> argparse.Namespace:
         help="Optional directory containing a transformer direction model (model.pt, summary.json).",
     )
     parser.add_argument(
-        "--dir-model-weights",
+        "--dir-model-config-json",
         type=str,
         default=None,
+        help="Optional JSON file describing direction-model entries (type/path/weight list).",
+    )
+    parser.add_argument(
+        "--dir-model-weights",
+        type=str,
+        default=DEFAULT_DIR_MODEL_WEIGHTS_1H,
         help="Optional comma-separated weights for direction models (e.g. transformer:2,lstm:1,xgb:1).",
     )
     parser.add_argument(
@@ -723,10 +790,19 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
             descriptor="meta ensemble config",
         )
         args.dataset_path_4h = _resolve_input_artifact(args.dataset_path_4h, stack)
+        args.dir_model_config_json = _resolve_input_artifact(
+            getattr(args, "dir_model_config_json", None),
+            stack,
+            required=False,
+            descriptor="direction model config",
+        )
 
         args.reg_model_dir = _materialize_directory(args.reg_model_dir, stack, "reg_model_dir")
         args.dir_model_dir = _materialize_directory(args.dir_model_dir, stack, "dir_model_dir")
         args.lstm_model_dir = _materialize_directory(args.lstm_model_dir, stack, "lstm_model_dir")
+        args.bilstm_model_dir = _materialize_directory(args.bilstm_model_dir, stack, "bilstm_model_dir")
+        args.gru_model_dir = _materialize_directory(args.gru_model_dir, stack, "gru_model_dir")
+        args.cnn_lstm_model_dir = _materialize_directory(args.cnn_lstm_model_dir, stack, "cnn_lstm_model_dir")
         args.transformer_dir_model = _materialize_directory(
             args.transformer_dir_model,
             stack,
@@ -745,7 +821,20 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
         prepared: PreparedData = _prepare_data(args)
         if getattr(args, "_offline_dataset", False):
             args.lstm_model_dir = None
+            args.bilstm_model_dir = None
+            args.gru_model_dir = None
             args.transformer_dir_model = None
+
+        direction_configs, dir_weight_map = _build_direction_config_bundle(
+            config_json_path=args.dir_model_config_json,
+            weight_spec=(args.dir_model_weights or None),
+            dir_model_dir=args.dir_model_dir,
+            lstm_model_dir=args.lstm_model_dir,
+            bilstm_model_dir=args.bilstm_model_dir,
+            gru_model_dir=args.gru_model_dir,
+            cnn_lstm_model_dir=args.cnn_lstm_model_dir,
+            transformer_model_dir=args.transformer_dir_model,
+        )
 
         if args.ts is None:
             index = len(prepared.df_all) - 1
@@ -763,15 +852,9 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
             close_value = float(prepared.df_all["close"].iloc[index])
 
         reg_model_path = os.path.join(args.reg_model_dir, "xgb_ret1h_model.json")
-        dir_model_path: Optional[str] = None
-        if args.dir_model_dir:
-            dir_model_path = os.path.join(args.dir_model_dir, "xgb_dir1h_model.json")
-
         models = load_models(
             reg_model_path=reg_model_path,
-            dir_model_path=dir_model_path,
-            lstm_model_dir=args.lstm_model_dir,
-            transformer_model_dir=args.transformer_dir_model,
+            direction_model_configs=direction_configs,
             device=args.lstm_device,
         )
 
@@ -779,17 +862,20 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
 
         populate_sequence_cache_from_prepared(prepared, models)
 
-        dir_model_weights = None
-        if args.dir_model_weights:
-            dir_model_weights = parse_weight_spec(args.dir_model_weights)
-
         if args.seq_len is not None:
             if len(prepared.df_all) < args.seq_len:
                 raise RuntimeError(
                     f"Prepared dataset has insufficient rows ({len(prepared.df_all)}) for seq-len={args.seq_len}.",
                 )
 
-            for key in ("dir_lstm", "dir_transformer"):
+            for key in (
+                "dir_lstm",
+                "dir_bilstm",
+                "dir_gru",
+                "dir_cnn_lstm",
+                "dir_transformer",
+                "dir_transformer_large",
+            ):
                 model_info = models.get(key)
                 if model_info is None:
                     continue
@@ -809,7 +895,7 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
             models=models,
             p_up_min=args.p_up_min,
             ret_min=args.ret_min,
-            dir_model_weights=dir_model_weights,
+            dir_model_weights=dir_weight_map,
         )
 
         sig["thresholds"] = {
@@ -956,6 +1042,8 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
             for optional_key in (
                 "p_up_xgb",
                 "p_up_lstm",
+                "p_up_bilstm",
+                "p_up_gru",
                 "p_up_transformer",
                 "p_up_meta",
                 "signal_meta",
@@ -993,6 +1081,8 @@ def run_signal_realtime(args: argparse.Namespace) -> None:
             "p_up": sig.get("p_up", ""),
             "p_up_xgb": sig.get("p_up_xgb", ""),
             "p_up_lstm": sig.get("p_up_lstm", ""),
+            "p_up_bilstm": sig.get("p_up_bilstm", ""),
+            "p_up_gru": sig.get("p_up_gru", ""),
             "p_up_transformer": sig.get("p_up_transformer", ""),
             "p_up_meta": sig.get("p_up_meta", ""),
             "ret_pred": sig.get("ret_pred", ""),

@@ -19,18 +19,22 @@ from src.data.dataset_preparation import (
     make_features_and_target,
     time_series_train_val_test_split,
 )
-from src.data.onchain_loader import fetch_onchain_metrics, load_onchain_cached, OnchainAPIError
-from src.data.targets_multi_horizon import add_multi_horizon_targets
+from src.data.targets_multi_horizon import (
+    RANGE_TARGET_HORIZONS,
+    add_multi_horizon_targets,
+)
+from src.trading.volatility import (
+    DEFAULT_REALIZED_WINDOWS,
+    add_volatility_columns,
+    split_volatility_arrays,
+)
+from src.scripts.build_training_dataset import _apply_funding_rate_features
 
 
 DEFAULT_HORIZONS: List[int] = [1, 4, 8, 12]
 PROCESSED_PATHS = [
-    Path("data/processed/macro/hourly_features.parquet"),
-    Path("data/processed/onchain/hourly_features.parquet"),
+    Path("data/processed/technical/hourly_features.parquet"),
     Path("data/processed/funding/hourly_features.parquet"),
-    Path("data/processed/coinapi/market_hourly_features.parquet"),
-    Path("data/processed/coinapi/funding_hourly_features.parquet"),
-    Path("data/processed/cryptoquant/hourly_features.parquet"),
 ]
 
 CORE_MODEL_FEATURES = [
@@ -41,105 +45,146 @@ CORE_MODEL_FEATURES = [
     "volume",
     "quote_volume",
     "num_trades",
-    "fut_open",
-    "fut_high",
-    "fut_low",
-    "fut_close",
+    "taker_buy_base_volume",
+    "taker_buy_quote_volume",
     "ma_close_7h",
     "ma_close_24h",
     "ma_ratio_7_24",
     "vol_24h",
-    "funding_rate",
-    "onchain_active_addresses",
-    "onchain_hash_rate",
-    "onchain_market_cap",
-    "onchain_transaction_count",
-    "macro_DXY_open",
-    "macro_DXY_high",
-    "macro_DXY_low",
-    "macro_DXY_close",
-    "macro_DXY_volume",
-    "macro_DXY_close_realized_vol_24h",
-    "macro_US10Y_yield",
-    "macro_VIX_open",
-    "macro_VIX_high",
-    "macro_VIX_low",
-    "macro_VIX_close",
-    "macro_VIX_volume",
-    "macro_VIX_close_realized_vol_24h",
-    "macro_DXY_close_pct_change",
-    "macro_DXY_volume_pct_change",
-    "macro_VIX_close_pct_change",
-    "macro_VIX_volume_pct_change",
     "close_delta_1h",
     "close_pct_change_1h",
     "volume_delta_1h",
     "volume_pct_change_1h",
-    "fut_close_delta_1h",
-    "fut_close_pct_change_1h",
     "close_zscore_7h",
     "close_zscore_24h",
-    "fut_close_zscore_7h",
+    "volatility_realized_24h",
+    "volatility_realized_72h",
+    "volatility_ewm_24h",
+    "volatility_ewm_72h",
+    "volatility_garch_like",
+    "funding_rate_zscore_24h",
+    "cvd_ratio_6h",
+    "cvd_zscore_6h",
+    "liquidity_range_ratio_6h",
+    "liquidity_close_position_ratio",
 ]
 
-ZERO_VARIANCE_CANDIDATES = {
-    "fut_volume",
+ZERO_VARIANCE_CANDIDATES: set[str] = set()
+
+EXCLUDED_FEATURES: set[str] = set()
+
+EXTERNAL_SOURCE_PREFIXES = (
+    "cq_",
+    "funding_",
+    "macro_",
+    "onchain_",
+    "orderbook_",
+    "depth_",
+    "lob_",
+    "slippage_",
+)
+EXTERNAL_SOURCE_COLUMNS = {
+    "funding_rate",
+    "funding_rate_annualized",
     "open_interest",
-    "macro_DXY_close_realized_vol_1h",
-    "macro_VIX_close_realized_vol_1h",
+}
+PRESERVED_EXTERNAL_COLUMNS = {
+    "funding_rate_zscore_24h",
 }
 
-EXCLUDED_FEATURES = {
+FUTURES_FEATURE_PREFIXES = (
+    "fut_",
+)
+
+FUTURES_FEATURE_COLUMNS = {
+    "fut_open",
+    "fut_high",
+    "fut_low",
+    "fut_close",
     "fut_volume",
     "open_interest",
-    "fut_volume_delta_1h",
-    "fut_volume_pct_change_1h",
-    "cq_daily_fallback_active",
-    "cq_daily_fallback_complete",
+    "funding_rate",
+    "funding_rate_annualized",
 }
 
+RET_FEATURE_COLUMNS = (
+    "ret_1h",
+    "ret_4h",
+    "ret_8h",
+    "ret_12h",
+)
 
-def _fill_cryptoquant_features(df: pd.DataFrame) -> pd.DataFrame:
-    cq_cols = [col for col in df.columns if col.startswith("cq_")]
-    if not cq_cols:
-        return df
-    filled = df[cq_cols].ffill().bfill().fillna(0.0)
-    df.loc[:, cq_cols] = filled
-    print(f"Forward-filled {len(cq_cols)} cq_* features (ffill/bfill/zero).")
+TECHNICAL_PREFIXES = (
+    "candle_",
+    "close_lag_",
+    "interaction_",
+    "log_",
+    "mom_",
+    "pattern_",
+    "poly2_",
+    "price_",
+    "range_",
+    "return_",
+    "roll_",
+    "time_",
+    "trend_",
+    "trades_",
+    "volume_",
+    "vol_",
+)
+
+
+def _is_futures_feature(column: str) -> bool:
+    return column in FUTURES_FEATURE_COLUMNS or any(
+        column.startswith(prefix) for prefix in FUTURES_FEATURE_PREFIXES
+    )
+
+
+def _append_futures_feature_columns(df: pd.DataFrame, allowed: list[str]) -> list[str]:
+    futures_columns = [column for column in df.columns if _is_futures_feature(column)]
+    for column in sorted(futures_columns):
+        if column not in allowed:
+            allowed.append(column)
+    return allowed
+
+
+def _append_return_feature_columns(df: pd.DataFrame, allowed: list[str]) -> list[str]:
+    ret_columns = [column for column in df.columns if column in RET_FEATURE_COLUMNS]
+    for column in sorted(ret_columns):
+        if column not in allowed:
+            allowed.append(column)
+    return allowed
+
+
+def _drop_external_source_columns(df: pd.DataFrame) -> pd.DataFrame:
+    to_remove = [
+        column
+        for column in df.columns
+        if column not in PRESERVED_EXTERNAL_COLUMNS
+        and not _is_futures_feature(column)
+        and (
+            column in EXTERNAL_SOURCE_COLUMNS
+            or any(column.startswith(prefix) for prefix in EXTERNAL_SOURCE_PREFIXES)
+        )
+    ]
+    if to_remove:
+        preview = ", ".join(sorted(to_remove)[:5])
+        suffix = "..." if len(to_remove) > 5 else ""
+        print(f"Dropped {len(to_remove)} non-Binance feature columns: {preview}{suffix}")
+        df = df.drop(columns=sorted(set(to_remove)))
     return df
 
 
-def _drop_coinapi_columns(df: pd.DataFrame) -> pd.DataFrame:
-    coinapi_cols = [col for col in df.columns if col.startswith("coinapi_")]
-    if coinapi_cols:
-        df = df.drop(columns=coinapi_cols)
-        preview = ", ".join(sorted(coinapi_cols)[:5])
-        suffix = "..." if len(coinapi_cols) > 5 else ""
-        print(f"Dropped {len(coinapi_cols)} coinapi_* features: {preview}{suffix}")
-    return df
-
-
-def _reconcile_funding_rate_features(df: pd.DataFrame) -> pd.DataFrame:
-    binance_rate_col = "funding_BTCUSDT_funding_rate"
-    curated_rate_col = "funding_rate"
-    if binance_rate_col in df.columns:
-        if curated_rate_col in df.columns:
-            df[curated_rate_col] = df[binance_rate_col].combine_first(df[curated_rate_col])
-        else:
-            df[curated_rate_col] = df[binance_rate_col]
-
-        annualized_binance = "funding_BTCUSDT_funding_rate_annualized"
-        annualized_curated = "funding_rate_annualized"
-        if annualized_binance in df.columns:
-            if annualized_curated in df.columns:
-                df[annualized_curated] = df[annualized_binance].combine_first(df[annualized_curated])
-            else:
-                df[annualized_curated] = df[annualized_binance]
-
-        drop_candidates = [binance_rate_col, annualized_binance]
-        df = df.drop(columns=[col for col in drop_candidates if col in df.columns])
-
-    return df
+def _append_technical_feature_columns(df: pd.DataFrame, allowed: list[str]) -> list[str]:
+    technical_columns = [
+        column
+        for column in df.columns
+        if any(column.startswith(prefix) for prefix in TECHNICAL_PREFIXES)
+    ]
+    for column in sorted(technical_columns):
+        if column not in allowed:
+            allowed.append(column)
+    return allowed
 
 
 def _drop_constant_features(df: pd.DataFrame, candidates: Sequence[str]) -> tuple[pd.DataFrame, list[str]]:
@@ -192,6 +237,19 @@ def _enforce_feature_coverage(df: pd.DataFrame, required: Sequence[str]) -> pd.D
     return df.loc[coverage].reset_index(drop=True)
 
 
+def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    prev_close = close.shift(1)
+    ranges = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    )
+    return ranges.max(axis=1, skipna=True)
+
+
 def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
     result = df.copy()
 
@@ -204,8 +262,8 @@ def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
     for base in ("close", "volume", "fut_close", "fut_volume"):
         if base not in result.columns:
             continue
-        result[f"{base}_delta_1h"] = _safe_diff(result[base])
-        result[f"{base}_pct_change_1h"] = _safe_pct(result[base])
+        result[f"{base}_delta_1h"] = _safe_diff(result[base].astype(float))
+        result[f"{base}_pct_change_1h"] = _safe_pct(result[base].astype(float))
 
     if "close" in result.columns:
         std_7 = result["close"].rolling(window=7, min_periods=3).std(ddof=0)
@@ -222,22 +280,43 @@ def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
         rolling_std = result["fut_close"].rolling(window=7, min_periods=3).std(ddof=0).replace(0.0, np.nan)
         result["fut_close_zscore_7h"] = ((result["fut_close"] - rolling_mean) / rolling_std).fillna(0.0)
 
+    required_cvd = {"volume", "taker_buy_base_volume"}
+    if not required_cvd.issubset(result.columns):
+        missing = ", ".join(sorted(required_cvd - set(result.columns)))
+        print(f"Skipping CVD features; missing columns: {missing}.")
+    else:
+        total_volume = result["volume"].astype(float)
+        taker_buy = result["taker_buy_base_volume"].astype(float)
+        taker_sell = (total_volume - taker_buy).clip(lower=0.0)
+        cvd_raw = taker_buy - taker_sell
+        cvd_window = cvd_raw.rolling(window=6, min_periods=2).sum()
+        vol_window = total_volume.rolling(window=6, min_periods=2).sum().replace(0.0, np.nan)
+        ratio = (cvd_window / vol_window).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        result["cvd_ratio_6h"] = ratio
+        cvd_mean = cvd_window.rolling(window=24, min_periods=6).mean()
+        cvd_std = cvd_window.rolling(window=24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
+        zscore = ((cvd_window - cvd_mean) / cvd_std).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        result["cvd_zscore_6h"] = zscore.clip(-10.0, 10.0)
+
+    required_liquidity = {"high", "low", "close"}
+    if not required_liquidity.issubset(result.columns):
+        missing = ", ".join(sorted(required_liquidity - set(result.columns)))
+        raise ValueError(f"Cannot compute liquidity features; missing OHLC columns: {missing}.")
+    true_range = _true_range(result["high"].astype(float), result["low"].astype(float), result["close"].astype(float))
+    atr_6h = true_range.rolling(window=6, min_periods=2).mean().replace(0.0, np.nan)
+    range_span = (result["high"].astype(float) - result["low"].astype(float)).abs()
+    liquidity_ratio = (range_span / atr_6h).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    result["liquidity_range_ratio_6h"] = liquidity_ratio.clip(0.0, 10.0)
+
+    mid_price = (result["high"].astype(float) + result["low"].astype(float)) / 2.0
+    half_range = (result["high"].astype(float) - result["low"].astype(float)).replace(0.0, np.nan) / 2.0
+    close_position = ((result["close"].astype(float) - mid_price) / half_range)
+    close_position = close_position.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+    result["liquidity_close_position_ratio"] = close_position
+
     return result
 
 META_PATH = Path("artifacts/datasets/btc_features_multi_horizon_meta.json")
-
-
-def _add_cryptoquant_flags(df: pd.DataFrame) -> pd.DataFrame:
-    cq_columns = [col for col in df.columns if col.startswith("cq_daily_")]
-    if not cq_columns:
-        df["cq_daily_fallback_active"] = 0
-        df["cq_daily_fallback_complete"] = 0
-        return df
-
-    coverage = df[cq_columns].notna()
-    df["cq_daily_fallback_active"] = coverage.any(axis=1).astype(int)
-    df["cq_daily_fallback_complete"] = coverage.all(axis=1).astype(int)
-    return df
 
 
 def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.DataFrame:
@@ -287,7 +366,7 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
             print(f"No new columns merged from {path}; check schema overlap.")
 
     augmented = augmented.sort_values("ts").drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
-    return _add_cryptoquant_flags(augmented)
+    return augmented
 
 
 def _split_array(values: np.ndarray, n_train: int, n_val: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -302,9 +381,6 @@ def build_multi_horizon_dataset(
     horizons: Iterable[int] = DEFAULT_HORIZONS,
     train_frac: float = 0.7,
     val_frac: float = 0.15,
-    onchain_path: Optional[str] = None,
-    fetch_onchain: bool = False,
-    onchain_interval: str = "1h",
     features_path: Optional[str] = None,
     output_path: Optional[str] = None,
 ) -> str:
@@ -341,11 +417,14 @@ def build_multi_horizon_dataset(
 
     df = df.sort_values("ts").reset_index(drop=True)
     df = _merge_processed_features(df, PROCESSED_PATHS)
-    df = _reconcile_funding_rate_features(df)
-    df = _fill_cryptoquant_features(df)
+    df = _apply_funding_rate_features(df)
+    df = _drop_external_source_columns(df)
     df = _augment_price_features(df)
+    df, volatility_columns = add_volatility_columns(
+        df,
+        realized_windows=DEFAULT_REALIZED_WINDOWS,
+    )
     df, _ = _drop_constant_features(df, ZERO_VARIANCE_CANDIDATES)
-    df = _drop_coinapi_columns(df)
     df = _drop_excluded_features(df)
     df, dup_after_merge, gap_after_merge = enforce_unique_hourly_index(
         df,
@@ -361,32 +440,27 @@ def build_multi_horizon_dataset(
             "downstream consumers should handle upstream gaps."
         )
 
-    df_onchain = None
-    if fetch_onchain:
-        start_ts = df["ts"].iloc[0]
-        end_ts = df["ts"].iloc[-1]
-        try:
-            df_onchain = fetch_onchain_metrics(start_ts=start_ts, end_ts=end_ts, interval=onchain_interval)
-        except OnchainAPIError as exc:
-            if onchain_path:
-                print(f"Warning: API fetch failed ({exc}); falling back to cached CSV {onchain_path}.")
-            else:
-                raise
-
-    if df_onchain is None and onchain_path:
-        df_onchain = load_onchain_cached(onchain_path)
-
-    if df_onchain is not None:
-        df_onchain = df_onchain.set_index("ts").reindex(df["ts"]).ffill().bfill().reset_index()
-        metric_cols = [col for col in df_onchain.columns if col != "ts"]
-        print(f"Merging on-chain metrics: {metric_cols}")
-        df = df.merge(df_onchain, on="ts", how="left")
     df_targets = add_multi_horizon_targets(df, horizons=horizons, price_col="close")
 
     ret_cols = [f"ret_{h}h" for h in horizons]
     df_targets = df_targets.dropna(subset=ret_cols)
 
+    range_cols: list[str] = []
+    for horizon in RANGE_TARGET_HORIZONS:
+        for suffix in ("max", "min"):
+            column = f"ret_{suffix}_{horizon}h"
+            if column in df_targets.columns and horizon in horizons:
+                range_cols.append(column)
+    if range_cols:
+        df_targets = df_targets.dropna(subset=range_cols)
+
     allowed_features = [feature for feature in CORE_MODEL_FEATURES if feature in df_targets.columns]
+    for column in volatility_columns:
+        if column in df_targets.columns and column not in allowed_features:
+            allowed_features.append(column)
+    allowed_features = _append_futures_feature_columns(df_targets, allowed_features)
+    allowed_features = _append_return_feature_columns(df_targets, allowed_features)
+    allowed_features = _append_technical_feature_columns(df_targets, allowed_features)
     df_targets = _enforce_feature_coverage(df_targets, allowed_features)
     X, y_ret1h = make_features_and_target(
         df_targets,
@@ -404,6 +478,16 @@ def build_multi_horizon_dataset(
 
     data_ret = {h: df_targets[f"ret_{h}h"].to_numpy(dtype=np.float32) for h in horizons if h != 1}
     data_dir = {h: df_targets[f"dir_{h}h"].to_numpy(dtype=np.int8) for h in horizons}
+    data_range: dict[tuple[int, str], np.ndarray] = {}
+    for horizon in RANGE_TARGET_HORIZONS:
+        if horizon not in horizons:
+            continue
+        max_col = f"ret_max_{horizon}h"
+        min_col = f"ret_min_{horizon}h"
+        if max_col in df_targets.columns:
+            data_range[(horizon, "max")] = df_targets[max_col].to_numpy(dtype=np.float32)
+        if min_col in df_targets.columns:
+            data_range[(horizon, "min")] = df_targets[min_col].to_numpy(dtype=np.float32)
     ts_values = df_targets["ts"].to_numpy(dtype="datetime64[ns]")
 
     ts_train = ts_values[:n_train]
@@ -412,6 +496,13 @@ def build_multi_horizon_dataset(
 
     if output_path is None:
         output_path = os.path.join(output_dir, "btc_features_multi_horizon_splits.npz")
+
+    volatility_arrays = split_volatility_arrays(
+        df_targets,
+        volatility_columns,
+        n_train=n_train,
+        n_val=n_val,
+    )
 
     save_kwargs = {
         "X_train": splits.X_train,
@@ -428,6 +519,8 @@ def build_multi_horizon_dataset(
         "direction_threshold": np.array([0.0], dtype=np.float32),
     }
 
+    save_kwargs.update(volatility_arrays)
+
     for horizon, values in data_ret.items():
         train, val, test = _split_array(values, n_train, n_val)
         save_kwargs[f"y_ret{horizon}h_train"] = train
@@ -439,6 +532,16 @@ def build_multi_horizon_dataset(
         save_kwargs[f"y_dir{horizon}h_train"] = train
         save_kwargs[f"y_dir{horizon}h_val"] = val
         save_kwargs[f"y_dir{horizon}h_test"] = test
+
+    for (horizon, kind), values in data_range.items():
+        train, val, test = _split_array(values, n_train, n_val)
+        if kind == "max":
+            prefix = "y_retmax"
+        else:
+            prefix = "y_retmin"
+        save_kwargs[f"{prefix}{horizon}h_train"] = train
+        save_kwargs[f"{prefix}{horizon}h_val"] = val
+        save_kwargs[f"{prefix}{horizon}h_test"] = test
 
     np.savez_compressed(output_path, **save_kwargs)
     print(f"Saved multi-horizon dataset splits to {output_path}")
@@ -463,6 +566,10 @@ def build_multi_horizon_dataset(
             "train": _describe_split(ts_train),
             "val": _describe_split(ts_val),
             "test": _describe_split(ts_test),
+        },
+        "volatility": {
+            "columns": volatility_columns,
+            "realized_windows": list(DEFAULT_REALIZED_WINDOWS),
         },
     }
     META_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -510,23 +617,6 @@ def main() -> None:
         help="Fraction of samples allocated to the validation split (default: 0.15).",
     )
     parser.add_argument(
-        "--onchain-path",
-        type=str,
-        default=None,
-        help="Optional CSV containing cached on-chain metrics with ts column.",
-    )
-    parser.add_argument(
-        "--fetch-onchain",
-        action="store_true",
-        help="Fetch on-chain metrics from the configured API instead of relying solely on cache.",
-    )
-    parser.add_argument(
-        "--onchain-interval",
-        type=str,
-        default="1h",
-        help="Interval for on-chain metrics when fetched via API (default: 1h).",
-    )
-    parser.add_argument(
         "--features-path",
         type=str,
         default=None,
@@ -539,9 +629,6 @@ def main() -> None:
         horizons=args.horizons,
         train_frac=args.train_frac,
         val_frac=args.val_frac,
-        onchain_path=args.onchain_path,
-        fetch_onchain=args.fetch_onchain,
-        onchain_interval=args.onchain_interval,
         features_path=args.features_path,
         output_path=args.output_path,
     )

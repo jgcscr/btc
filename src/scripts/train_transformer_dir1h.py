@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 from dataclasses import asdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 import torch
@@ -14,6 +14,35 @@ from torch.optim import AdamW
 from src.models.transformer_classifier import TransformerDirectionClassifier
 from src.training.transformer_dataset import prepare_transformer_data, save_scaler
 from src.training.transformer_training import Metrics, evaluate, resolve_device, train_epoch
+
+
+TRANSFORMER_PRESETS: Dict[str, Dict[str, Any]] = {
+    "base": {
+        "seq_len": 24,
+        "hidden_dim": 128,
+        "num_heads": 4,
+        "ffn_dim": 256,
+        "num_layers": 2,
+        "dropout": 0.1,
+    },
+    "large": {
+        "seq_len": 48,
+        "hidden_dim": 192,
+        "num_heads": 6,
+        "ffn_dim": 384,
+        "num_layers": 4,
+        "dropout": 0.15,
+    },
+}
+
+_PRESET_PARAMS: Sequence[str] = (
+    "seq_len",
+    "hidden_dim",
+    "num_heads",
+    "ffn_dim",
+    "num_layers",
+    "dropout",
+)
 
 
 def str2bool(value: str) -> bool:
@@ -32,25 +61,52 @@ def load_params_from_json(json_path: str) -> Dict[str, Any]:
         return json.load(fp)
 
 
-def _parse_args() -> argparse.Namespace:
+def build_parser(
+    *,
+    default_output_dir: str = "artifacts/models/transformer_dir1h_v1",
+    preset_default: str = "base",
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a transformer-based direction classifier for 1h BTC signals.")
     parser.add_argument("--dataset-path", type=str, default="artifacts/datasets/btc_features_1h_direction_splits.npz")
-    parser.add_argument("--seq-len", type=int, default=24)
-    parser.add_argument("--hidden-dim", type=int, default=128)
-    parser.add_argument("--num-heads", type=int, default=4)
-    parser.add_argument("--ffn-dim", type=int, default=256)
-    parser.add_argument("--num-layers", type=int, default=2)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--preset",
+        type=str,
+        choices=sorted(TRANSFORMER_PRESETS.keys()),
+        default=preset_default,
+        help="Preset controlling transformer depth/width (default: base).",
+    )
+    parser.add_argument("--seq-len", type=int, default=None, help="Sequence length (default: preset).")
+    parser.add_argument("--hidden-dim", type=int, default=None, help="Transformer hidden size (default: preset).")
+    parser.add_argument("--num-heads", type=int, default=None, help="Multi-head attention heads (default: preset).")
+    parser.add_argument("--ffn-dim", type=int, default=None, help="Feed-forward hidden dim (default: preset).")
+    parser.add_argument("--num-layers", type=int, default=None, help="Transformer layers (default: preset).")
+    parser.add_argument("--dropout", type=float, default=None, help="Dropout prob (default: preset).")
     parser.add_argument("--use-layer-norm", type=str2bool, default=True)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--device", type=str, default=None, help="Optional torch device (e.g. cpu, cuda:0).")
-    parser.add_argument("--output-dir", type=str, default="artifacts/models/transformer_dir1h_v1")
+    parser.add_argument("--output-dir", type=str, default=default_output_dir)
     parser.add_argument("--patience", type=int, default=5, help="Early stopping patience on validation F1 score.")
     parser.add_argument("--params-json", type=str, default=None, help="Optional path to JSON file containing hyperparameter overrides.")
-    return parser.parse_args()
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Optional limit on optimizer steps per epoch (useful for CI smoke tests).",
+    )
+    return parser
+
+
+def parse_args(
+    argv: Optional[Sequence[str]] = None,
+    *,
+    default_output_dir: str = "artifacts/models/transformer_dir1h_v1",
+    preset_default: str = "base",
+) -> argparse.Namespace:
+    parser = build_parser(default_output_dir=default_output_dir, preset_default=preset_default)
+    return parser.parse_args(argv)
 
 
 def _apply_param_overrides(args: argparse.Namespace, overrides: Dict[str, Any]) -> argparse.Namespace:
@@ -59,6 +115,18 @@ def _apply_param_overrides(args: argparse.Namespace, overrides: Dict[str, Any]) 
             setattr(args, key, value)
         else:
             raise ValueError(f"Unknown hyperparameter in JSON overrides: {key}")
+    return args
+
+
+def apply_transformer_preset(args: argparse.Namespace) -> argparse.Namespace:
+    preset_key = getattr(args, "preset", "base")
+    if preset_key not in TRANSFORMER_PRESETS:
+        raise ValueError(f"Unknown transformer preset '{preset_key}'. Choices: {sorted(TRANSFORMER_PRESETS)}")
+
+    defaults = TRANSFORMER_PRESETS[preset_key]
+    for field in _PRESET_PARAMS:
+        if getattr(args, field, None) is None:
+            setattr(args, field, defaults[field])
     return args
 
 
@@ -89,6 +157,10 @@ def train_transformer(args: argparse.Namespace) -> None:
     if args.params_json:
         overrides = load_params_from_json(args.params_json)
         args = _apply_param_overrides(args, overrides)
+    args = apply_transformer_preset(args)
+
+    if args.max_steps is not None and args.max_steps <= 0:
+        raise ValueError("--max-steps must be positive when provided.")
 
     device = resolve_device(args.device)
     print(f"Using device: {device}")
@@ -110,7 +182,14 @@ def train_transformer(args: argparse.Namespace) -> None:
     patience_counter = 0
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_epoch(model, train_loader, device, criterion, optimizer)
+        train_loss = train_epoch(
+            model,
+            train_loader,
+            device,
+            criterion,
+            optimizer,
+            max_steps=args.max_steps,
+        )
         val_metrics = evaluate(model, val_loader, device, criterion)
 
         history.append(
@@ -182,6 +261,7 @@ def train_transformer(args: argparse.Namespace) -> None:
             "dropout": args.dropout,
             "use_layer_norm": args.use_layer_norm,
             "seq_len": args.seq_len,
+            "preset": args.preset,
         },
         model_path,
     )
@@ -191,6 +271,7 @@ def train_transformer(args: argparse.Namespace) -> None:
 
     summary: Dict[str, Any] = {
         "dataset_path": args.dataset_path,
+        "preset": args.preset,
         "seq_len": args.seq_len,
         "hyperparams": {
             "hidden_dim": args.hidden_dim,
@@ -204,6 +285,7 @@ def train_transformer(args: argparse.Namespace) -> None:
             "batch_size": args.batch_size,
             "epochs": args.epochs,
             "patience": args.patience,
+            "max_steps": args.max_steps,
         },
         "feature_names": data_bundle.splits.feature_names,
         "threshold": data_bundle.splits.threshold,
@@ -220,7 +302,7 @@ def train_transformer(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    args = _parse_args()
+    args = parse_args()
     train_transformer(args)
 
 
