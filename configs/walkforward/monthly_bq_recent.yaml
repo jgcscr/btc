@@ -1,0 +1,38 @@
+schedule:
+  name: monthly_bq_recent
+  timezone: UTC
+  start: "2025-02-01T00:00:00Z"
+  end: "2025-12-01T00:00:00Z"
+  train_months: 3
+  val_months: 1
+  test_months: 1
+  step_months: 1
+  max_windows: 12
+
+preprocessing:
+  seq_len: 24
+
+data: {}
+
+models:
+  xgb_ret1h:
+    script: src/scripts/search_xgb_optuna.py
+    strategy: retrain_optuna
+    mode: reg
+    trials: 5
+    timeout_seconds: 900
+    seq_len: 24
+  xgb_dir1h:
+    script: src/scripts/search_xgb_optuna.py
+    strategy: retrain_optuna
+    mode: dir
+    trials: 5
+    timeout_seconds: 900
+    seq_len: 24
+
+backtests:
+  ensemble:
+    script: src/scripts/evaluate_ensemble_signals.py
+    thresholds:
+      p_up_min: 0.5
+      ret_min: 0.0002

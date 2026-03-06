@@ -1,0 +1,36 @@
+targets:
+  - 0.25
+  - 1
+  - 4
+  - 8
+  - 12
+p_up_min: 0.45
+ret_min: 0.0
+# Tighten entry threshold - only trade when very confident
+direction_threshold: 0.85
+# Use automatic thresholding from calibrated data
+auto_direction_threshold: true
+thresholds_json: artifacts/models/calibrated_thresholds_merged.json
+spot_provider: binanceus
+# Enable adaptive thresholds - detect breakouts vs choppy markets
+adaptive_thresholds:
+  enabled: true
+  breakout_score_threshold: 0.75    # Require strong breakout signals
+  chop_score_threshold: 0.4         # Avoid choppy/sideways markets
+  breakout_scale: 0.9
+  chop_scale: 1.1
+  p_up_min_floor: 0.50              # Never go below 50%
+  p_up_min_ceiling: 0.90            # Cap at 90% max
+  ret_min_floor: 0.0
+  ret_min_ceiling: 0.003
+# Enable direction-only fallback - catch reversals automatically
+direction_only_fallback:
+  enabled: true
+  prob_threshold: 0.60              # Allow wider fallback entry
+  max_negative_ev: 0.004            # Exit if losing >0.4%
+  size_factor: 0.3                  # Max 30% position size in fallback
+  stop_take_ratio: 0.02             # Wider SL/TP in fallback
+  cooldown_hours: 2                 # Quick re-entry after reversal
+  ignition_ev_extension: 0.0002
+write_artifacts: false
+disable_monitoring_latest: false

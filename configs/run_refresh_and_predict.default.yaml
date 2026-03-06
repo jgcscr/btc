@@ -1,0 +1,61 @@
+# Default configuration for run_refresh_and_predict.py. Copy this file and tweak values
+# to point the refresh pipeline at alternate data sources or model bundles.
+hours: 360
+# Targets are expressed in hours; sub-hourly entries can use fractional values.
+targets:
+  - 0.25
+  - 1
+  - 4
+  - 8
+  - 12
+p_up_min: 0.45
+ret_min: 0.0
+# experiment: direction-only entry threshold tuned from historical A/B analysis
+direction_threshold: 0.6
+# automatically compute direction_threshold from calibrated p_up_min values
+# when true, the explicit direction_threshold value is ignored
+auto_direction_threshold: false
+thresholds_json: artifacts/models/calibrated_thresholds_merged.json
+data_quality:
+  enabled: false
+  max_staleness_hours: 6.0
+  max_missing_ratio: 0.01
+  max_zero_volume_ratio: 0.2
+  min_rows: 120
+confidence_min: 0.0
+position_size_floor: 0.0
+position_size_cap: 1.0
+spot_provider: binanceus
+write_artifacts: false
+disable_monitoring_latest: false
+# Baseline live weighting; keep simplified weights in shadow-only experiments.
+dir_model_weights: transformer:2.0,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:1.0,cnn_bilstm:1.0,garch_lstm:1.0,xgb:1.0
+trend_ignition:
+  enabled: false
+  model_path: artifacts/models/trend_ignition/xgb_trend_ignition.joblib
+  probability_threshold: 0.6
+  cooldown_hours: 6
+direction_only_fallback:
+  enabled: false
+  prob_threshold: 0.62
+  max_negative_ev: 0.0005
+  size_factor: 0.5
+  stop_take_ratio: 0.01
+  cooldown_hours: 4
+  ignition_ev_extension: 0.0002
+adaptive_thresholds:
+  enabled: false
+  breakout_score_threshold: 0.8
+  chop_score_threshold: 0.3
+  breakout_scale: 0.9
+  chop_scale: 1.1
+  p_up_min_floor: 0.35
+  p_up_min_ceiling: 0.75
+  ret_min_floor: -0.0005
+  ret_min_ceiling: 0.003
+target_range_models:
+  enabled: false
+  model_dir: artifacts/models/target_ranges
+  horizons: [4, 8, 12]
+  override_ratio: 0.01
+  confidence_rmse_scale: 0.01

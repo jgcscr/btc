@@ -1,0 +1,29 @@
+artifacts:
+  technical_summary:
+    path: artifacts/monitoring/technical_summary.json
+    vendor_status:
+      state: healthy
+      reason: "Technical features are generated from Binance spot klines only."
+      manual_override: |
+        python -m data.ingestors.binance_spot_klines
+        python -m data.processed.compute_technical_features
+
+  meta_baseline:
+    path: artifacts/monitoring/meta_baseline.json
+    vendor_status:
+      state: healthy
+      reason: "Refreshed by run_refresh_and_predict using Binance-only technical features."
+      manual_override: |
+        python -m src.scripts.run_refresh_and_predict \
+          --config configs/run_refresh_and_predict.default.yaml \
+          --write-artifacts
+
+  trade_ready_summary:
+    path: artifacts/monitoring/trade_ready_summary.json
+    vendor_status:
+      state: healthy
+      reason: "Predictions generated from Binance-only data flow."
+      manual_override: |
+        python -m src.scripts.run_refresh_and_predict \
+          --config configs/run_refresh_and_predict.default.yaml \
+          --write-artifacts

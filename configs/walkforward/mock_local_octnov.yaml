@@ -1,0 +1,40 @@
+schedule:
+  name: mock_local_octnov
+  timezone: UTC
+  start: "2025-11-07T00:00:00Z"
+  end: "2025-12-01T00:00:00Z"
+  train_days: 21
+  val_days: 7
+  test_days: 7
+  step_days: 7
+  max_windows: 4
+
+preprocessing:
+  seq_len: 24
+
+data:
+  features_path: data/mock_features_1h_full.csv
+
+models:
+  xgb_ret1h:
+    strategy: retrain_optuna
+    script: src/scripts/search_xgb_optuna.py
+    mode: reg
+    n_trials: 3
+    timeout_seconds: 120
+  xgb_dir1h:
+    strategy: retrain_optuna
+    script: src/scripts/search_xgb_optuna.py
+    mode: dir
+    n_trials: 3
+    timeout_seconds: 120
+
+backtests:
+  ensemble_h1:
+    script: src/scripts/evaluate_ensemble_signals.py
+    thresholds:
+      p_up_min: 0.45
+      ret_min: 0.00030
+    volatility_guard:
+      metric: volatility_realized_24h
+      ceiling: 0.032
