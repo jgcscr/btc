@@ -71,7 +71,10 @@ CORE_MODEL_FEATURES = [
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
 
-EXCLUDED_FEATURES: set[str] = set()
+EXCLUDED_FEATURES: set[str] = {
+    "funding_rate_zscore_24h",
+    "ret_1h",
+}
 
 EXTERNAL_SOURCE_PREFIXES = (
     "cq_",

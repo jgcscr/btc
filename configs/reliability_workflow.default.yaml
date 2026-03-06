@@ -1,0 +1,80 @@
+cv:
+  folds: 4
+  mode: expanding
+  train_size: 2400
+  val_size: 400
+  test_size: 400
+  gap: 24
+
+search:
+  horizons: [1, 4, 8, 12]
+  n_trials: 25
+  timeout: null
+  max_drawdown: -0.08
+  min_trades: 10
+  meta_weight_threshold: 0.5
+  paper_live_config: configs/run_refresh_and_predict.default.yaml
+  # true runs stage-7 paper live in dry mode only
+  paper_live_dry_run: false
+
+monitoring:
+  horizons: ["1h", "4h", "8h", "12h"]
+  triggers:
+    baseline_window: 120
+    recent_window: 24
+    min_samples: 150
+    max_abs_prob_drift: 0.08
+    max_signal_rate_drift: 0.25
+
+cadence:
+  monthly_retrain_day: 1
+  weekly_recalibration_weekday: mon
+
+quality:
+  enabled: false
+  # Build canonical evaluation slice consumed by all quality/calibration/tuning checks.
+  build_labeled_dataset: true
+  backtest_csv: artifacts/backtests/latest/backtest_signals.csv
+  prefer_backtest: true
+  lookback_rows: 2000
+  lookback_hours: 0
+  min_labeled_rows: 200
+  fold_size: 12
+  walkforward_horizon: 1
+  walkforward_dataset: artifacts/datasets/btc_features_1h_direction_splits.npz
+  walkforward_y_key: y
+  quality_input: artifacts/monitoring/labeled_backtest_1h.csv
+  # Optional incumbent baseline; if provided, promotion gate will run.
+  incumbent_quality_path: null
+  min_auc_delta: 0.002
+  max_brier_increase: 0.0
+  max_ece_increase: 0.01
+  min_trade_count: 10
+  trade_count_key: trade_count
+  rolling_ab:
+    enabled: false
+    baseline_input: null
+    candidate_input: null
+    window_size: 168
+    step_size: 24
+    min_window_trades: 5
+  joint_threshold_tuning:
+    enabled: true
+    p_up_grid: "0.50,0.55,0.60,0.65"
+    ret_min_grid: "-0.0002,0.0,0.0002,0.0005"
+    direction_threshold_grid: "0.50,0.55,0.60"
+    min_trades: 10
+    max_drawdown: -0.12
+  calibration_robustness:
+    enabled: true
+    baseline_window: 240
+    recent_window: 120
+    max_ece_drift: 0.02
+  no_trade:
+    enabled: true
+    trigger_trade_count_below: 10
+    objective: cumret_with_dd_constraint
+    max_drawdown: -0.15
+    min_trades: 1
+    p_up_grid: "0.45,0.50,0.55,0.60"
+    ret_min_grid: "-0.0005,-0.0002,0.0,0.0002"

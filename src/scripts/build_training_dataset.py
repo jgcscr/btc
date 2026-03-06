@@ -24,6 +24,22 @@ from src.trading.volatility import (
 )
 
 
+def _load_local_features() -> pd.DataFrame:
+    """Load features from local files instead of BigQuery."""
+    # Load spot klines
+    spot_files = list(SPOT_KLINES_DIR.glob("*.parquet"))
+    if not spot_files:
+        raise FileNotFoundError(f"No spot klines found in {SPOT_KLINES_DIR}")
+    
+    spot_df = pd.concat([pd.read_parquet(f) for f in spot_files], ignore_index=True)
+    # ts is already datetime
+    spot_df = spot_df[["ts", "open", "high", "low", "close", "volume", "quote_volume", "num_trades", "taker_buy_base_volume", "taker_buy_quote_volume"]]
+    
+    # Merge with processed features
+    df = _merge_processed_features(spot_df, PROCESSED_PATHS)
+    return df
+
+
 PROCESSED_PATHS = [
     Path("data/processed/technical/hourly_features.parquet"),
     Path("data/processed/funding/hourly_features.parquet"),
@@ -72,7 +88,10 @@ CORE_MODEL_FEATURES = [
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
 
-EXCLUDED_FEATURES = set()
+EXCLUDED_FEATURES = {
+    "funding_rate_zscore_24h",
+    "ret_1h",
+}
 
 EXTERNAL_SOURCE_PREFIXES = (
     "cq_",
@@ -522,14 +541,11 @@ def _load_binance_spot_features(directory: Path = SPOT_KLINES_DIR) -> Optional[p
 def main(output_dir: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
-    df = load_btc_features_1h(
-        project_id=PROJECT_ID,
-        dataset_id=BQ_DATASET_CURATED,
-        table_id=BQ_TABLE_FEATURES_1H,
-    )
+    # Load from local instead of BigQuery
+    df = _load_local_features()
 
     if df.empty:
-        raise RuntimeError("Loaded empty DataFrame from BigQuery; check that the curated table has data.")
+        raise RuntimeError("Loaded empty DataFrame from local files; check data.")
 
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
     df = df.dropna(subset=["ts"]).reset_index(drop=True)

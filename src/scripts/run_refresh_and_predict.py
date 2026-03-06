@@ -20,7 +20,6 @@ import numpy as np
 import pandas as pd
 
 from data.ingestors.binance_us_spot import ingest_binance_us_spot
-from data.ingestors.tiingo_spot import ingest_tiingo_spot
 from data.processed.compute_technical_features import process_technical_features
 from src.scripts.build_training_dataset import main as build_1h_dataset
 from src.scripts.build_training_dataset_15m import main as build_15m_dataset
@@ -32,7 +31,11 @@ from src.scripts.build_signal_baseline import (
     compute_baseline,
     load_dataframe,
 )
-from src.config_trading import DEFAULT_DIR_MODEL_WEIGHTS_1H, DEFAULT_DIR_MODELS_1H
+from src.config_trading import (
+    DEFAULT_DIR_MODEL_WEIGHTS_1H,
+    DEFAULT_DIR_MODELS_1H,
+    DEFAULT_TRANSFORMER_MODEL_DIR_BY_SUFFIX,
+)
 from src.trading.direction_config import (
     DirectionModelConfig,
     apply_path_overrides,
@@ -54,7 +57,9 @@ from src.trading.signals import (
     prepare_data_for_signals_from_ohlcv,
 )
 from src.trading.thresholds import load_calibrated_thresholds
-from src.trading.volatility import latest_volatility_snapshot
+from src.trading.volatility import DEFAULT_REALIZED_WINDOWS, add_volatility_columns, latest_volatility_snapshot
+from src.trading.data_quality import DataQualityError, DataQualityPolicy, evaluate_ohlcv_quality
+from src.config_trading import DEFAULT_DIR_MODEL_DIR_1H
 
 DEFAULT_HOURS = 360
 DEFAULT_TARGETS = (0.25, 1, 4, 8, 12)
@@ -80,10 +85,15 @@ META_BASELINE_PARQUET_PATH = Path("artifacts/monitoring/meta_baseline.parquet")
 META_BASELINE_SOURCE_CSV = Path("artifacts/backtests/backtest_signals_meta_ensemble.csv")
 TREND_IGNITION_STATE_PATH = Path("artifacts/monitoring/trend_ignition_state.json")
 DIRECTION_FALLBACK_STATE_PATH = Path("artifacts/monitoring/direction_fallback_state.json")
+DATA_QUALITY_MONITOR_PATH = Path("artifacts/monitoring/data_quality_latest.json")
 TARGET_RANGE_MODEL_DIR = Path("artifacts/models/target_ranges")
 TARGET_RANGE_DEFAULT_HORIZONS: tuple[float, ...] = (4.0, 8.0, 12.0)
 TARGET_RANGE_DEFAULT_OVERRIDE_RATIO = 0.01
 TARGET_RANGE_DEFAULT_CONFIDENCE_SCALE = 0.01
+CONFIDENCE_MIN_DEFAULT = 0.0
+POSITION_SIZE_FLOOR_DEFAULT = 0.0
+POSITION_SIZE_CAP_DEFAULT = 1.0
+MIN_DIRECTIONAL_RETURN_BUFFER = 0.001
 
 BREAKOUT_VOL_NORMALIZER = 0.05
 BREAKOUT_RET_NORMALIZER = 0.002
@@ -129,6 +139,8 @@ CONFIG_ALLOWED_KEYS = {
     "dir_bilstm_path",
     "dir_gru_path",
     "dir_cnn_lstm_path",
+    "dir_cnn_bilstm_path",
+    "dir_garch_lstm_path",
     "dir_transformer_path",
     "dir_model_config_json",
     "dir_model_weights",
@@ -136,6 +148,11 @@ CONFIG_ALLOWED_KEYS = {
     "direction_only_fallback",
     "adaptive_thresholds",
     "target_range_models",
+    "platt_calibration",
+    "data_quality",
+    "confidence_min",
+    "position_size_floor",
+    "position_size_cap",
 }
 # boolean config keys; converted with _bool_env
 CONFIG_BOOL_FIELDS = {
@@ -145,7 +162,14 @@ CONFIG_BOOL_FIELDS = {
     "disable_monitoring_latest",
     "auto_direction_threshold",
 }
-CONFIG_FLOAT_FIELDS = {"p_up_min", "ret_min", "direction_threshold"}
+CONFIG_FLOAT_FIELDS = {
+    "p_up_min",
+    "ret_min",
+    "direction_threshold",
+    "confidence_min",
+    "position_size_floor",
+    "position_size_cap",
+}
 CONFIG_INT_FIELDS = {"hours"}
 CONFIG_PATH_FIELDS = {
     "thresholds_json",
@@ -158,6 +182,8 @@ CONFIG_PATH_FIELDS = {
     "dir_bilstm_path",
     "dir_gru_path",
     "dir_cnn_lstm_path",
+    "dir_cnn_bilstm_path",
+    "dir_garch_lstm_path",
     "dir_transformer_path",
     "dir_model_config_json",
 }
@@ -301,6 +327,36 @@ def _normalize_target_range_block(value: Mapping[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _normalize_data_quality_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("data_quality config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    numeric_keys = {
+        "max_staleness_hours",
+        "max_missing_ratio",
+        "max_zero_volume_ratio",
+        "min_rows",
+    }
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key == "enabled":
+            normalized[key] = bool(raw_value)
+        elif key in numeric_keys:
+            if raw_value is None:
+                normalized[key] = None
+            elif key == "min_rows":
+                normalized[key] = int(raw_value)
+            else:
+                normalized[key] = float(raw_value)
+        else:
+            print(
+                f"Warning: Unknown data_quality config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
+    return normalized
+
+
 def _normalize_config_value(name: str, value: Any) -> Any:
     if name == "targets":
         if value is None:
@@ -348,6 +404,8 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_adaptive_thresholds_block(value)
         if name == "target_range_models" and value is not None:
             return _normalize_target_range_block(value)
+        if name == "data_quality" and value is not None:
+            return _normalize_data_quality_block(value)
         return value
     raise ValueError(f"Unsupported config key: {name}")
 
@@ -558,6 +616,10 @@ def _build_stub_summary(
             "projected_price": close,
             "signal_ensemble": 0,
             "signal_dir_only": 0,
+            "confidence_score": 0.0,
+            "position_size": 0.0,
+            "confidence_min": CONFIDENCE_MIN_DEFAULT,
+            "confidence_filter_triggered": False,
             "p_up_components": {},
             "stop_loss": close,
             "take_profit": close,
@@ -833,6 +895,42 @@ def _resolve_target_range_policy(config: Mapping[str, Any] | None) -> Optional[D
     return policy
 
 
+def _resolve_data_quality_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    cfg = config or {}
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "max_staleness_hours": float(cfg.get("max_staleness_hours") or 2.0),
+        "max_missing_ratio": float(cfg.get("max_missing_ratio") or 0.01),
+        "max_zero_volume_ratio": float(cfg.get("max_zero_volume_ratio") or 0.2),
+        "min_rows": int(cfg.get("min_rows") or 120),
+    }
+
+
+def _compute_confidence_score(p_up: float, expected_value: float, residual_std: float) -> float:
+    # Blend directional conviction with risk-adjusted edge into a bounded confidence score.
+    directional = min(1.0, abs(p_up - 0.5) * 2.0)
+    denom = max(abs(residual_std), 1e-8)
+    edge = max(-1.0, min(1.0, expected_value / denom))
+    edge_component = (edge + 1.0) * 0.5
+    return float(max(0.0, min(1.0, 0.6 * directional + 0.4 * edge_component)))
+
+
+def _compute_position_size(
+    confidence_score: float,
+    *,
+    confidence_min: float,
+    size_floor: float,
+    size_cap: float,
+) -> float:
+    confidence_min = max(0.0, min(1.0, float(confidence_min)))
+    size_floor = max(0.0, float(size_floor))
+    size_cap = max(size_floor, float(size_cap))
+    if confidence_score <= confidence_min:
+        return 0.0
+    scaled = (confidence_score - confidence_min) / max(1e-8, (1.0 - confidence_min))
+    return float(min(size_cap, max(size_floor, scaled * size_cap)))
+
+
 def _target_range_label(horizon: float) -> str:
     if float(horizon).is_integer():
         return f"{int(round(horizon))}h"
@@ -1086,18 +1184,66 @@ def run_ingestion(
     interval: str = "1h",
     provider: str = "binanceus",
 ) -> Path:
-    if provider == "tiingo":
-        lookback_days = max(math.ceil(hours / 24), 1)
-        print(f"Fetching {lookback_days} day(s) of {interval} candles from Tiingo for BTCUSD...")
-        output_path = ingest_tiingo_spot(lookback_days=lookback_days)
-        print(f"Saved Tiingo spot tidy parquet to {output_path}")
-        return output_path
+    if provider != "binanceus":
+        raise ValueError(f"Unsupported provider '{provider}'. Binance-only mode requires --spot-provider binanceus.")
 
     limit = max(hours, 1)
     print(f"Fetching {limit} {interval} klines from Binance US for {symbol}...")
     output_path = ingest_binance_us_spot(symbol=symbol, interval=interval, limit=limit)
     print(f"Saved spot tidy parquet to {output_path}")
     return output_path
+
+
+def _build_ohlcv_frame_from_tidy(df: pd.DataFrame) -> pd.DataFrame:
+    metric_map = {
+        "spot_open": "open",
+        "spot_high": "high",
+        "spot_low": "low",
+        "spot_close": "close",
+        "spot_volume": "volume",
+    }
+    subset = df[df["metric"].isin(metric_map.keys())].copy()
+    if subset.empty:
+        raise DataQualityError("No OHLCV metrics found in ingestion output")
+    subset["metric"] = subset["metric"].map(metric_map)
+    ohlcv = subset.pivot(index="ts", columns="metric", values="value").reset_index()
+    return ohlcv
+
+
+def _write_data_quality_payload(payload: Mapping[str, Any]) -> None:
+    DATA_QUALITY_MONITOR_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DATA_QUALITY_MONITOR_PATH.write_text(json.dumps(payload, indent=2))
+
+
+def _evaluate_data_quality(
+    frame: pd.DataFrame,
+    policy_config: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    policy_values = _resolve_data_quality_policy(policy_config)
+    policy = DataQualityPolicy(
+        max_staleness_hours=float(policy_values["max_staleness_hours"]),
+        max_missing_ratio=float(policy_values["max_missing_ratio"]),
+        max_zero_volume_ratio=float(policy_values["max_zero_volume_ratio"]),
+        min_rows=int(policy_values["min_rows"]),
+    )
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "policy": {
+            "enabled": bool(policy_values["enabled"]),
+            "max_staleness_hours": policy.max_staleness_hours,
+            "max_missing_ratio": policy.max_missing_ratio,
+            "max_zero_volume_ratio": policy.max_zero_volume_ratio,
+            "min_rows": policy.min_rows,
+        },
+    }
+    try:
+        payload.update(evaluate_ohlcv_quality(frame, policy))
+    except DataQualityError as exc:
+        payload["ok"] = False
+        payload["error"] = str(exc)
+        payload["row_count"] = int(len(frame))
+    _write_data_quality_payload(payload)
+    return payload
 
 
 def run_feature_builders(price_source: Path | None = None) -> Dict[str, str]:
@@ -1214,6 +1360,166 @@ def _load_training_feature_names() -> List[str] | None:
     return feature_names
 
 
+def _enrich_local_features_for_model(
+    frame: pd.DataFrame,
+    *,
+    required_columns: Sequence[str],
+) -> tuple[pd.DataFrame, List[str]]:
+    required = set(required_columns)
+    if not required:
+        return frame, []
+
+    enriched = frame.copy()
+    added: List[str] = []
+
+    def _record_added(column: str) -> None:
+        if column in required and column not in added:
+            added.append(column)
+
+    def _add_numeric_column(column: str, values: pd.Series) -> None:
+        if column not in required or column in enriched.columns:
+            return
+        series = pd.to_numeric(values, errors="coerce")
+        enriched[column] = series.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        _record_added(column)
+
+    close = pd.to_numeric(enriched["close"], errors="coerce") if "close" in enriched.columns else None
+    volume = pd.to_numeric(enriched["volume"], errors="coerce") if "volume" in enriched.columns else None
+
+    if close is not None:
+        ma_7 = close.rolling(window=7, min_periods=3).mean()
+        ma_24 = close.rolling(window=24, min_periods=6).mean()
+        _add_numeric_column("ma_close_7h", ma_7)
+        _add_numeric_column("ma_close_24h", ma_24)
+        if "ma_ratio_7_24" in required and "ma_ratio_7_24" not in enriched.columns:
+            denom = ma_24.replace(0.0, np.nan)
+            ratio = (ma_7 / denom).replace([np.inf, -np.inf], np.nan)
+            _add_numeric_column("ma_ratio_7_24", ratio)
+
+        if "vol_24h" in required and "vol_24h" not in enriched.columns:
+            vol_24h = close.rolling(window=24, min_periods=6).std(ddof=0)
+            _add_numeric_column("vol_24h", vol_24h)
+
+        _add_numeric_column("close_delta_1h", close.diff())
+        _add_numeric_column("close_pct_change_1h", close.pct_change())
+
+        if "close_zscore_7h" in required and "close_zscore_7h" not in enriched.columns:
+            std_7 = close.rolling(window=7, min_periods=3).std(ddof=0).replace(0.0, np.nan)
+            if "ma_close_7h" in enriched.columns:
+                z_7 = (close - pd.to_numeric(enriched["ma_close_7h"], errors="coerce")) / std_7
+                _add_numeric_column("close_zscore_7h", z_7)
+        if "close_zscore_24h" in required and "close_zscore_24h" not in enriched.columns:
+            std_24 = close.rolling(window=24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
+            if "ma_close_24h" in enriched.columns:
+                z_24 = (close - pd.to_numeric(enriched["ma_close_24h"], errors="coerce")) / std_24
+                _add_numeric_column("close_zscore_24h", z_24)
+
+        ret_columns = [
+            column
+            for column in required
+            if column.startswith("ret_")
+            and column.endswith("h")
+            and column not in enriched.columns
+            and column not in {"ret_max_4h", "ret_min_4h", "ret_max_8h", "ret_min_8h", "ret_max_12h", "ret_min_12h"}
+        ]
+        for column in sorted(ret_columns):
+            horizon_raw = column[4:-1]
+            try:
+                periods = int(round(float(horizon_raw)))
+            except ValueError:
+                continue
+            if periods <= 0:
+                continue
+            _add_numeric_column(column, close.pct_change(periods=periods))
+
+        required_volatility = {
+            "volatility_realized_24h",
+            "volatility_realized_72h",
+            "volatility_ewm_24h",
+            "volatility_ewm_72h",
+            "volatility_garch_like",
+        }
+        if any(column in required and column not in enriched.columns for column in required_volatility):
+            enriched, computed_volatility = add_volatility_columns(
+                enriched,
+                realized_windows=DEFAULT_REALIZED_WINDOWS,
+            )
+            for column in computed_volatility:
+                _record_added(column)
+
+    if volume is not None:
+        _add_numeric_column("volume_delta_1h", volume.diff())
+        _add_numeric_column("volume_pct_change_1h", volume.pct_change())
+
+    taker_buy_base = None
+    taker_buy_quote = None
+    if "taker_buy_base_volume" in enriched.columns:
+        taker_buy_base = pd.to_numeric(enriched["taker_buy_base_volume"], errors="coerce")
+    elif volume is not None:
+        taker_buy_base = volume * 0.5
+    if taker_buy_base is not None:
+        _add_numeric_column("taker_buy_base_volume", taker_buy_base)
+
+    if "taker_buy_quote_volume" in enriched.columns:
+        taker_buy_quote = pd.to_numeric(enriched["taker_buy_quote_volume"], errors="coerce")
+    elif taker_buy_base is not None and close is not None:
+        taker_buy_quote = taker_buy_base * close
+    if taker_buy_quote is not None:
+        _add_numeric_column("taker_buy_quote_volume", taker_buy_quote)
+
+    if taker_buy_base is not None and volume is not None:
+        taker_sell = (volume - taker_buy_base).clip(lower=0.0)
+        cvd_raw = taker_buy_base - taker_sell
+        cvd_window = cvd_raw.rolling(window=6, min_periods=2).sum()
+        vol_window = volume.rolling(window=6, min_periods=2).sum().replace(0.0, np.nan)
+        cvd_ratio = (cvd_window / vol_window).replace([np.inf, -np.inf], np.nan).clip(lower=-1.0, upper=1.0)
+        _add_numeric_column("cvd_ratio_6h", cvd_ratio)
+        cvd_mean = cvd_window.rolling(window=24, min_periods=6).mean()
+        cvd_std = cvd_window.rolling(window=24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
+        cvd_zscore = ((cvd_window - cvd_mean) / cvd_std).replace([np.inf, -np.inf], np.nan).clip(lower=-10.0, upper=10.0)
+        _add_numeric_column("cvd_zscore_6h", cvd_zscore)
+
+    if "funding_rate_zscore_24h" in required and "funding_rate_zscore_24h" not in enriched.columns:
+        funding_rate = pd.to_numeric(enriched["funding_rate"], errors="coerce") if "funding_rate" in enriched.columns else None
+        if funding_rate is None:
+            funding_zscore = pd.Series(0.0, index=enriched.index)
+        else:
+            mean_24 = funding_rate.rolling(window=24, min_periods=6).mean()
+            std_24 = funding_rate.rolling(window=24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
+            funding_zscore = (funding_rate - mean_24) / std_24
+        _add_numeric_column("funding_rate_zscore_24h", funding_zscore)
+
+    if "trend_ignition_6h" in required and "trend_ignition_6h" not in enriched.columns and close is not None:
+        momentum = close.pct_change().fillna(0.0)
+        ignition_score = (momentum > 0.0).astype(float).rolling(window=6, min_periods=1).mean()
+        _add_numeric_column("trend_ignition_6h", ignition_score)
+
+    if {"high", "low", "close"}.issubset(enriched.columns):
+        high = pd.to_numeric(enriched["high"], errors="coerce")
+        low = pd.to_numeric(enriched["low"], errors="coerce")
+        close_for_liquidity = pd.to_numeric(enriched["close"], errors="coerce")
+        prev_close = close_for_liquidity.shift(1)
+        true_range = pd.concat(
+            [
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1, skipna=True)
+        atr_6h = true_range.rolling(window=6, min_periods=2).mean().replace(0.0, np.nan)
+        range_span = (high - low).abs()
+        liquidity_ratio = (range_span / atr_6h).replace([np.inf, -np.inf], np.nan)
+        _add_numeric_column("liquidity_range_ratio_6h", liquidity_ratio.clip(lower=0.0, upper=10.0))
+
+        mid_price = (high + low) / 2.0
+        half_range = (high - low).replace(0.0, np.nan) / 2.0
+        close_position = ((close_for_liquidity - mid_price) / half_range).replace([np.inf, -np.inf], np.nan)
+        _add_numeric_column("liquidity_close_position_ratio", close_position.clip(lower=-1.0, upper=1.0))
+
+    return enriched, added
+
+
 def _prepare_local_feature_bundle(
     *,
     features_path: str,
@@ -1252,16 +1558,56 @@ def _prepare_local_feature_bundle(
 
     feature_names = _load_training_feature_names()
     if feature_names:
+        supplemental_feature_names = [
+            "taker_buy_base_volume",
+            "taker_buy_quote_volume",
+            "cvd_ratio_6h",
+            "cvd_zscore_6h",
+            "funding_rate_zscore_24h",
+            "trend_ignition_6h",
+            "cq_daily_delta_exchange_netflow",
+            "cq_daily_delta_exchange_reserve",
+            "cq_daily_delta_miner_flow",
+            "cq_daily_delta_stablecoin_reserve",
+            "cq_daily_delta_whale_count",
+        ]
+        for column in supplemental_feature_names:
+            if column not in feature_names:
+                feature_names.append(column)
+
+        base_df, synthesized_columns = _enrich_local_features_for_model(
+            base_df,
+            required_columns=feature_names,
+        )
         missing = [col for col in feature_names if col not in base_df.columns]
         if missing:
-            preview = ", ".join(missing[:5])
-            suffix = "..." if len(missing) > 5 else ""
+            unresolved_futures = [
+                col
+                for col in missing
+                if col.startswith("fut_") or col in {"funding_rate", "funding_rate_annualized", "open_interest"}
+            ]
             print(
-                f"Warning: local features missing {len(missing)} model columns {preview}{suffix}; filling with zeros.",
+                "Warning: local feature alignment still missing "
+                f"{len(missing)} model columns after synthesizing {len(synthesized_columns)} columns; "
+                f"imputing zeros ({len(unresolved_futures)} futures/funding/open-interest columns).",
                 file=sys.stderr,
             )
             for column in missing:
                 base_df[column] = 0.0
+        elif synthesized_columns:
+            print(
+                f"Info: synthesized {len(synthesized_columns)} local model columns from OHLCV context.",
+            )
+
+        # Stabilize sparse merged features before signal preparation.
+        numeric_features = base_df[feature_names].apply(pd.to_numeric, errors="coerce")
+        base_df[feature_names] = numeric_features.ffill().bfill().fillna(0.0)
+
+        metadata["feature_alignment"] = {
+            "required_columns": len(feature_names),
+            "synthesized_columns": synthesized_columns,
+            "imputed_zero_columns": missing,
+        }
     else:
         feature_names = [col for col in base_df.columns if col != "ts"]
 
@@ -1367,6 +1713,8 @@ def _prepare_base_direction_configs(
     dir_bilstm_path: str | None,
     dir_gru_path: str | None,
     dir_cnn_lstm_path: str | None,
+    dir_cnn_bilstm_path: str | None,
+    dir_garch_lstm_path: str | None,
     dir_transformer_path: str | None,
 ) -> List[DirectionModelConfig]:
     overrides = {
@@ -1374,6 +1722,8 @@ def _prepare_base_direction_configs(
         "bilstm": dir_bilstm_path,
         "gru": dir_gru_path,
         "cnn_lstm": dir_cnn_lstm_path,
+        "cnn_bilstm": dir_cnn_bilstm_path,
+        "garch_lstm": dir_garch_lstm_path,
         "transformer": dir_transformer_path,
     }
     return resolve_direction_model_configs(
@@ -1388,13 +1738,117 @@ def _direction_configs_for_horizon(
     base_configs: Sequence[DirectionModelConfig],
     *,
     dir_model_path: str,
+    horizon: float,
     horizon_label: str,
 ) -> tuple[List[DirectionModelConfig], Dict[str, float]]:
+    def _registry_model_exists(model_name: str) -> bool:
+        try:
+            from mlflow.tracking import MlflowClient
+
+            client = MlflowClient()
+            client.get_registered_model(model_name)
+            return True
+        except Exception:
+            return False
+
+    def _sequence_model_overrides() -> Dict[str, str]:
+        def _explicit_transformer_path(suffix: str) -> Optional[str]:
+            path = DEFAULT_TRANSFORMER_MODEL_DIR_BY_SUFFIX.get(suffix)
+            if not path:
+                return None
+            if path.startswith("models:/"):
+                parts = path.split("/")
+                model_name = parts[1] if len(parts) > 1 else ""
+                if model_name and _registry_model_exists(model_name):
+                    return path
+                return None
+            path_obj = Path(path).expanduser()
+            return str(path_obj) if path_obj.exists() else None
+
+        overrides: Dict[str, str] = {}
+        suffixes = _model_suffix_candidates(horizon)
+        seq_types = (
+            "lstm",
+            "bilstm",
+            "gru",
+            "cnn_lstm",
+            "cnn_bilstm",
+            "garch_lstm",
+            "transformer",
+            "transformer_large",
+        )
+        for model_type in seq_types:
+            for suffix in suffixes:
+                if model_type == "transformer":
+                    explicit_path = _explicit_transformer_path(suffix)
+                    if explicit_path:
+                        overrides[model_type] = explicit_path
+                        break
+                prefix = f"{model_type}_dir{suffix}"
+                if model_type == "transformer_large":
+                    prefix = f"transformer_dir{suffix}_large"
+                for version in MODEL_VERSION_PRIORITY:
+                    candidate = MODEL_ROOT / f"{prefix}_{version}"
+                    if candidate.exists():
+                        overrides[model_type] = str(candidate)
+                        break
+                if model_type in overrides:
+                    break
+                if model_type == "transformer" and horizon >= 1.0 and suffix.endswith("h"):
+                    use_registry = os.getenv("USE_MLFLOW_REGISTRY", "").lower() in {"1", "true", "yes"}
+                    if use_registry:
+                        model_name = f"transformer_dir{suffix}"
+                        if _registry_model_exists(model_name):
+                            overrides[model_type] = f"models:/{model_name}/latest"
+                            break
+        return overrides
+
+    def _lgbm_model_path() -> Optional[str]:
+        suffixes = _model_suffix_candidates(horizon)
+        for suffix in suffixes:
+            for version in MODEL_VERSION_PRIORITY:
+                model_dir = MODEL_ROOT / f"lgbm_dir{suffix}_{version}"
+                model_path = model_dir / f"lgbm_dir{suffix}_model.joblib"
+                if model_path.exists():
+                    return str(model_path)
+        return None
+
     configs = clone_direction_model_configs(base_configs)
-    apply_path_overrides(configs, {"xgb": dir_model_path})
+    overrides = {"xgb": dir_model_path}
+    overrides.update(_sequence_model_overrides())
+    apply_path_overrides(configs, overrides)
+    lgbm_path = _lgbm_model_path()
+    if lgbm_path and not any(entry.get("type") == "lgbm" for entry in configs):
+        configs.append(
+            {
+                "name": "lgbm",
+                "type": "lgbm",
+                "path": lgbm_path,
+                "weight": 1.0,
+            }
+        )
     log_direction_model_configs(configs, label=f"[run_refresh_and_predict] direction models ({horizon_label})")
     weight_map = direction_configs_to_weight_map(configs)
     return configs, weight_map
+
+
+def _load_platt_calibration(path: str | None) -> Dict[str, Dict[str, float]]:
+    if not path:
+        return {}
+    path_obj = Path(path).expanduser()
+    if not path_obj.exists():
+        print(f"Warning: Platt calibration file not found at {path_obj}; skipping.", file=sys.stderr)
+        return {}
+    payload = json.loads(path_obj.read_text())
+    if not isinstance(payload, dict):
+        raise ValueError("Platt calibration file must contain a JSON object keyed by horizon.")
+    result: Dict[str, Dict[str, float]] = {}
+    for key, value in payload.items():
+        if not isinstance(value, dict):
+            continue
+        if "a" in value and "b" in value:
+            result[str(key)] = {"a": float(value["a"]), "b": float(value["b"])}
+    return result
 
 
 def _load_prepared(dataset_path: Path, *, target_column: str, offline: bool = False) -> tuple:
@@ -1479,6 +1933,8 @@ def run_predictions(
     dir_bilstm_path: str | None = None,
     dir_gru_path: str | None = None,
     dir_cnn_lstm_path: str | None = None,
+    dir_cnn_bilstm_path: str | None = None,
+    dir_garch_lstm_path: str | None = None,
     dir_transformer_path: str | None = None,
     dir_model_config_json: str | None = None,
     dir_model_weights: str | None = None,
@@ -1488,7 +1944,11 @@ def run_predictions(
     direction_only_fallback: Mapping[str, Any] | None = None,
     adaptive_thresholds: Mapping[str, Any] | None = None,
     target_range_models: Mapping[str, Any] | None = None,
+    platt_calibration: Mapping[str, Mapping[str, float]] | None = None,
     latest_close: float | None = None,
+    confidence_min: float = CONFIDENCE_MIN_DEFAULT,
+    position_size_floor: float = POSITION_SIZE_FLOOR_DEFAULT,
+    position_size_cap: float = POSITION_SIZE_CAP_DEFAULT,
 ) -> Dict[str, Dict[str, float | str | int]]:
     normalized_targets = sorted({_normalize_horizon_value(h) for h in targets})
     if not normalized_targets:
@@ -1498,6 +1958,9 @@ def run_predictions(
     direction_fallback_policy = _resolve_direction_fallback_policy(direction_only_fallback)
     adaptive_policy = _resolve_adaptive_thresholds_policy(adaptive_thresholds)
     target_range_policy = _resolve_target_range_policy(target_range_models)
+    confidence_min = max(0.0, min(1.0, float(confidence_min)))
+    position_size_floor = max(0.0, float(position_size_floor))
+    position_size_cap = max(position_size_floor, float(position_size_cap))
 
     # compute automatic direction threshold if requested
     if auto_direction_threshold and thresholds_by_horizon:
@@ -1533,6 +1996,8 @@ def run_predictions(
         dir_bilstm_path=dir_bilstm_path,
         dir_gru_path=dir_gru_path,
         dir_cnn_lstm_path=dir_cnn_lstm_path,
+        dir_cnn_bilstm_path=dir_cnn_bilstm_path,
+        dir_garch_lstm_path=dir_garch_lstm_path,
         dir_transformer_path=dir_transformer_path,
     )
 
@@ -1628,6 +2093,7 @@ def run_predictions(
         direction_configs, dir_weight_map = _direction_configs_for_horizon(
             base_direction_configs,
             dir_model_path=str(dir_path),
+            horizon=horizon,
             horizon_label=label,
         )
         models = load_models(
@@ -1665,9 +2131,11 @@ def run_predictions(
             models=models,
             p_up_min=horizon_p_up,
             ret_min=horizon_ret,
+            horizon=horizon,
             dir_model_weights=dir_weight_map,
             volatility_snapshot=volatility_snapshot,
             volatility_policy=horizon_thresholds,
+            p_up_calibration=platt_calibration,
         )
         # override direction-only signal using configurable threshold
         try:
@@ -1685,12 +2153,32 @@ def run_predictions(
         ret_pred = float(signal.get("ret_pred", 0.0))
         p_up = float(signal.get("p_up", 0.0))
         signal_ts = str(signal.get("ts", ts_iso))
+        signal_dir_only = int(signal.get("signal_dir_only", 0))
+        signal_ensemble = int(signal.get("signal_ensemble", 0))
         residual_std = float(residual_std_by_horizon.get(horizon, DEFAULT_RESIDUAL_STD))
-        stop_loss_price = _project_price(close, ret_pred - residual_std)
-        take_profit_price = _project_price(close, ret_pred + residual_std)
+        # SL/TP must follow direction semantics even when ret_pred disagrees with direction.
+        # For up/long: stop < entry and take > entry.
+        # For down/short: stop > entry and take < entry.
+        direction_signal = int(signal.get("signal_dir_only", 0))
+        min_buffer = max(MIN_DIRECTIONAL_RETURN_BUFFER, residual_std * 0.1)
+        if direction_signal >= 1:
+            stop_return = min(ret_pred - residual_std, -min_buffer)
+            take_return = max(ret_pred + residual_std, min_buffer)
+        else:
+            stop_return = max(ret_pred + residual_std, min_buffer)
+            take_return = min(ret_pred - residual_std, -min_buffer)
+        stop_loss_price = _project_price(close, stop_return)
+        take_profit_price = _project_price(close, take_return)
         expected_value = p_up * ret_pred - (1 - p_up) * residual_std
         ev_multiplier = float(horizon_thresholds.get("expected_value_multiplier", 1.0))
         expected_value *= ev_multiplier
+        confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
+        position_size = _compute_position_size(
+            confidence_score,
+            confidence_min=confidence_min,
+            size_floor=position_size_floor,
+            size_cap=position_size_cap,
+        )
         trend_prob = float(signal.get("p_trend_ignition", 0.0))
         ignition_state = 0
         cooldown_active = False
@@ -1733,14 +2221,24 @@ def run_predictions(
             "timestamp": signal_ts,
             "horizon_hours": horizon,
             "close": close,
+            "entry_price": close,
             "p_up": p_up,
             "p_trend_ignition": trend_prob,
             "ignition_state": ignition_state,
             "ignition_cooldown_active": cooldown_active if trend_payload else False,
             "ret_pred": ret_pred,
             "projected_price": _project_price(close, ret_pred),
-            "signal_ensemble": int(signal.get("signal_ensemble", 0)),
-            "signal_dir_only": int(signal.get("signal_dir_only", 0)),
+            "signal_ensemble": signal_ensemble,
+            "signal_dir_only": signal_dir_only,
+            "direction_next": "up" if signal_dir_only == 1 else "down",
+            "trade_action": (
+                "long" if signal_ensemble == 1 and signal_dir_only == 1 else
+                "short" if signal_ensemble == 1 and signal_dir_only == 0 else
+                "hold"
+            ),
+            "confidence_score": confidence_score,
+            "position_size": position_size,
+            "confidence_min": confidence_min,
             "p_up_components": signal.get("p_up_components", {}),
             "stop_loss": stop_loss_price,
             "take_profit": take_profit_price,
@@ -1781,6 +2279,12 @@ def run_predictions(
             result["stop_loss"] = updated_stop
             result["take_profit"] = updated_take
         result["target_range_overrides"] = overrides_payload
+        entry_price = float(result["entry_price"])
+        stop_loss = float(result["stop_loss"])
+        take_profit = float(result["take_profit"])
+        downside = abs(entry_price - stop_loss)
+        upside = abs(take_profit - entry_price)
+        result["risk_reward_ratio"] = (upside / downside) if downside > 0 else None
         fallback_info, fallback_triggered = _evaluate_direction_only_fallback(
             direction_fallback_policy,
             p_up=p_up,
@@ -1792,6 +2296,11 @@ def run_predictions(
             trend_threshold=float(trend_payload.get("threshold")) if trend_payload else None,
         )
         result["direction_only_fallback"] = fallback_info
+        if result["trade_action"] != "hold" and confidence_score < confidence_min:
+            result["trade_action"] = "hold"
+            result["confidence_filter_triggered"] = True
+        else:
+            result["confidence_filter_triggered"] = False
         if fallback_triggered:
             pending_direction_fallback_ts = signal_ts
         summary[label] = result
@@ -1855,7 +2364,13 @@ def _build_trade_ready_monitoring_payload(predictions_payload: dict[str, Any], a
         "spot_provider": args.spot_provider,
         "hours": args.hours,
         "dry_run": bool(args.dry_run),
+        "confidence_min": float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
+        "position_size_floor": float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),
+        "position_size_cap": float(getattr(args, "position_size_cap", POSITION_SIZE_CAP_DEFAULT)),
     }
+    data_quality_cfg = getattr(args, "data_quality", None)
+    if isinstance(data_quality_cfg, Mapping):
+        request["data_quality"] = dict(data_quality_cfg)
     metadata = getattr(args, "local_feature_metadata", None)
     if metadata:
         request["local_feature_overrides"] = metadata
@@ -1988,15 +2503,68 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional JSON file containing per-horizon thresholds; set to an empty string to disable.",
     )
     parser.add_argument(
+        "--platt-calibration",
+        type=str,
+        default=str(Path("artifacts/models/platt_calibration.json")),
+        help="Optional JSON file containing Platt scaling coefficients per horizon.",
+    )
+    parser.add_argument(
+        "--data-quality-enabled",
+        action="store_true",
+        help="Enable hard OHLCV data-quality checks after ingestion/local feature loading.",
+    )
+    parser.add_argument(
+        "--max-staleness-hours",
+        type=float,
+        default=2.0,
+        help="Maximum allowed OHLCV staleness in hours when data quality checks are enabled.",
+    )
+    parser.add_argument(
+        "--max-missing-ratio",
+        type=float,
+        default=0.01,
+        help="Maximum allowed ratio of missing hourly timestamps when quality checks are enabled.",
+    )
+    parser.add_argument(
+        "--max-zero-volume-ratio",
+        type=float,
+        default=0.2,
+        help="Maximum allowed ratio of zero-volume rows when quality checks are enabled.",
+    )
+    parser.add_argument(
+        "--min-rows",
+        type=int,
+        default=120,
+        help="Minimum required OHLCV rows when quality checks are enabled.",
+    )
+    parser.add_argument(
+        "--confidence-min",
+        type=float,
+        default=CONFIDENCE_MIN_DEFAULT,
+        help="Minimum confidence score required to keep a non-hold trade action (default: 0.0).",
+    )
+    parser.add_argument(
+        "--position-size-floor",
+        type=float,
+        default=POSITION_SIZE_FLOOR_DEFAULT,
+        help="Floor for confidence-scaled position size (default: 0.0).",
+    )
+    parser.add_argument(
+        "--position-size-cap",
+        type=float,
+        default=POSITION_SIZE_CAP_DEFAULT,
+        help="Cap for confidence-scaled position size (default: 1.0).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Skip network-dependent steps and reuse cached datasets/models for smoke testing.",
     )
     parser.add_argument(
         "--spot-provider",
-        choices=("binanceus", "tiingo"),
+        choices=("binanceus",),
         default="binanceus",
-        help="Spot ingestion provider for hourly candles (default: binanceus).",
+        help="Spot ingestion provider for hourly candles (Binance-only; default: binanceus).",
     )
     parser.add_argument(
         "--use-local-features",
@@ -2071,6 +2639,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional directory containing the CNN-LSTM direction model ensemble.",
     )
     parser.add_argument(
+        "--dir-cnn-bilstm-path",
+        type=str,
+        default=None,
+        help="Optional directory containing the CNN-BiLSTM direction model ensemble.",
+    )
+    parser.add_argument(
+        "--dir-garch-lstm-path",
+        type=str,
+        default=None,
+        help="Optional directory containing the GARCH-LSTM direction model ensemble.",
+    )
+    parser.add_argument(
         "--dir-transformer-path",
         type=str,
         default=None,
@@ -2111,6 +2691,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.adaptive_thresholds = None
     if not hasattr(args, "target_range_models"):
         args.target_range_models = None
+    if not hasattr(args, "data_quality"):
+        args.data_quality = None
+    if args.data_quality is None:
+        args.data_quality = {}
+    if args.data_quality_enabled:
+        args.data_quality["enabled"] = True
+    # CLI quality flags always override config values.
+    args.data_quality["max_staleness_hours"] = args.max_staleness_hours
+    args.data_quality["max_missing_ratio"] = args.max_missing_ratio
+    args.data_quality["max_zero_volume_ratio"] = args.max_zero_volume_ratio
+    args.data_quality["min_rows"] = args.min_rows
     prepared_override: tuple[PreparedData, int, float, str] | None = None
     args.local_feature_metadata = None
 
@@ -2125,6 +2716,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         sys.exit(2)
 
     latest_close: float | None = None
+    latest_spot_features_path: str | None = None
     if args.use_local_features:
         try:
             optional_sources = {
@@ -2143,6 +2735,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.local_feature_metadata = metadata
         labels = ", ".join(sorted(metadata.keys()))
         print(f"Loaded local feature overrides: {labels}")
+        quality_policy = _resolve_data_quality_policy(getattr(args, "data_quality", None))
+        if quality_policy.get("enabled"):
+            try:
+                quality_frame = _read_timeseries_frame(args.features_path, "features")
+                quality_payload = _evaluate_data_quality(quality_frame, quality_policy)
+            except Exception as exc:
+                print(f"Data quality check failed: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if not quality_payload.get("ok", False):
+                print(
+                    f"Data quality gate blocked prediction run: {quality_payload.get('error', 'unknown data quality failure')}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
     elif args.dry_run:
         print("Dry run enabled: using cached datasets and skipping ingestion, feature rebuild, and dataset regeneration.")
     else:
@@ -2151,6 +2757,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             # Save latest price data to spot_klines for dataset building
             if output_path and output_path.exists():
                 df = pd.read_parquet(output_path)
+                quality_policy = _resolve_data_quality_policy(getattr(args, "data_quality", None))
+                if quality_policy.get("enabled"):
+                    quality_frame = _build_ohlcv_frame_from_tidy(df)
+                    quality_payload = _evaluate_data_quality(quality_frame, quality_policy)
+                    if not quality_payload.get("ok", False):
+                        raise RuntimeError(
+                            "Data quality gate blocked prediction run: "
+                            f"{quality_payload.get('error', 'unknown data quality failure')}"
+                        )
                 # Pivot to wide
                 wide_df = df.pivot(index='ts', columns='metric', values='value').reset_index()
                 # Rename columns
@@ -2172,6 +2787,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 today = datetime.now().strftime('%Y-%m-%d')
                 spot_path = Path('data/spot_klines') / f'btcusdt_spot_1h_{today}.parquet'
                 wide_df.to_parquet(spot_path, index=False)
+                latest_spot_features_path = str(spot_path)
                 print(f"Saved latest price data to {spot_path}")
             latest_close = None
             if output_path and output_path.exists():
@@ -2183,8 +2799,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"Ingestion failed: {exc}", file=sys.stderr)
             sys.exit(1)
 
+        feature_build_results: Dict[str, str] = {}
         try:
-            run_feature_builders()
+            feature_build_results = run_feature_builders()
         except Exception as exc:  # pragma: no cover - runtime safety
             print(f"Feature rebuild failed: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -2195,22 +2812,69 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"Dataset build failed: {exc}", file=sys.stderr)
             sys.exit(1)
 
+        # Prefer freshly rebuilt local features for inference so timestamps track the newest ingested candle.
+        # Dataset NPZ tails can lag when upstream curated features are stale.
+        technical_features_path = feature_build_results.get("technical")
+        if latest_spot_features_path:
+            try:
+                prepared_override, metadata = _prepare_local_feature_bundle(
+                    features_path=latest_spot_features_path,
+                    hours=args.hours,
+                    optional_sources={"technical": technical_features_path} if technical_features_path else None,
+                )
+                args.local_feature_metadata = metadata
+                print(
+                    "Using freshly rebuilt local feature bundle for live inference "
+                    f"({latest_spot_features_path}).",
+                )
+            except Exception as exc:
+                print(
+                    "Warning: failed to prepare fresh local inference bundle; "
+                    f"falling back to dataset-based inference ({exc}).",
+                    file=sys.stderr,
+                )
+        elif technical_features_path:
+            print(
+                "Warning: fresh spot feature file unavailable; local inference override disabled.",
+                file=sys.stderr,
+            )
+
     env_dir_lstm = os.getenv("DIR_LSTM_PATH") or args.dir_lstm_path
     env_dir_bilstm = os.getenv("DIR_BILSTM_PATH") or args.dir_bilstm_path
     env_dir_gru = os.getenv("DIR_GRU_PATH") or args.dir_gru_path
     env_dir_cnn_lstm = os.getenv("DIR_CNN_LSTM_PATH") or args.dir_cnn_lstm_path
+    env_dir_cnn_bilstm = os.getenv("DIR_CNN_BILSTM_PATH") or args.dir_cnn_bilstm_path
+    env_dir_garch_lstm = os.getenv("DIR_GARCH_LSTM_PATH") or args.dir_garch_lstm_path
     env_dir_transformer = os.getenv("DIR_TRANSFORMER_PATH") or args.dir_transformer_path
-    if any([env_dir_lstm, env_dir_bilstm, env_dir_gru, env_dir_cnn_lstm, env_dir_transformer]):
+    if any([
+        env_dir_lstm,
+        env_dir_bilstm,
+        env_dir_gru,
+        env_dir_cnn_lstm,
+        env_dir_cnn_bilstm,
+        env_dir_garch_lstm,
+        env_dir_transformer,
+    ]):
         print(
             "Sequence ensemble directories:"
             f" LSTM={env_dir_lstm or 'None'}"
             f", BiLSTM={env_dir_bilstm or 'None'}"
             f", GRU={env_dir_gru or 'None'}"
             f", CNN-LSTM={env_dir_cnn_lstm or 'None'}"
+            f", CNN-BiLSTM={env_dir_cnn_bilstm or 'None'}"
+            f", GARCH-LSTM={env_dir_garch_lstm or 'None'}"
             f", transformer={env_dir_transformer or 'None'}",
         )
 
     thresholds_path = args.thresholds_json or None
+    platt_calibration = _load_platt_calibration(getattr(args, "platt_calibration", None))
+    if args.target_range_models is None:
+        target_range_meta = TARGET_RANGE_MODEL_DIR / "metadata.json"
+        if target_range_meta.exists():
+            args.target_range_models = {
+                "enabled": True,
+                "model_dir": str(TARGET_RANGE_MODEL_DIR),
+            }
     thresholds_by_horizon = load_calibrated_thresholds(thresholds_path)
     if thresholds_by_horizon:
         print(
@@ -2232,6 +2896,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             dir_bilstm_path=env_dir_bilstm,
             dir_gru_path=env_dir_gru,
             dir_cnn_lstm_path=env_dir_cnn_lstm,
+            dir_cnn_bilstm_path=env_dir_cnn_bilstm,
+            dir_garch_lstm_path=env_dir_garch_lstm,
             dir_transformer_path=env_dir_transformer,
             dir_model_config_json=args.dir_model_config_json or None,
             dir_model_weights=args.dir_model_weights,
@@ -2241,7 +2907,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             direction_only_fallback=getattr(args, "direction_only_fallback", None),
             adaptive_thresholds=getattr(args, "adaptive_thresholds", None),
             target_range_models=getattr(args, "target_range_models", None),
+            platt_calibration=platt_calibration,
             latest_close=latest_close,
+            confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
+            position_size_floor=float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),
+            position_size_cap=float(getattr(args, "position_size_cap", POSITION_SIZE_CAP_DEFAULT)),
         )
     except Exception as exc:  # pragma: no cover - runtime safety
         print(f"Prediction step failed: {exc}", file=sys.stderr)

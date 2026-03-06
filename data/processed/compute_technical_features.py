@@ -78,8 +78,29 @@ def _normalize_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
         print(f"Price frame missing required columns {missing}; returning empty frame.")
         return pd.DataFrame(columns=["ts"] + required)
 
-    working = working[["ts", "open", "high", "low", "close", "volume"]].copy()
-    working[required] = working[required].astype(float)
+    for optional in ["quote_volume", "num_trades", "taker_buy_base_volume", "taker_buy_quote_volume"]:
+        if optional not in working.columns:
+            working[optional] = np.nan
+
+    selected = [
+        "ts",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_volume",
+        "num_trades",
+        "taker_buy_base_volume",
+        "taker_buy_quote_volume",
+    ]
+    working = working[selected].copy()
+    for col in selected[1:]:
+        working[col] = pd.to_numeric(working[col], errors="coerce")
+    working[["quote_volume", "num_trades", "taker_buy_base_volume", "taker_buy_quote_volume"]] = (
+        working[["quote_volume", "num_trades", "taker_buy_base_volume", "taker_buy_quote_volume"]]
+        .fillna(0.0)
+    )
     return working
 
 
@@ -231,6 +252,11 @@ def process_technical_features(
     close = price_frame["close"].astype(float)
     high = price_frame["high"].astype(float)
     low = price_frame["low"].astype(float)
+    open_ = price_frame["open"].astype(float)
+    volume = price_frame["volume"].astype(float)
+    quote_volume = price_frame["quote_volume"].astype(float)
+    num_trades = price_frame["num_trades"].astype(float)
+    taker_buy_base = price_frame["taker_buy_base_volume"].astype(float)
 
     rsi = _rsi(close, period=14)
     stoch_k = _stochastic_k(close, high, low, period=14)
@@ -242,6 +268,16 @@ def process_technical_features(
     true_range = _true_range(high, low, close)
     atr = _atr(high, low, close, period=14)
     donchian_high, donchian_low = _donchian(high, low, period=20)
+
+    # Microstructure features from candle anatomy + taker flow improve short-horizon robustness.
+    candle_range = (high - low).replace(0.0, np.nan)
+    candle_body = (close - open_).abs()
+    upper_wick = (high - np.maximum(open_, close)).clip(lower=0.0)
+    lower_wick = (np.minimum(open_, close) - low).clip(lower=0.0)
+    taker_sell_base = (volume - taker_buy_base).clip(lower=0.0)
+    total_flow = (taker_buy_base + taker_sell_base).replace(0.0, np.nan)
+    taker_buy_ratio = (taker_buy_base / total_flow).replace([np.inf, -np.inf], np.nan).fillna(0.5)
+    trade_size = (quote_volume / num_trades.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     output = pd.DataFrame(
         {
@@ -263,6 +299,16 @@ def process_technical_features(
             "ta_atr_14": atr,
             "ta_donchian_high_20": donchian_high,
             "ta_donchian_low_20": donchian_low,
+            "micro_candle_body_ratio": (candle_body / candle_range).fillna(0.0).clip(0.0, 10.0),
+            "micro_upper_wick_ratio": (upper_wick / candle_range).fillna(0.0).clip(0.0, 10.0),
+            "micro_lower_wick_ratio": (lower_wick / candle_range).fillna(0.0).clip(0.0, 10.0),
+            "micro_range_to_close": (candle_range / close.replace(0.0, np.nan)).fillna(0.0).clip(0.0, 10.0),
+            "micro_taker_buy_ratio": taker_buy_ratio.clip(0.0, 1.0),
+            "micro_trade_size_quote": trade_size,
+            "micro_volume_zscore_24": (
+                (volume - volume.rolling(24, min_periods=6).mean()) /
+                volume.rolling(24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
+            ).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-10.0, 10.0),
         },
     )
 

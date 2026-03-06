@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -5,8 +7,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import numpy as np
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from xgboost import XGBRegressor
+from joblib import dump as joblib_dump
+
+try:
+    from lightgbm import LGBMClassifier
+except ImportError as exc:  # pragma: no cover
+    raise RuntimeError("lightgbm is required to train LGBM direction models") from exc
 
 
 def _load_params_json(params_path: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -33,9 +39,9 @@ def _required_keys(horizon: int, *, use_flat_labels: bool) -> set[str]:
     else:
         base.update(
             {
-                f"y_ret{horizon}h_train",
-                f"y_ret{horizon}h_val",
-                f"y_ret{horizon}h_test",
+                f"y_dir{horizon}h_train",
+                f"y_dir{horizon}h_val",
+                f"y_dir{horizon}h_test",
             }
         )
     return base
@@ -48,16 +54,21 @@ def _load_dataset(dataset_path: str, horizon: int, *, use_flat_labels: bool) -> 
     data = np.load(dataset_path, allow_pickle=True)
     missing = [key for key in _required_keys(horizon, use_flat_labels=use_flat_labels) if key not in data]
     if missing:
-        raise KeyError(f"Dataset is missing required keys for {horizon}h training: {missing}")
+        raise KeyError(f"Dataset is missing required keys for {horizon}h direction training: {missing}")
+
+    threshold_arr = data.get("direction_threshold")
+    if threshold_arr is None:
+        threshold_arr = data.get("threshold")
+    threshold = float(threshold_arr[0]) if threshold_arr is not None else 0.0
 
     if use_flat_labels:
         y_train_key = "y_train"
         y_val_key = "y_val"
         y_test_key = "y_test"
     else:
-        y_train_key = f"y_ret{horizon}h_train"
-        y_val_key = f"y_ret{horizon}h_val"
-        y_test_key = f"y_ret{horizon}h_test"
+        y_train_key = f"y_dir{horizon}h_train"
+        y_val_key = f"y_dir{horizon}h_val"
+        y_test_key = f"y_dir{horizon}h_test"
 
     return {
         "X_train": data["X_train"],
@@ -67,15 +78,27 @@ def _load_dataset(dataset_path: str, horizon: int, *, use_flat_labels: bool) -> 
         "y_val": data[y_val_key],
         "y_test": data[y_test_key],
         "feature_names": data["feature_names"].tolist(),
+        "threshold": threshold,
     }
 
 
-def _evaluate_split(model: XGBRegressor, name: str, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
-    preds = model.predict(X)
-    mse = mean_squared_error(y, preds)
-    rmse = float(np.sqrt(mse))
-    mae = mean_absolute_error(y, preds)
-    return {"split": name, "rmse": rmse, "mae": mae}
+def _evaluate_split(model: LGBMClassifier, name: str, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
+    proba = model.predict_proba(X)[:, 1]
+    pred = (proba >= 0.5).astype(int)
+    acc = float((pred == y).mean())
+    precision = float((pred[y == 1] == 1).mean()) if np.any(y == 1) else 0.0
+    recall = float((pred[y == 1] == 1).mean()) if np.any(y == 1) else 0.0
+    if precision + recall == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * precision * recall / (precision + recall)
+    return {
+        "split": name,
+        "accuracy": acc,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
 
 
 def train_and_evaluate(
@@ -97,14 +120,15 @@ def train_and_evaluate(
     y_val = dataset["y_val"]
     y_test = dataset["y_test"]
     feature_names = dataset["feature_names"]
+    threshold = dataset["threshold"]
 
     params: Dict[str, Any] = {
-        "n_estimators": 500,
-        "max_depth": 6,
+        "n_estimators": 400,
+        "max_depth": -1,
         "learning_rate": 0.05,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
-        "objective": "reg:squarederror",
+        "objective": "binary",
         "n_jobs": -1,
         "random_state": 42,
     }
@@ -112,21 +136,11 @@ def train_and_evaluate(
     params_override = _load_params_json(params_json)
     if params_override:
         params.update(params_override)
-    params.setdefault("objective", "reg:squarederror")
-    params.setdefault("n_jobs", -1)
-    params.setdefault("random_state", 42)
 
-    model = XGBRegressor(**params)
-
-    model.fit(
-        X_train,
-        y_train,
-        eval_set=[(X_train, y_train), (X_val, y_val)],
-        verbose=False,
-    )
-
+    model = LGBMClassifier(**params)
+    model.fit(X_train, y_train)
     if not getattr(model, "_estimator_type", None):
-        model._estimator_type = "regressor"
+        model._estimator_type = "classifier"
 
     metrics = [
         _evaluate_split(model, "train", X_train, y_train),
@@ -140,40 +154,29 @@ def train_and_evaluate(
     }
 
     resolved_suffix = suffix or f"{horizon}h"
-    model_filename = f"xgb_ret{resolved_suffix}_model.json"
-    model_path = os.path.join(output_dir, model_filename)
-    model.save_model(model_path)
+    model_path = os.path.join(output_dir, f"lgbm_dir{resolved_suffix}_model.joblib")
+    joblib_dump({"model": model, "feature_names": feature_names}, model_path)
 
     metadata = {
-        "model_type": "xgboost_regressor",
-        "target": f"ret_{resolved_suffix}",
+        "model_type": "lightgbm_classifier",
+        "target": f"direction_{resolved_suffix}",
         "horizon_hours": horizon,
         "trained_at": datetime.now(timezone.utc).isoformat(),
+        "threshold": threshold,
         "feature_names": feature_names,
         "metrics": metrics,
         "params": params,
         "dataset_path": dataset_path,
     }
-    meta_path = os.path.join(output_dir, "model_metadata.json")
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
-
-    metadata_simple = {
-        "model_type": "xgboost_regressor",
-        "horizon_hours": horizon,
-        "target": f"ret_{resolved_suffix}",
-        "feature_names": feature_names,
-        "trained_at": metadata["trained_at"],
-        "model_path": model_path,
-        "dataset_path": dataset_path,
-    }
-    with open(os.path.join(output_dir, "metadata.json"), "w", encoding="utf-8") as handle:
-        json.dump(metadata_simple, handle, indent=2)
+    meta_path = os.path.join(output_dir, "model_metadata_direction.json")
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2)
 
     summary = {
-        "model_type": "xgboost_regressor",
-        "target": f"ret_{resolved_suffix}",
+        "model_type": "lightgbm_classifier",
+        "target": f"direction_{resolved_suffix}",
         "dataset_path": dataset_path,
+        "threshold": threshold,
         "feature_names": feature_names,
         "params": params,
         "metrics": metrics_by_split,
@@ -183,14 +186,14 @@ def train_and_evaluate(
     with open(summary_path, "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
 
-    print(f"Saved {resolved_suffix} regression model to:", model_path)
+    print(f"Saved {horizon}h LightGBM direction model to: {model_path}")
     print("Saved metadata to:", meta_path)
     print("Saved summary to:", summary_path)
     print(json.dumps(metrics, indent=2))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train an XGBoost regressor for multi-horizon BTC returns.")
+    parser = argparse.ArgumentParser(description="Train a LightGBM classifier for multi-horizon BTC direction.")
     parser.add_argument(
         "--dataset-path",
         type=str,
@@ -201,37 +204,37 @@ def main() -> None:
         "--output-dir",
         type=str,
         default=None,
-        help="Directory to store the trained model and metadata",
+        help="Directory to store the trained LightGBM model and metadata",
     )
     parser.add_argument(
         "--params-json",
         type=str,
         default=None,
-        help="Optional JSON file containing XGBoost hyperparameters to override defaults.",
+        help="Optional JSON file containing LightGBM hyperparameters to override defaults.",
     )
     parser.add_argument(
         "--horizon",
         type=int,
-        default=1,
+        default=4,
         help="Prediction horizon in hours (e.g., 1, 4, 8, 12).",
     )
     parser.add_argument(
         "--suffix",
         type=str,
         default=None,
-        help="Optional suffix for model naming (e.g., '15m' to produce xgb_ret15m_model.json).",
+        help="Optional suffix for model naming (e.g., '15m' to produce lgbm_dir15m_model.joblib).",
     )
     parser.add_argument(
         "--use-flat-labels",
         action="store_true",
-        help="Use y_train/y_val/y_test labels instead of y_ret{h}h_* keys (for 1h/15m datasets).",
+        help="Use y_train/y_val/y_test labels instead of y_dir{h}h_* keys (for 15m datasets).",
     )
     args = parser.parse_args()
 
     if args.horizon <= 0:
         raise SystemExit("--horizon must be a positive integer")
 
-    output_dir = args.output_dir or f"artifacts/models/xgb_ret{args.horizon}h_v1"
+    output_dir = args.output_dir or f"artifacts/models/lgbm_dir{args.horizon}h_v1"
 
     train_and_evaluate(
         dataset_path=args.dataset_path,

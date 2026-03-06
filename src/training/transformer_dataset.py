@@ -13,6 +13,7 @@ from src.training.lstm_data import (
     SequenceDataset,
     SequenceSplits,
     build_sequence_splits,
+    build_sequence_splits_from_arrays,
     estimate_feature_stats,
 )
 
@@ -35,9 +36,50 @@ def prepare_transformer_data(
     dataset_path: str,
     seq_len: int,
     batch_size: int,
+    *,
+    horizon: int = 1,
     generator: Optional[NpGenerator] = None,
 ) -> tuple[TransformerData, DataLoader, DataLoader, DataLoader]:
-    splits = build_sequence_splits(dataset_path, seq_len)
+    splits = build_sequence_splits(dataset_path, seq_len, horizon=horizon)
+
+    return _prepare_transformer_from_splits(splits, batch_size, generator=generator)
+
+
+def prepare_transformer_data_from_arrays(
+    *,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    feature_names: list[str],
+    threshold: float,
+    seq_len: int,
+    batch_size: int,
+    generator: Optional[NpGenerator] = None,
+) -> tuple[TransformerData, DataLoader, DataLoader, DataLoader]:
+    splits = build_sequence_splits_from_arrays(
+        X_train,
+        y_train,
+        X_val,
+        y_val,
+        X_test,
+        y_test,
+        feature_names,
+        threshold,
+        seq_len,
+    )
+
+    return _prepare_transformer_from_splits(splits, batch_size, generator=generator)
+
+
+def _prepare_transformer_from_splits(
+    splits: SequenceSplits,
+    batch_size: int,
+    *,
+    generator: Optional[NpGenerator] = None,
+) -> tuple[TransformerData, DataLoader, DataLoader, DataLoader]:
 
     train_mean, train_std = estimate_feature_stats(splits.X_train_seq.reshape(-1, splits.X_train_seq.shape[-1]))
 

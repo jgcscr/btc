@@ -3,7 +3,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -11,6 +11,7 @@ import pandas as pd
 from src.config import PROJECT_ID, BQ_DATASET_CURATED, BQ_TABLE_FEATURES_1H
 from src.data.bq_loader import load_btc_features_1h
 from src.data.dataset_preparation import make_features_and_target, time_series_train_val_test_split
+from src.data.labeling import binary_direction_labels, triple_barrier_direction_labels
 from src.scripts.build_training_dataset import _apply_funding_rate_features
 from src.trading.volatility import (
     DEFAULT_REALIZED_WINDOWS,
@@ -24,7 +25,14 @@ PROCESSED_PATHS = [
     Path("data/processed/funding/hourly_features.parquet"),
 ]
 
+SPOT_KLINES_DIR = Path("data/spot_klines")
+_BINANCE_SPOT_FEATURES: Optional[pd.DataFrame] = None
+
 META_PATH = Path("artifacts/datasets/btc_features_1h_direction_meta.json")
+
+TREND_IGNITION_LABEL = "trend_ignition_6h"
+TREND_IGNITION_HORIZON = 6
+TREND_IGNITION_THRESHOLD = 0.01
 
 CORE_MODEL_FEATURES = [
     "open",
@@ -55,7 +63,10 @@ CORE_MODEL_FEATURES = [
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
 
-EXCLUDED_FEATURES: set[str] = set()
+EXCLUDED_FEATURES: set[str] = {
+    "funding_rate_zscore_24h",
+    "ret_1h",
+}
 
 EXTERNAL_SOURCE_PREFIXES = (
     "cq_",
@@ -308,25 +319,42 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
 
 
 def make_direction_labels(y_ret: pd.Series, threshold: float) -> pd.Series:
-    """Convert continuous 1h returns into binary direction labels.
-
-    Label is 1 if return > threshold (price up), else 0 (flat/down).
-    """
-    return (y_ret > threshold).astype(int)
+    return binary_direction_labels(y_ret, threshold)
 
 
-def build_direction_splits(output_dir: str, threshold: float) -> str:
+def _load_local_features() -> pd.DataFrame:
+    """Load features from local files instead of BigQuery."""
+    # Load spot klines
+    spot_files = list(SPOT_KLINES_DIR.glob("*.parquet"))
+    if not spot_files:
+        raise FileNotFoundError(f"No spot klines found in {SPOT_KLINES_DIR}")
+    
+    spot_df = pd.concat([pd.read_parquet(f) for f in spot_files], ignore_index=True)
+    # ts is already datetime
+    spot_df = spot_df[["ts", "open", "high", "low", "close", "volume", "quote_volume", "num_trades", "taker_buy_base_volume", "taker_buy_quote_volume"]]
+    
+    # Merge with processed features
+    df = _merge_processed_features(spot_df, PROCESSED_PATHS)
+    return df
+
+
+def build_direction_splits(
+    output_dir: str,
+    threshold: float,
+    *,
+    labeling_scheme: str = "binary",
+    tb_horizon_steps: int = 1,
+    tb_vol_window: int = 24,
+    tb_upper_mult: float = 1.0,
+    tb_lower_mult: float = 1.0,
+) -> str:
     os.makedirs(output_dir, exist_ok=True)
 
-    df = load_btc_features_1h(
-        project_id=PROJECT_ID,
-        dataset_id=BQ_DATASET_CURATED,
-        table_id=BQ_TABLE_FEATURES_1H,
-    )
+    df = _load_local_features()
 
     if df.empty:
         raise RuntimeError(
-            "Loaded empty DataFrame from BigQuery; check that the curated table has data."
+            "Loaded empty DataFrame from local; check data."
         )
 
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
@@ -346,6 +374,9 @@ def build_direction_splits(output_dir: str, threshold: float) -> str:
     df = _drop_excluded_features(df)
     df = df.sort_values("ts").reset_index(drop=True)
 
+    # Compute 1h returns
+    df["ret_1h"] = df["close"].pct_change().shift(-1)
+
     allowed_features = [feature for feature in CORE_MODEL_FEATURES if feature in df.columns]
     for column in volatility_columns:
         if column not in allowed_features:
@@ -362,7 +393,19 @@ def build_direction_splits(output_dir: str, threshold: float) -> str:
         return_ts=True,
     )
 
-    y_dir = make_direction_labels(y_ret, threshold=threshold)
+    labeling_stats: dict[str, float] = {}
+    if labeling_scheme == "triple_barrier":
+        labels_raw, labeling_stats = triple_barrier_direction_labels(
+            df.loc[X.index, "close"],
+            horizon_steps=tb_horizon_steps,
+            vol_window=tb_vol_window,
+            upper_mult=tb_upper_mult,
+            lower_mult=tb_lower_mult,
+        )
+        y_dir = labels_raw.dropna().astype(int)
+        X = X.loc[y_dir.index]
+    else:
+        y_dir = make_direction_labels(y_ret, threshold=threshold)
 
     splits = time_series_train_val_test_split(X, y_dir)
 
@@ -418,6 +461,14 @@ def build_direction_splits(output_dir: str, threshold: float) -> str:
         "row_count": int(ts_values.size),
         "feature_count": int(len(splits.feature_names)),
         "threshold": float(threshold),
+        "labeling_scheme": labeling_scheme,
+        "triple_barrier": {
+            "horizon_steps": int(tb_horizon_steps),
+            "vol_window": int(tb_vol_window),
+            "upper_mult": float(tb_upper_mult),
+            "lower_mult": float(tb_lower_mult),
+            "stats": labeling_stats,
+        },
         "volatility": {
             "columns": sorted(volatility_columns),
             "realized_windows": list(DEFAULT_REALIZED_WINDOWS),
@@ -451,9 +502,27 @@ def main() -> None:
         default=0.0,
         help="Direction threshold theta: label is 1 if ret_1h > theta, else 0.",
     )
+    parser.add_argument(
+        "--labeling-scheme",
+        choices=("binary", "triple_barrier"),
+        default="binary",
+        help="Direction label construction strategy.",
+    )
+    parser.add_argument("--tb-horizon-steps", type=int, default=1, help="Forward steps for triple-barrier labels.")
+    parser.add_argument("--tb-vol-window", type=int, default=24, help="Rolling volatility window for barriers.")
+    parser.add_argument("--tb-upper-mult", type=float, default=1.0, help="Upper barrier multiplier.")
+    parser.add_argument("--tb-lower-mult", type=float, default=1.0, help="Lower barrier multiplier.")
     args = parser.parse_args()
 
-    build_direction_splits(args.output_dir, args.threshold)
+    build_direction_splits(
+        args.output_dir,
+        args.threshold,
+        labeling_scheme=args.labeling_scheme,
+        tb_horizon_steps=args.tb_horizon_steps,
+        tb_vol_window=args.tb_vol_window,
+        tb_upper_mult=args.tb_upper_mult,
+        tb_lower_mult=args.tb_lower_mult,
+    )
 
 
 if __name__ == "__main__":

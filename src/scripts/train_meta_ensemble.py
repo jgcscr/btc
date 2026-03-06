@@ -30,19 +30,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--transformer-csv",
         type=Path,
-        default=Path("artifacts/analysis/backtest_signals_transformer_dir1h_optuna_v2/backtest_signals.csv"),
+        default=Path("artifacts/backtests/historical_1h_pup060_full_simplified/backtest_signals.csv"),
         help="CSV with transformer per-bar probabilities.",
     )
     parser.add_argument(
         "--lstm-csv",
         type=Path,
-        default=Path("artifacts/analysis/backtest_signals_lstm_dir1h_v2/backtest_signals.csv"),
+        default=Path("artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv"),
         help="CSV with LSTM per-bar probabilities.",
     )
     parser.add_argument(
         "--xgb-csv",
         type=Path,
-        default=Path("artifacts/analysis/backtest_signals_xgb_dir1h_optuna/backtest_signals.csv"),
+        default=Path("artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv"),
         help="CSV with XGB per-bar probabilities (baseline).",
     )
     parser.add_argument(

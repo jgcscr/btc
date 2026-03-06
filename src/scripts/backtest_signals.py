@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -120,6 +120,12 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_RET_MIN,
         help="Ensemble threshold for predicted ret_1h.",
+    )
+    parser.add_argument(
+        "--direction-threshold",
+        type=float,
+        default=0.5,
+        help="Direction-only threshold for P(up). Defaults to 0.5.",
     )
     parser.add_argument(
         "--use-optuna-profile",
@@ -303,12 +309,23 @@ def backtest_signals(args: argparse.Namespace) -> None:
 
     # Realized returns series (ret_1h) reconstructed from the NPZ splits
     ret_series = _load_ret_series_from_npz(args.dataset_path)
-    if len(ret_series) != len(prepared.df_all):
-        raise RuntimeError(
-            f"Length mismatch between NPZ returns ({len(ret_series)}) and curated df ({len(prepared.df_all)}).",
-        )
+    n_ret = len(ret_series)
+    n_prepared = len(prepared.df_all)
+    if n_ret == 0 or n_prepared == 0:
+        raise RuntimeError("Backtest inputs are empty after loading datasets/models.")
 
-    idx_range = _compute_index_range(len(prepared.df_all), args.use_test_split)
+    # Curated feature history can be longer than the NPZ splits; align to the overlapping tail.
+    if n_prepared != n_ret:
+        print(
+            f"Warning: Length mismatch between NPZ returns ({n_ret}) and curated df ({n_prepared}); "
+            "aligning to trailing overlap.",
+        )
+    overlap = min(n_prepared, n_ret)
+    prepared_offset = n_prepared - overlap
+    ret_offset = n_ret - overlap
+
+    overlap_range = _compute_index_range(overlap, args.use_test_split)
+    idx_range = [prepared_offset + i for i in overlap_range]
 
     ts_list = []
     ret_list = []
@@ -328,12 +345,13 @@ def backtest_signals(args: argparse.Namespace) -> None:
         )
 
         ts_list.append(sig["ts"])
-        ret_value = float(ret_series[i])
+        ret_idx = i - prepared_offset + ret_offset
+        ret_value = float(ret_series[ret_idx])
         ret_list.append(ret_value)
         p_up_list.append(sig["p_up"])
         ret_pred_list.append(sig["ret_pred"])
         sig_ens_list.append(int(sig["signal_ensemble"]))
-        sig_dir_list.append(int(sig["signal_dir_only"]))
+        sig_dir_list.append(int(float(sig.get("p_up", 0.0)) >= float(args.direction_threshold)))
 
     ret_arr = np.array(ret_list, dtype=float)
     sig_ens = np.array(sig_ens_list, dtype=bool)
@@ -365,8 +383,10 @@ def backtest_signals(args: argparse.Namespace) -> None:
     print(f"cum_ret (log-sum): {metrics_ens_net['cum_ret']:.4f}")
     print(f"max_drawdown (log): {metrics_ens_net['max_drawdown']:.4f}")
     print(f"sharpe_like: {metrics_ens_net['sharpe_like']:.3f}")
+    if int(metrics_ens_net["n_trades"]) == 0:
+        print("WARNING: ensemble produced 0 trades over this evaluation window.")
 
-    print("\n=== Direction-only baseline (p_up >= 0.5) ===")
+    print(f"\n=== Direction-only baseline (p_up >= {args.direction_threshold:.2f}) ===")
     print(f"n_trades: {metrics_dir['n_trades']}")
     print(f"hit_rate: {metrics_dir['hit_rate']:.3f}")
     print(f"avg_ret_trade: {metrics_dir['avg_ret_trade']:.6f}")

@@ -1,176 +1,29 @@
 artifacts:
-  alpha_vantage_catalog:
-    path: artifacts/monitoring/alpha_vantage_catalog.json
-    vendor_status:
-      state: degraded
-      reason: "Alpha Vantage equities paused for holiday weekend; last tick 2025-12-26T20:00Z."
-      expected_recovery: "2025-12-29T14:30:00Z"
-      manual_override: |
-        source env/load_alpha_vantage_secret.sh
-        PYTHONPATH=/workspaces/btc /workspaces/btc/.venv/bin/python \
-          -m data.ingestors.alpha_vantage_macro --run-catalog --provider alpha --provider-chain alpha_paid,alpha_free
-    notes: "US exchanges closed through the weekend; treat macro gaps as vendor maintenance."
-
-  macro_chain_comparison:
-    path: artifacts/monitoring/macro_chain_comparison.json
-    vendor_status:
-      state: degraded
-      reason: "Macro fallback builder promoted Tiingo/Twelve/FRED synthesized payload; metadata is tagged source=fallback until markets reopen."
-      expected_recovery: "2025-12-29T14:30:00Z"
-      manual_override: |
-        python -m src.scripts.build_macro_fallback --history-hours 720 \
-          --promote-features-path data/processed/macro/hourly_features.parquet \
-          --promote-summary-path artifacts/monitoring/macro_summary.json \
-          --macro-chain-path artifacts/monitoring/macro_chain_comparison.json
-
-  macro_summary:
-    path: artifacts/monitoring/macro_summary.json
-    staleness_hours: 72
-    vendor_status:
-      state: degraded
-      reason: "Macro features refreshed via build_macro_fallback promotion; monitoring continues on fallback data."
-      expected_recovery: "2025-12-29T15:00:00Z"
-      manual_override: |
-        python -m src.scripts.build_macro_fallback --history-hours 720 \
-          --promote-features-path data/processed/macro/hourly_features.parquet \
-          --promote-summary-path artifacts/monitoring/macro_summary.json
-
-  macro_fallback_summary:
-    path: artifacts/monitoring/macro_fallback_summary.json
-    vendor_status:
-      state: degraded
-      reason: "Fallback summary reflects the synthetic macro bundle; treat as degraded until vendor feeds resume."
-      manual_override: |
-        python -m src.scripts.build_macro_fallback --history-hours 720 \
-          --promote-features-path data/processed/macro/hourly_features.parquet \
-          --promote-summary-path artifacts/monitoring/macro_summary.json
-
-  onchain_summary:
-    path: artifacts/monitoring/onchain_summary.json
-    vendor_status:
-      state: degraded
-      reason: "CryptoCompare histo/day endpoint has not published beyond 2025-12-24; vendor case CQ-4182 open."
-      expected_recovery: "Pending vendor acknowledgement (normally <48h)."
-      manual_override: |
-        python -m src.scripts.build_onchain_fallback --history-hours 720 --decay-half-life-hours 72 \
-          --output data/processed/onchain_fallback/hourly_features.parquet \
-          --summary-path artifacts/monitoring/onchain_summary.json
-        python -m src.scripts.refresh_market_features --onchain-source fallback --funding-provider cryptocompare \
-          --technical-price-source tiingo
-
-  onchain_fallback_summary:
-    path: artifacts/monitoring/onchain_fallback_summary.json
-    vendor_status:
-      state: degraded
-      reason: "Fallback builder mirrors CryptoCompare outages; allow extra slack while synthetic metrics backfill."
-      expected_recovery: "Pending CryptoCompare histo/day catch-up (<48h after vendor ack)."
-      manual_override: |
-        python -m src.scripts.build_onchain_fallback --history-hours 720 --decay-half-life-hours 72 \
-          --output data/processed/onchain_fallback/hourly_features.parquet \
-          --summary-path artifacts/monitoring/onchain_fallback_summary.json
-        python -m src.scripts.refresh_market_features --onchain-source fallback --funding-provider cryptocompare \
-          --technical-price-source tiingo
-
   technical_summary:
     path: artifacts/monitoring/technical_summary.json
     vendor_status:
-      state: degraded
-      reason: "Refreshed via refresh_market_features --macro-source fallback --technical-price-source tiingo."
-      expected_recovery: "2025-12-29T16:00:00Z"
+      state: healthy
+      reason: "Technical features are generated from Binance spot klines only."
       manual_override: |
-        python -m src.scripts.refresh_market_features \
-          --macro-source fallback \
-          --technical-price-source tiingo \
-          --onchain-source fallback \
-          --funding-provider cryptocompare
-
-  cryptoquant_daily_summary:
-    path: artifacts/monitoring/cryptoquant_daily_summary.json
-    vendor_status:
-      state: degraded
-      reason: "CryptoQuant approval still pending; latest fallback row at 2025-12-26T00:00Z."
-      expected_recovery: "2025-12-28T18:00:00Z"
-      manual_override: |
-        python -m data.processed.compute_cryptoquant_resampled
-
-  alpha_vantage_key_usage:
-    path: artifacts/monitoring/alpha_vantage_key_usage.json
-    vendor_status:
-      state: maintenance
-      reason: "Alpha Vantage catalog refresh intentionally paused while observability work is underway."
-      manual_override: "Run env/load_alpha_vantage_secret.sh and then python -m data.ingestors.alpha_vantage_macro --run-catalog to resume usage logging."
-
-  cryptoquant_daily_catalog:
-    path: artifacts/monitoring/cryptoquant_daily_catalog.json
-    vendor_status:
-      state: maintenance
-      reason: "CryptoQuant ingest disabled temporarily; catalog timestamp will lag until ingest resumes."
-      manual_override: "Run python -m data.ingestors.cryptoquant_daily --metrics lightning_stats ... if a fresh catalog is required."
-
-  cryptoquant_feature_catalog:
-    path: artifacts/monitoring/cryptoquant_feature_catalog.json
-    vendor_status:
-      state: maintenance
-      reason: "Feature catalog only updates when compute_cryptoquant_resampled runs; safe to ignore while ingest is paused."
-      manual_override: |
-        python -m data.processed.compute_cryptoquant_resampled
-
-  funding_summary:
-    path: artifacts/monitoring/funding_summary.json
-    vendor_status:
-      state: maintenance
-      reason: "Funding refresh deferred while we harden observability plumbing."
-      manual_override: |
-        python -m src.scripts.refresh_market_features --funding-provider cryptocompare --skip-onchain
+        python -m data.ingestors.binance_spot_klines
+        python -m data.processed.compute_technical_features
 
   meta_baseline:
     path: artifacts/monitoring/meta_baseline.json
     vendor_status:
       state: healthy
-      reason: "Auto-refreshed by run_refresh_and_predict --write-artifacts during fallback promotion."
+      reason: "Refreshed by run_refresh_and_predict using Binance-only technical features."
       manual_override: |
         python -m src.scripts.run_refresh_and_predict \
           --config configs/run_refresh_and_predict.default.yaml \
-          --spot-provider tiingo \
-          --macro-source fallback \
-          --onchain-source fallback \
-          --funding-provider cryptocompare \
           --write-artifacts
 
   trade_ready_summary:
     path: artifacts/monitoring/trade_ready_summary.json
     vendor_status:
       state: healthy
-      reason: "Predictions regenerated with Tiingo/onchain fallback + macro fallback inputs; monitoring payload includes source metadata."
+      reason: "Predictions generated from Binance-only data flow."
       manual_override: |
         python -m src.scripts.run_refresh_and_predict \
           --config configs/run_refresh_and_predict.default.yaml \
-          --spot-provider tiingo \
-          --macro-source fallback \
-          --onchain-source fallback \
-          --funding-provider cryptocompare \
           --write-artifacts
-
-  kaiko_reference_summary:
-    path: artifacts/monitoring/kaiko_reference_summary.json
-    vendor_status:
-      state: pending
-      reason: "Kaiko contract signature pending; add artifact the moment reference ingestor lands so ops can track freshness."
-      expected_recovery: "Pending Kaiko credential delivery (ETA mid-Jan 2026)."
-      manual_override: |
-        # Placeholder until src/data/ingestors/kaiko_reference.py is wired.
-        # Once live, run python -m src.data.ingestors.kaiko_reference --instrument btc-usd --start <ISO8601> --end <ISO8601>
-        # to refresh the artifact.
-    notes: "Keep state=pending until KAIKO_API_KEY/KAIKO_API_SECRET secrets are populated."
-
-  twelvedata_premium_macro_summary:
-    path: artifacts/monitoring/twelvedata_premium_macro_summary.json
-    vendor_status:
-      state: pending
-      reason: "Waiting on Twelve Data Premium API key; artifact will represent macro FX features produced by premium endpoints."
-      expected_recovery: "Move to healthy once TWELVEDATA_PREMIUM_API_KEY is available and ingestor backfills 90 days of history."
-      manual_override: |
-        # Placeholder; once src/data/ingestors/twelvedata_premium.py is complete run:
-        # python -m src.data.ingestors.twelvedata_premium --instrument DXY --granularity 1h --start <ISO8601> --end <ISO8601>
-        # then promote artifacts/monitoring/twelvedata_premium_macro_summary.json
-    notes: "Ops will flip this to healthy after verifying rate limits + alert coverage."

@@ -76,30 +76,91 @@ class SequenceDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-def load_direction_npz(dataset_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], float]:
+def load_direction_npz(
+    dataset_path: str,
+    *,
+    horizon: int = 1,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], float]:
     if not dataset_path or not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Direction dataset not found: {dataset_path}")
 
     data = np.load(dataset_path, allow_pickle=True)
-    required = {"X_train", "X_val", "X_test", "y_train", "y_val", "y_test", "feature_names"}
+    if horizon <= 0:
+        raise ValueError("horizon must be a positive integer")
+
+    required = {"X_train", "X_val", "X_test", "feature_names"}
+    if horizon == 1 and {"y_train", "y_val", "y_test"}.issubset(data.files):
+        y_train_key = "y_train"
+        y_val_key = "y_val"
+        y_test_key = "y_test"
+    else:
+        y_train_key = f"y_dir{horizon}h_train"
+        y_val_key = f"y_dir{horizon}h_val"
+        y_test_key = f"y_dir{horizon}h_test"
+
+    required |= {y_train_key, y_val_key, y_test_key}
     missing = required - set(data.files)
     if missing:
-        raise KeyError(f"Direction dataset missing keys: {sorted(missing)}")
+        raise KeyError(f"Direction dataset missing keys for {horizon}h: {sorted(missing)}")
 
     X_train = data["X_train"]
     X_val = data["X_val"]
     X_test = data["X_test"]
-    y_train = data["y_train"]
-    y_val = data["y_val"]
-    y_test = data["y_test"]
+    y_train = data[y_train_key]
+    y_val = data[y_val_key]
+    y_test = data[y_test_key]
     feature_names = data["feature_names"].tolist()
     threshold_arr = data.get("threshold")
+    if threshold_arr is None:
+        threshold_arr = data.get("direction_threshold")
     threshold = float(threshold_arr[0]) if threshold_arr is not None else 0.0
     return X_train, y_train, X_val, y_val, X_test, y_test, feature_names, threshold
 
 
-def build_sequence_splits(dataset_path: str, seq_len: int) -> SequenceSplits:
-    X_train, y_train, X_val, y_val, X_test, y_test, feature_names, threshold = load_direction_npz(dataset_path)
+def load_direction_npz_full(
+    dataset_path: str,
+    *,
+    horizon: int = 1,
+) -> Tuple[np.ndarray, np.ndarray, list[str], float]:
+    X_train, y_train, X_val, y_val, X_test, y_test, feature_names, threshold = load_direction_npz(
+        dataset_path,
+        horizon=horizon,
+    )
+    X_all = np.vstack([X_train, X_val, X_test])
+    y_all = np.concatenate([y_train, y_val, y_test])
+    return X_all, y_all, feature_names, threshold
+
+
+def build_sequence_splits(dataset_path: str, seq_len: int, *, horizon: int = 1) -> SequenceSplits:
+    X_train, y_train, X_val, y_val, X_test, y_test, feature_names, threshold = load_direction_npz(
+        dataset_path,
+        horizon=horizon,
+    )
+
+    return build_sequence_splits_from_arrays(
+        X_train,
+        y_train,
+        X_val,
+        y_val,
+        X_test,
+        y_test,
+        feature_names,
+        threshold,
+        seq_len,
+    )
+
+
+def build_sequence_splits_from_arrays(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    feature_names: list[str],
+    threshold: float,
+    seq_len: int,
+) -> SequenceSplits:
 
     # Replace NaNs using training column means to avoid degenerate losses during training.
     mask = ~np.isnan(X_train)

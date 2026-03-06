@@ -176,7 +176,7 @@ def train_model(
     set_seed(args.seed)
     device = _effective_device(args.device)
 
-    splits = build_sequence_splits(args.dataset_path, args.seq_len)
+    splits = build_sequence_splits(args.dataset_path, args.seq_len, horizon=args.horizon)
     input_size = splits.X_train_seq.shape[-1]
 
     train_gen = _make_generator(args.seed)
@@ -269,6 +269,7 @@ def train_model(
     summary = {
         "model_type": model_label,
         "dataset_path": args.dataset_path,
+        "horizon_hours": int(args.horizon),
         "seq_len": args.seq_len,
         "feature_names": splits.feature_names,
         "threshold": splits.threshold,
@@ -309,6 +310,12 @@ def build_arg_parser(description: str, default_output_dir: str) -> argparse.Argu
         type=str,
         default="artifacts/datasets/btc_features_1h_direction_splits.npz",
         help="Path to the flat direction NPZ dataset.",
+    )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=1,
+        help="Direction horizon in hours (default: 1).",
     )
     parser.add_argument(
         "--output-dir",

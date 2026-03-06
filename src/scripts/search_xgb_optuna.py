@@ -11,6 +11,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier, XGBRegressor
 
 from src.trading.signals import PreparedData, prepare_data_for_signals
+from src.training.time_series_cv import build_time_series_folds
 
 
 @dataclass
@@ -79,9 +80,9 @@ def _build_time_splits(prepared: PreparedData, mode: str, target_column: str, ta
     )
 
 
-def _load_npz_splits(path: str, mode: str, target_scale: float) -> Tuple[DatasetSplits, float, List[str]]:
+def _load_npz_splits(path: str, mode: str, target_scale: float, horizon: int) -> Tuple[DatasetSplits, float, List[str]]:
     data = np.load(path, allow_pickle=True)
-    required = ["X_train", "X_val", "X_test", "y_train", "y_val", "y_test"]
+    required = ["X_train", "X_val", "X_test"]
     missing = [key for key in required if key not in data]
     if missing:
         raise KeyError(f"Dataset npz missing keys {missing}: {path}")
@@ -94,18 +95,30 @@ def _load_npz_splits(path: str, mode: str, target_scale: float) -> Tuple[Dataset
 
     effective_scale = target_scale if target_scale != 1.0 else (dataset_scale or 1.0)
 
+    def _target_key(split: str) -> str:
+        if mode == "reg":
+            if horizon == 1 and f"y_{split}" in data:
+                return f"y_{split}"
+            return f"y_ret{horizon}h_{split}"
+        if horizon == 1 and f"y_{split}" in data:
+            return f"y_{split}"
+        return f"y_dir{horizon}h_{split}"
+
     def _target(split: str) -> np.ndarray:
         scaled_key = f"y_{split}_scaled"
-        if scaled_key in data:
+        if mode == "reg" and scaled_key in data:
             return data[scaled_key].astype(np.float32)
-        arr = data[f"y_{split}"].astype(np.float32)
+        key = _target_key(split)
+        if key not in data:
+            raise KeyError(f"Dataset npz missing target key '{key}' for horizon {horizon}h")
+        arr = data[key].astype(np.float32)
         if mode == "reg" and effective_scale != 1.0:
             arr = arr * effective_scale
         return arr
 
-    y_train = _target("train") if mode == "reg" else data["y_train"].astype(np.float32)
-    y_val = _target("val") if mode == "reg" else data["y_val"].astype(np.float32)
-    y_test = _target("test") if mode == "reg" else data["y_test"].astype(np.float32)
+    y_train = _target("train")
+    y_val = _target("val")
+    y_test = _target("test")
 
     splits = DatasetSplits(
         X_train=data["X_train"].astype(np.float32),
@@ -120,6 +133,13 @@ def _load_npz_splits(path: str, mode: str, target_scale: float) -> Tuple[Dataset
     feature_names = data["feature_names"].tolist() if "feature_names" in data else []
 
     return splits, (effective_scale if mode == "reg" else 1.0), feature_names
+
+
+def _load_npz_full(path: str, mode: str, target_scale: float, horizon: int) -> Tuple[np.ndarray, np.ndarray, List[str], float]:
+    splits, effective_scale, feature_names = _load_npz_splits(path, mode, target_scale, horizon)
+    X_all = np.vstack([splits.X_train, splits.X_val, splits.X_test])
+    y_all = np.concatenate([splits.y_train, splits.y_val, splits.y_test])
+    return X_all, y_all, feature_names, effective_scale
 
 
 def _sample_params(trial: optuna.Trial, mode: str) -> Dict[str, float]:
@@ -191,7 +211,54 @@ def _evaluate_objective(mode: str, splits: DatasetSplits) -> Tuple[optuna.study.
     return objective
 
 
-def _run_study(args: argparse.Namespace, splits: DatasetSplits) -> optuna.Study:
+def _evaluate_objective_cv(
+    mode: str,
+    X_all: np.ndarray,
+    y_all: np.ndarray,
+    folds: List[Tuple[slice, slice, slice]],
+) -> Tuple[optuna.study.Study, optuna.trial.Trial]:
+    def objective(trial: optuna.Trial) -> float:
+        params = _sample_params(trial, mode)
+        fold_metrics: List[float] = []
+
+        for fold_idx, (train_slice, val_slice, test_slice) in enumerate(folds, start=1):
+            X_train = X_all[train_slice]
+            y_train = y_all[train_slice]
+            X_val = X_all[val_slice]
+            y_val = y_all[val_slice]
+
+            scaler = StandardScaler()
+            scaler.fit(X_train)
+            X_train_scaled = scaler.transform(X_train)
+            X_val_scaled = scaler.transform(X_val)
+
+            model = _create_model(mode, params)
+            model.fit(
+                X_train_scaled,
+                y_train,
+                eval_set=[(X_val_scaled, y_val)],
+                verbose=False,
+            )
+
+            if mode == "reg":
+                val_pred = model.predict(X_val_scaled)
+                mse = mean_squared_error(y_val, val_pred)
+                fold_metrics.append(float(np.sqrt(mse)))
+            else:
+                val_proba = model.predict_proba(X_val_scaled)[:, 1]
+                val_proba = np.clip(val_proba, 1e-15, 1 - 1e-15)
+                fold_metrics.append(float(log_loss(y_val, val_proba)))
+
+            trial.set_user_attr(f"fold_{fold_idx}_val", fold_metrics[-1])
+
+        mean_metric = float(np.mean(fold_metrics))
+        trial.set_user_attr("cv_mean", mean_metric)
+        return mean_metric
+
+    return objective
+
+
+def _run_study(args: argparse.Namespace, objective) -> optuna.Study:
     direction = "minimize"
 
     if args.storage:
@@ -203,8 +270,6 @@ def _run_study(args: argparse.Namespace, splits: DatasetSplits) -> optuna.Study:
         )
     else:
         study = optuna.create_study(direction=direction, study_name=args.study_name)
-
-    objective = _evaluate_objective(args.mode, splits)
 
     study.optimize(objective, n_trials=args.n_trials, timeout=args.timeout)
 
@@ -315,6 +380,13 @@ def main() -> None:
     parser.add_argument("--storage", type=str, default=None, help="Optuna storage URL (e.g. sqlite:///study.db).")
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--target-scale", type=float, default=1.0, help="Multiplicative scale applied to regression targets before training.")
+    parser.add_argument("--cv-folds", type=int, default=0, help="Enable time-series CV with this many folds.")
+    parser.add_argument("--cv-train-size", type=int, default=0, help="Train window size for each fold.")
+    parser.add_argument("--cv-val-size", type=int, default=0, help="Validation window size for each fold.")
+    parser.add_argument("--cv-test-size", type=int, default=0, help="Test window size for each fold.")
+    parser.add_argument("--cv-gap", type=int, default=0, help="Gap size between train/val/test windows.")
+    parser.add_argument("--cv-step-size", type=int, default=None, help="Step size between folds (defaults to test size).")
+    parser.add_argument("--cv-mode", type=str, default="expanding", choices=["expanding", "rolling"], help="Time-series CV mode.")
     args = parser.parse_args()
 
     if args.horizon <= 0:
@@ -333,23 +405,77 @@ def main() -> None:
 
     feature_names: List[str]
 
+    folds: Optional[List[Tuple[slice, slice, slice]]] = None
+    splits: Optional[DatasetSplits] = None
+    X_all: Optional[np.ndarray] = None
+    y_all: Optional[np.ndarray] = None
+
     if npz_mode:
-        splits, inferred_scale, feature_names = _load_npz_splits(args.dataset_path, args.mode, args.target_scale)
-        if args.mode == "reg":
-            target_scale_effective = inferred_scale
+        if args.cv_folds > 0:
+            X_all, y_all, feature_names, inferred_scale = _load_npz_full(
+                args.dataset_path,
+                args.mode,
+                args.target_scale,
+                args.horizon,
+            )
+            if args.mode == "reg":
+                target_scale_effective = inferred_scale
+        else:
+            splits, inferred_scale, feature_names = _load_npz_splits(
+                args.dataset_path,
+                args.mode,
+                args.target_scale,
+                args.horizon,
+            )
+            if args.mode == "reg":
+                target_scale_effective = inferred_scale
     else:
         prepared = prepare_data_for_signals(args.dataset_path, target_column=target_column)
-        splits = _build_time_splits(prepared, args.mode, target_column, args.target_scale)
+        if args.cv_folds > 0:
+            X_all = prepared.X_all_ordered.to_numpy(dtype=np.float32)
+            df_all = prepared.df_all.reset_index(drop=True)
+            if target_column not in df_all.columns:
+                raise KeyError(f"Target column '{target_column}' missing from prepared dataframe.")
+            y_ret = df_all[target_column].to_numpy(dtype=np.float32)
+            y_all = y_ret if args.mode == "reg" else (y_ret > 0.0).astype(np.int32)
+        else:
+            splits = _build_time_splits(prepared, args.mode, target_column, args.target_scale)
         if args.mode == "reg":
             target_scale_effective = args.target_scale
         feature_names = prepared.feature_names
 
-    print(
-        f"Running Optuna search (mode={args.mode}, horizon={args.horizon}h, n_trials={args.n_trials}, timeout={args.timeout}) "
-        f"with split sizes train={len(splits.y_train)}, val={len(splits.y_val)}, test={len(splits.y_test)}"
-    )
+    if args.cv_folds > 0:
+        if X_all is None or y_all is None:
+            raise RuntimeError("CV requested but full dataset arrays were not loaded.")
+        if args.cv_train_size <= 0 or args.cv_val_size <= 0 or args.cv_test_size <= 0:
+            raise ValueError("CV sizes must be positive when --cv-folds is set.")
+        folds = list(
+            build_time_series_folds(
+                len(y_all),
+                n_splits=args.cv_folds,
+                train_size=args.cv_train_size,
+                val_size=args.cv_val_size,
+                test_size=args.cv_test_size,
+                gap=args.cv_gap,
+                step_size=args.cv_step_size,
+                mode=args.cv_mode,
+            )
+        )
+        fold_slices = [(fold.train_slice, fold.val_slice, fold.test_slice) for fold in folds]
+        objective = _evaluate_objective_cv(args.mode, X_all, y_all, fold_slices)
+        print(
+            f"Running Optuna CV (mode={args.mode}, horizon={args.horizon}h, folds={len(fold_slices)}, n_trials={args.n_trials})"
+        )
+    else:
+        if splits is None:
+            raise RuntimeError("Missing dataset splits for non-CV Optuna run.")
+        objective = _evaluate_objective(args.mode, splits)
+        print(
+            f"Running Optuna search (mode={args.mode}, horizon={args.horizon}h, n_trials={args.n_trials}, timeout={args.timeout}) "
+            f"with split sizes train={len(splits.y_train)}, val={len(splits.y_val)}, test={len(splits.y_test)}"
+        )
 
-    study = _run_study(args, splits)
+    study = _run_study(args, objective)
     best_trial = study.best_trial
     best_params = best_trial.params
 
@@ -357,7 +483,35 @@ def main() -> None:
     for key, value in best_params.items():
         print(f"  {key}: {value}")
 
-    model, test_metrics = _retrain_best(args, splits, best_params)
+    if folds:
+        last_fold = folds[-1]
+        X_trainval = np.vstack([X_all[last_fold.train_slice], X_all[last_fold.val_slice]])
+        y_trainval = np.concatenate([y_all[last_fold.train_slice], y_all[last_fold.val_slice]])
+        X_test = X_all[last_fold.test_slice]
+        y_test = y_all[last_fold.test_slice]
+
+        scaler = StandardScaler()
+        scaler.fit(X_trainval)
+        X_trainval = scaler.transform(X_trainval)
+        X_test = scaler.transform(X_test)
+
+        model = _create_model(args.mode, best_params)
+        model.fit(X_trainval, y_trainval, verbose=False)
+
+        if args.mode == "reg":
+            test_pred = model.predict(X_test)
+            mse = mean_squared_error(y_test, test_pred)
+            test_metrics = {"test_rmse": float(np.sqrt(mse))}
+        else:
+            test_proba = model.predict_proba(X_test)[:, 1]
+            test_proba = np.clip(test_proba, 1e-15, 1 - 1e-15)
+            test_metrics = {
+                "test_logloss": float(log_loss(y_test, test_proba)),
+                "test_accuracy": float(accuracy_score(y_test, (test_proba >= 0.5).astype(int))),
+                "test_auc": float(roc_auc_score(y_test, test_proba)),
+            }
+    else:
+        model, test_metrics = _retrain_best(args, splits, best_params)
 
     summary = {
         "mode": args.mode,
@@ -371,9 +525,19 @@ def main() -> None:
         "val_metrics": best_trial.user_attrs,
         "test_metrics": test_metrics,
         "split_sizes": {
-            "train": len(splits.y_train),
-            "val": len(splits.y_val),
-            "test": len(splits.y_test),
+            "train": len(splits.y_train) if splits else None,
+            "val": len(splits.y_val) if splits else None,
+            "test": len(splits.y_test) if splits else None,
+        },
+        "cv": {
+            "enabled": bool(folds),
+            "folds": len(folds) if folds else 0,
+            "train_size": args.cv_train_size if folds else None,
+            "val_size": args.cv_val_size if folds else None,
+            "test_size": args.cv_test_size if folds else None,
+            "gap": args.cv_gap if folds else None,
+            "step_size": args.cv_step_size if folds else None,
+            "mode": args.cv_mode if folds else None,
         },
     }
 

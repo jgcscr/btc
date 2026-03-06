@@ -7,6 +7,9 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
+import mlflow
+import mlflow.pytorch
+from mlflow.models import get_model_info
 import numpy as np
 import pandas as pd
 import torch
@@ -125,7 +128,9 @@ from src.scripts.build_training_dataset import (
     _fill_cryptoquant_features as drop_non_binance_breakout_features,
     _merge_processed_features as merge_curated_features,
 )
+from src.training.cnn_bilstm import CNNBiLSTMDirectionClassifier
 from src.training.cnn_lstm import CNNLSTMDirectionClassifier
+from src.training.garch_lstm import GarchLSTMDirectionClassifier
 from src.training.lstm_model import BiLSTMDirectionClassifier, GRUDirectionClassifier, LSTMDirectionClassifier
 from src.models.transformer_classifier import TransformerDirectionClassifier
 from src.trading.ensembles import simple_average, weighted_average
@@ -149,7 +154,16 @@ _RESIDUAL_STD_WARNED = False
 _MISSING_FEATURE_WARNINGS: Dict[str, Set[str]] = {}
 _EXTRA_FEATURE_PLACEHOLDER_WARNINGS: Set[str] = set()
 
-_SEQUENCE_MODEL_ITER_ORDER = ("lstm", "bilstm", "gru", "cnn_lstm", "transformer", "transformer_large")
+_SEQUENCE_MODEL_ITER_ORDER = (
+    "lstm",
+    "bilstm",
+    "gru",
+    "cnn_lstm",
+    "cnn_bilstm",
+    "garch_lstm",
+    "transformer",
+    "transformer_large",
+)
 _SEQUENCE_MODEL_TYPES = set(_SEQUENCE_MODEL_ITER_ORDER)
 _VOLATILITY_METRIC_DEFAULT = "volatility_realized_24h"
 _VOLATILITY_MULT_DEFAULT = 1.25
@@ -187,6 +201,19 @@ def _ensure_feature_columns(frame: pd.DataFrame, required: List[str], context: s
         warned.update(unseen)
 
     return frame
+
+
+def _apply_platt_calibration(p_up: float, params: Mapping[str, Any]) -> float:
+    try:
+        a = float(params.get("a"))
+        b = float(params.get("b"))
+    except (TypeError, ValueError):
+        return p_up
+
+    p = min(max(float(p_up), 1e-6), 1.0 - 1e-6)
+    logit = math.log(p / (1.0 - p))
+    calibrated = 1.0 / (1.0 + math.exp(-(a * logit + b)))
+    return float(calibrated)
 
 
 def _apply_funding_rate_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -561,6 +588,101 @@ def _resolve_device(device: Optional[str]) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _resolve_mlflow_artifact_file(artifact_path: str, filename: str, *, label: str) -> str:
+    if os.path.isdir(artifact_path):
+        candidate = os.path.join(artifact_path, filename)
+        if os.path.exists(candidate):
+            return candidate
+        raise FileNotFoundError(f"{label} artifact not found at {candidate}")
+    if os.path.isfile(artifact_path):
+        return artifact_path
+    raise FileNotFoundError(f"{label} artifact not found at {artifact_path}")
+
+
+def _ensure_estimator_type(model: Any, estimator_type: str) -> None:
+    if model is None:
+        return
+    if not getattr(model, "_estimator_type", None):
+        model._estimator_type = estimator_type
+    if estimator_type == "classifier" and not hasattr(model, "classes_"):
+        model.classes_ = np.array([0, 1])
+
+
+def _extract_xgb_feature_names(model: Any) -> Optional[List[str]]:
+    names = getattr(model, "feature_names_in_", None)
+    if names is None:
+        try:
+            booster = model.get_booster()
+            names = booster.feature_names
+        except Exception:
+            names = None
+    if names:
+        return [str(name) for name in list(names)]
+    return None
+
+
+def _find_xgb_model_file(model_path: str, *, label: str) -> str:
+    if os.path.isfile(model_path):
+        return model_path
+    if not os.path.isdir(model_path):
+        raise FileNotFoundError(f"{label} model artifact not found at {model_path}")
+
+    mlmodel_path = os.path.join(model_path, "MLmodel")
+    if os.path.exists(mlmodel_path):
+        try:
+            model_cfg = mlflow.models.Model.load(model_path)
+            xgb_flavor = model_cfg.flavors.get("xgboost", {})
+            data_path = xgb_flavor.get("data")
+            if data_path:
+                candidate = os.path.join(model_path, data_path)
+                if os.path.exists(candidate):
+                    return candidate
+        except Exception:
+            pass
+
+    candidates = ("model.json", "model.xgb", "model.bin")
+    for name in candidates:
+        candidate = os.path.join(model_path, name)
+        if os.path.exists(candidate):
+            return candidate
+
+    nested = os.path.join(model_path, "model")
+    if os.path.isdir(nested):
+        for name in candidates:
+            candidate = os.path.join(nested, name)
+            if os.path.exists(candidate):
+                return candidate
+
+    for root, _, files in os.walk(model_path):
+        for filename in files:
+            if not filename.startswith("model"):
+                continue
+            if filename.endswith((".json", ".xgb", ".bin")):
+                return os.path.join(root, filename)
+
+    raise FileNotFoundError(f"{label} model file not found under {model_path}")
+
+
+def _load_xgb_registry_model(model_uri: str, *, estimator: str, label: str) -> Any:
+    model_dir = mlflow.artifacts.download_artifacts(artifact_uri=model_uri)
+    model_file = _find_xgb_model_file(model_dir, label=label)
+    if estimator == "classifier":
+        model = XGBClassifier()
+        if not getattr(model, "_estimator_type", None):
+            model._estimator_type = "classifier"
+        model.load_model(model_file)
+        if not hasattr(model, "classes_"):
+            model.classes_ = np.array([0, 1])
+        return model
+    if estimator == "regressor":
+        model = XGBRegressor()
+        if not getattr(model, "_estimator_type", None):
+            model._estimator_type = "regressor"
+        model.load_model(model_file)
+        return model
+    raise ValueError(f"Unsupported estimator type '{estimator}' for {label}.")
+
+
 def _load_recurrent_direction_model(
     model_dir: str,
     device: Optional[str],
@@ -568,69 +690,108 @@ def _load_recurrent_direction_model(
     model_cls: type[nn.Module],
     model_label: str,
 ) -> Dict[str, Any]:
-    resolved_dir = os.path.abspath(model_dir)
-    summary_path = os.path.join(resolved_dir, "summary.json")
-    if not os.path.exists(summary_path):
-        raise FileNotFoundError(f"{model_label} summary not found at {summary_path}")
+    if model_dir.startswith("models:/"):
+        # Load from MLflow registry
+        model_uri = model_dir
+        model_info = get_model_info(model_uri)
+        run_id = model_info.run_id
+        model = mlflow.pytorch.load_model(model_uri, map_location="cpu")
+        
+        # Download artifacts
+        summary_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="summary.json")
+        summary_file = _resolve_mlflow_artifact_file(summary_path, "summary.json", label=f"{model_label} summary")
+        with open(summary_file, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        
+        scaler_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="scaler.joblib")
+        scaler_file = _resolve_mlflow_artifact_file(scaler_path, "scaler.joblib", label=f"{model_label} scaler")
+        scaler_payload = joblib_load(scaler_file)
+        
+        seq_len = int(summary.get("seq_len"))
+        feature_names = summary.get("feature_names", [])
+        if not feature_names:
+            raise ValueError(f"{model_label} summary missing feature_names")
+        
+        torch_device = _resolve_device(device)
+        model.to(torch_device)
+        model.eval()
+        
+        scaler_mean = scaler_payload.get("mean")
+        scaler_std = scaler_payload.get("std")
+        
+        return {
+            "model": model,
+            "device": torch_device,
+            "seq_len": seq_len,
+            "feature_names": feature_names,
+            "scaler_mean": scaler_mean,
+            "scaler_std": scaler_std,
+        }
+    else:
+        # Load from local directory
+        resolved_dir = os.path.abspath(model_dir)
+        summary_path = os.path.join(resolved_dir, "summary.json")
+        if not os.path.exists(summary_path):
+            raise FileNotFoundError(f"{model_label} summary not found at {summary_path}")
 
-    with open(summary_path, "r", encoding="utf-8") as handle:
-        summary = json.load(handle)
+        with open(summary_path, "r", encoding="utf-8") as handle:
+            summary = json.load(handle)
 
-    seq_len = int(summary.get("seq_len"))
-    feature_names = summary.get("feature_names", [])
-    if not feature_names:
-        raise ValueError(f"{model_label} summary missing feature_names")
-    hyperparams = summary.get("hyperparams", {})
-    hidden_size = int(hyperparams.get("hidden_size"))
-    num_layers = int(hyperparams.get("num_layers"))
-    dropout = float(hyperparams.get("dropout", 0.0))
-    norm_type = str(hyperparams.get("norm_type", "none"))
+        seq_len = int(summary.get("seq_len"))
+        feature_names = summary.get("feature_names", [])
+        if not feature_names:
+            raise ValueError(f"{model_label} summary missing feature_names")
+        hyperparams = summary.get("hyperparams", {})
+        hidden_size = int(hyperparams.get("hidden_size"))
+        num_layers = int(hyperparams.get("num_layers"))
+        dropout = float(hyperparams.get("dropout", 0.0))
+        norm_type = str(hyperparams.get("norm_type", "none"))
 
-    model_path = os.path.join(resolved_dir, "model.pt")
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"{model_label} weights not found at {model_path}")
+        model_path = os.path.join(resolved_dir, "model.pt")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"{model_label} weights not found at {model_path}")
 
-    torch_device = _resolve_device(device)
-    checkpoint = torch.load(model_path, map_location=torch_device)
-    state_dict = checkpoint.get("state_dict", checkpoint)
-    input_size = int(checkpoint.get("input_size", len(feature_names)))
+        torch_device = _resolve_device(device)
+        checkpoint = torch.load(model_path, map_location=torch_device)
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        input_size = int(checkpoint.get("input_size", len(feature_names)))
 
-    classifier = model_cls(
-        input_size=input_size,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        dropout=dropout,
-        norm_type=norm_type,
-    )
-    classifier.load_state_dict(state_dict)
-    classifier.to(torch_device)
-    classifier.eval()
+        classifier = model_cls(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            norm_type=norm_type,
+        )
+        classifier.load_state_dict(state_dict)
+        classifier.to(torch_device)
+        classifier.eval()
 
-    scaler_mean = None
-    scaler_std = None
-    scaler_path = summary.get("scaler_path")
-    if scaler_path:
-        resolved_scaler = scaler_path
-        if not os.path.isabs(resolved_scaler):
-            resolved_scaler = os.path.join(resolved_dir, os.path.basename(resolved_scaler))
-        if os.path.exists(resolved_scaler):
-            if resolved_scaler.endswith(".joblib"):
-                scaler_payload = joblib_load(resolved_scaler)
-                scaler_mean = scaler_payload.get("mean")
-                scaler_std = scaler_payload.get("std")
-            else:
-                with np.load(resolved_scaler) as scaler_npz:
-                    scaler_mean = scaler_npz.get("mean")
-                    scaler_std = scaler_npz.get("std")
+        scaler_mean = None
+        scaler_std = None
+        scaler_path = summary.get("scaler_path")
+        if scaler_path:
+            resolved_scaler = scaler_path
+            if not os.path.isabs(resolved_scaler):
+                resolved_scaler = os.path.join(resolved_dir, os.path.basename(resolved_scaler))
+            if os.path.exists(resolved_scaler):
+                if resolved_scaler.endswith(".joblib"):
+                    scaler_payload = joblib_load(resolved_scaler)
+                    scaler_mean = scaler_payload.get("mean")
+                    scaler_std = scaler_payload.get("std")
+                else:
+                    with np.load(resolved_scaler) as scaler_npz:
+                        scaler_mean = scaler_npz.get("mean")
+                        scaler_std = scaler_npz.get("std")
 
-    return {
-        "model": classifier,
-        "device": torch_device,
-        "seq_len": seq_len,
-        "feature_names": feature_names,
-        "scaler_mean": scaler_mean,
-        "scaler_std": scaler_std,
-    }
+        return {
+            "model": classifier,
+            "device": torch_device,
+            "seq_len": seq_len,
+            "feature_names": feature_names,
+            "scaler_mean": scaler_mean,
+            "scaler_std": scaler_std,
+        }
 
 
 def _load_lstm_direction_model(model_dir: str, device: Optional[str]) -> Dict[str, Any]:
@@ -740,16 +901,11 @@ def _load_cnn_lstm_direction_model(model_dir: str, device: Optional[str]) -> Dic
     }
 
 
-def _load_transformer_direction_model(
-    model_dir: str,
-    device: Optional[str],
-    *,
-    model_label: str = "Transformer",
-) -> Dict[str, Any]:
+def _load_cnn_bilstm_direction_model(model_dir: str, device: Optional[str]) -> Dict[str, Any]:
     resolved_dir = os.path.abspath(model_dir)
     summary_path = os.path.join(resolved_dir, "summary.json")
     if not os.path.exists(summary_path):
-        raise FileNotFoundError(f"{model_label} summary not found at {summary_path}")
+        raise FileNotFoundError(f"CNN-BiLSTM summary not found at {summary_path}")
 
     with open(summary_path, "r", encoding="utf-8") as handle:
         summary = json.load(handle)
@@ -757,54 +913,253 @@ def _load_transformer_direction_model(
     seq_len = int(summary.get("seq_len"))
     feature_names = summary.get("feature_names", [])
     if not feature_names:
-        raise ValueError(f"{model_label} summary missing feature_names")
+        raise ValueError("CNN-BiLSTM summary missing feature_names")
     hyperparams = summary.get("hyperparams", {})
+
+    conv_channels = hyperparams.get("conv_channels")
+    conv_kernel_sizes = hyperparams.get("conv_kernel_sizes")
+    conv_strides = hyperparams.get("conv_strides")
+    if not (conv_channels and conv_kernel_sizes and conv_strides):
+        raise ValueError("CNN-BiLSTM summary missing convolution hyperparameters")
+
+    hidden_size = int(hyperparams.get("hidden_size"))
+    num_layers = int(hyperparams.get("num_layers"))
+    dropout = float(hyperparams.get("dropout", 0.0))
+    norm_type = str(hyperparams.get("norm_type", "none"))
+    conv_activation = str(hyperparams.get("conv_activation", "relu"))
+    conv_dropout = float(hyperparams.get("conv_dropout", 0.0))
 
     model_path = os.path.join(resolved_dir, "model.pt")
     if not os.path.exists(model_path):
-        raise FileNotFoundError(f"{model_label} weights not found at {model_path}")
-
-    checkpoint = torch.load(model_path, map_location="cpu")
-    input_size = int(checkpoint.get("input_size"))
-    hidden_dim = int(checkpoint.get("hidden_dim", hyperparams.get("hidden_dim", 128)))
-    num_heads = int(checkpoint.get("num_heads", hyperparams.get("num_heads", 4)))
-    ffn_dim = int(checkpoint.get("ffn_dim", hyperparams.get("ffn_dim", hidden_dim * 2)))
-    num_layers = int(checkpoint.get("num_layers", hyperparams.get("num_layers", 2)))
-    dropout = float(checkpoint.get("dropout", hyperparams.get("dropout", 0.1)))
-    use_layer_norm = bool(checkpoint.get("use_layer_norm", hyperparams.get("use_layer_norm", True)))
+        raise FileNotFoundError(f"CNN-BiLSTM weights not found at {model_path}")
 
     torch_device = _resolve_device(device)
-    transformer_model = TransformerDirectionClassifier(
-        input_size=input_size,
-        hidden_dim=hidden_dim,
-        num_heads=num_heads,
-        ffn_dim=ffn_dim,
-        num_layers=num_layers,
-        dropout=dropout,
-        max_seq_len=seq_len,
-        use_layer_norm=use_layer_norm,
-    )
+    checkpoint = torch.load(model_path, map_location=torch_device)
     state_dict = checkpoint.get("state_dict", checkpoint)
-    transformer_model.load_state_dict(state_dict)
-    transformer_model.to(torch_device)
-    transformer_model.eval()
+    input_size = int(checkpoint.get("input_size", len(feature_names)))
+
+    classifier = CNNBiLSTMDirectionClassifier(
+        input_size=input_size,
+        conv_channels=[int(value) for value in conv_channels],
+        conv_kernel_sizes=[int(value) for value in conv_kernel_sizes],
+        conv_strides=[int(value) for value in conv_strides],
+        lstm_hidden_size=hidden_size,
+        lstm_num_layers=num_layers,
+        dropout=dropout,
+        norm_type=norm_type,
+        conv_activation=conv_activation,
+        conv_dropout=conv_dropout,
+    )
+    classifier.load_state_dict(state_dict)
+    classifier.to(torch_device)
+    classifier.eval()
 
     scaler_mean = None
     scaler_std = None
-    scaler_path = os.path.join(resolved_dir, "scaler.joblib")
-    if os.path.exists(scaler_path):
-        scaler_payload = joblib_load(scaler_path)
-        scaler_mean = scaler_payload.get("mean")
-        scaler_std = scaler_payload.get("std")
+    scaler_path = summary.get("scaler_path")
+    if scaler_path:
+        resolved_scaler = scaler_path
+        if not os.path.isabs(resolved_scaler):
+            resolved_scaler = os.path.join(resolved_dir, os.path.basename(resolved_scaler))
+        if os.path.exists(resolved_scaler):
+            if resolved_scaler.endswith(".joblib"):
+                scaler_payload = joblib_load(resolved_scaler)
+                scaler_mean = scaler_payload.get("mean")
+                scaler_std = scaler_payload.get("std")
+            else:
+                with np.load(resolved_scaler) as scaler_npz:
+                    scaler_mean = scaler_npz.get("mean")
+                    scaler_std = scaler_npz.get("std")
 
     return {
-        "model": transformer_model,
+        "model": classifier,
         "device": torch_device,
         "seq_len": seq_len,
         "feature_names": feature_names,
         "scaler_mean": scaler_mean,
         "scaler_std": scaler_std,
     }
+
+
+def _load_garch_lstm_direction_model(model_dir: str, device: Optional[str]) -> Dict[str, Any]:
+    resolved_dir = os.path.abspath(model_dir)
+    summary_path = os.path.join(resolved_dir, "summary.json")
+    if not os.path.exists(summary_path):
+        raise FileNotFoundError(f"GARCH-LSTM summary not found at {summary_path}")
+
+    with open(summary_path, "r", encoding="utf-8") as handle:
+        summary = json.load(handle)
+
+    seq_len = int(summary.get("seq_len"))
+    feature_names = summary.get("feature_names", [])
+    if not feature_names:
+        raise ValueError("GARCH-LSTM summary missing feature_names")
+    hyperparams = summary.get("hyperparams", {})
+
+    hidden_size = int(hyperparams.get("hidden_size"))
+    num_layers = int(hyperparams.get("num_layers"))
+    dropout = float(hyperparams.get("dropout", 0.0))
+    norm_type = str(hyperparams.get("norm_type", "none"))
+    garch_feature = str(hyperparams.get("garch_feature", "volatility_garch_like"))
+    garch_index = hyperparams.get("garch_feature_index")
+    if garch_index is None:
+        if garch_feature in feature_names:
+            garch_index = feature_names.index(garch_feature)
+        else:
+            raise ValueError("GARCH-LSTM summary missing garch_feature_index")
+
+    model_path = os.path.join(resolved_dir, "model.pt")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"GARCH-LSTM weights not found at {model_path}")
+
+    torch_device = _resolve_device(device)
+    checkpoint = torch.load(model_path, map_location=torch_device)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    input_size = int(checkpoint.get("input_size", len(feature_names)))
+
+    classifier = GarchLSTMDirectionClassifier(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        dropout=dropout,
+        garch_feature_index=int(garch_index),
+        norm_type=norm_type,
+    )
+    classifier.load_state_dict(state_dict)
+    classifier.to(torch_device)
+    classifier.eval()
+
+    scaler_mean = None
+    scaler_std = None
+    scaler_path = summary.get("scaler_path")
+    if scaler_path:
+        resolved_scaler = scaler_path
+        if not os.path.isabs(resolved_scaler):
+            resolved_scaler = os.path.join(resolved_dir, os.path.basename(resolved_scaler))
+        if os.path.exists(resolved_scaler):
+            if resolved_scaler.endswith(".joblib"):
+                scaler_payload = joblib_load(resolved_scaler)
+                scaler_mean = scaler_payload.get("mean")
+                scaler_std = scaler_payload.get("std")
+            else:
+                with np.load(resolved_scaler) as scaler_npz:
+                    scaler_mean = scaler_npz.get("mean")
+                    scaler_std = scaler_npz.get("std")
+
+    return {
+        "model": classifier,
+        "device": torch_device,
+        "seq_len": seq_len,
+        "feature_names": feature_names,
+        "scaler_mean": scaler_mean,
+        "scaler_std": scaler_std,
+    }
+
+
+def _load_transformer_direction_model(
+    model_dir: str,
+    device: Optional[str],
+    *,
+    model_label: str = "Transformer",
+) -> Dict[str, Any]:
+    if model_dir.startswith("models:/"):
+        # Load from MLflow registry
+        model_uri = model_dir
+        model_info = get_model_info(model_uri)
+        run_id = model_info.run_id
+        model = mlflow.pytorch.load_model(model_uri, map_location="cpu")
+        
+        # Download artifacts
+        summary_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="summary.json")
+        summary_file = _resolve_mlflow_artifact_file(summary_path, "summary.json", label=f"{model_label} summary")
+        with open(summary_file, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        
+        scaler_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="scaler.joblib")
+        scaler_file = _resolve_mlflow_artifact_file(scaler_path, "scaler.joblib", label=f"{model_label} scaler")
+        scaler_payload = joblib_load(scaler_file)
+        
+        seq_len = int(summary.get("seq_len"))
+        feature_names = summary.get("feature_names", [])
+        if not feature_names:
+            raise ValueError(f"{model_label} summary missing feature_names")
+        
+        torch_device = _resolve_device(device)
+        model.to(torch_device)
+        model.eval()
+        
+        scaler_mean = scaler_payload.get("mean")
+        scaler_std = scaler_payload.get("std")
+        
+        return {
+            "model": model,
+            "device": torch_device,
+            "seq_len": seq_len,
+            "feature_names": feature_names,
+            "scaler_mean": scaler_mean,
+            "scaler_std": scaler_std,
+        }
+    else:
+        # Load from local directory
+        resolved_dir = os.path.abspath(model_dir)
+        summary_path = os.path.join(resolved_dir, "summary.json")
+        if not os.path.exists(summary_path):
+            raise FileNotFoundError(f"{model_label} summary not found at {summary_path}")
+
+        with open(summary_path, "r", encoding="utf-8") as handle:
+            summary = json.load(handle)
+
+        seq_len = int(summary.get("seq_len"))
+        feature_names = summary.get("feature_names", [])
+        if not feature_names:
+            raise ValueError(f"{model_label} summary missing feature_names")
+        hyperparams = summary.get("hyperparams", {})
+
+        model_path = os.path.join(resolved_dir, "model.pt")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"{model_label} weights not found at {model_path}")
+
+        checkpoint = torch.load(model_path, map_location="cpu")
+        input_size = int(checkpoint.get("input_size"))
+        hidden_dim = int(checkpoint.get("hidden_dim", hyperparams.get("hidden_dim", 128)))
+        num_heads = int(checkpoint.get("num_heads", hyperparams.get("num_heads", 4)))
+        ffn_dim = int(checkpoint.get("ffn_dim", hyperparams.get("ffn_dim", hidden_dim * 2)))
+        num_layers = int(checkpoint.get("num_layers", hyperparams.get("num_layers", 2)))
+        dropout = float(checkpoint.get("dropout", hyperparams.get("dropout", 0.1)))
+        use_layer_norm = bool(checkpoint.get("use_layer_norm", hyperparams.get("use_layer_norm", True)))
+
+        torch_device = _resolve_device(device)
+        transformer_model = TransformerDirectionClassifier(
+            input_size=input_size,
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            ffn_dim=ffn_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+            max_seq_len=seq_len,
+            use_layer_norm=use_layer_norm,
+        )
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        transformer_model.load_state_dict(state_dict)
+        transformer_model.to(torch_device)
+        transformer_model.eval()
+
+        scaler_mean = None
+        scaler_std = None
+        scaler_path = os.path.join(resolved_dir, "scaler.joblib")
+        if os.path.exists(scaler_path):
+            scaler_payload = joblib_load(scaler_path)
+            scaler_mean = scaler_payload.get("mean")
+            scaler_std = scaler_payload.get("std")
+
+        return {
+            "model": transformer_model,
+            "device": torch_device,
+            "seq_len": seq_len,
+            "feature_names": feature_names,
+            "scaler_mean": scaler_mean,
+            "scaler_std": scaler_std,
+        }
 
 
 def _load_transformer_large_direction_model(model_dir: str, device: Optional[str]) -> Dict[str, Any]:
@@ -816,30 +1171,94 @@ def _load_transformer_large_direction_model(model_dir: str, device: Optional[str
 
 
 def _load_xgb_direction_model(model_path: str, _device: Optional[str] = None) -> Dict[str, Any]:
-    resolved_path = os.path.abspath(model_path)
-    if not os.path.exists(resolved_path):
-        raise FileNotFoundError(f"Direction model not found: {resolved_path}")
+    if model_path.startswith("models:/"):
+        # Load from MLflow registry
+        model_info = get_model_info(model_path)
+        run_id = model_info.run_id
+        direction_model = _load_xgb_registry_model(
+            model_path,
+            estimator="classifier",
+            label="Direction",
+        )
+        feature_names = _extract_xgb_feature_names(direction_model)
+        if feature_names is None and run_id:
+            try:
+                meta_path = mlflow.artifacts.download_artifacts(
+                    run_id=run_id,
+                    artifact_path="model_metadata_direction.json",
+                )
+                meta_file = _resolve_mlflow_artifact_file(
+                    meta_path,
+                    "model_metadata_direction.json",
+                    label="Direction metadata",
+                )
+                metadata = json.loads(Path(meta_file).read_text())
+            except Exception:
+                metadata = {}
+            feature_names = metadata.get("feature_names")
+            if isinstance(feature_names, list):
+                feature_names = [str(name) for name in feature_names]
+            else:
+                feature_names = None
+    else:
+        # Load from local file
+        resolved_path = os.path.abspath(model_path)
+        if not os.path.exists(resolved_path):
+            raise FileNotFoundError(f"Direction model not found: {resolved_path}")
 
-    direction_model = XGBClassifier()
-    if not getattr(direction_model, "_estimator_type", None):
-        direction_model._estimator_type = "classifier"
-    direction_model.load_model(resolved_path)
+        direction_model = XGBClassifier()
+        if not getattr(direction_model, "_estimator_type", None):
+            direction_model._estimator_type = "classifier"
+        direction_model.load_model(resolved_path)
 
-    feature_names = None
-    meta_path = Path(resolved_path).with_name("model_metadata_direction.json")
-    if meta_path.exists():
-        try:
-            metadata = json.loads(meta_path.read_text())
-        except json.JSONDecodeError:
-            metadata = {}
-        feature_names = metadata.get("feature_names")
-        if isinstance(feature_names, list):
-            feature_names = [str(name) for name in feature_names]
-        else:
-            feature_names = None
+        feature_names = None
+        meta_path = Path(resolved_path).with_name("model_metadata_direction.json")
+        if meta_path.exists():
+            try:
+                metadata = json.loads(meta_path.read_text())
+            except json.JSONDecodeError:
+                metadata = {}
+            feature_names = metadata.get("feature_names")
+            if isinstance(feature_names, list):
+                feature_names = [str(name) for name in feature_names]
+            else:
+                feature_names = None
 
     return {
         "model": direction_model,
+        "feature_names": feature_names,
+    }
+
+
+def _load_lgbm_direction_model(model_path: str, _device: Optional[str] = None) -> Dict[str, Any]:
+    resolved_path = Path(model_path).expanduser()
+    if resolved_path.is_dir():
+        candidate = resolved_path / "lgbm_dir_model.joblib"
+        if candidate.exists():
+            resolved_path = candidate
+        else:
+            raise FileNotFoundError(f"LightGBM direction model not found in {resolved_path}")
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"LightGBM direction model not found: {resolved_path}")
+
+    payload = joblib_load(resolved_path)
+    model = payload
+    feature_names = None
+    if isinstance(payload, dict):
+        model = payload.get("model")
+        feature_names = payload.get("feature_names")
+
+    if model is None:
+        raise ValueError(f"LightGBM payload at {resolved_path} is missing a model instance.")
+
+    if not getattr(model, "_estimator_type", None):
+        model._estimator_type = "classifier"
+
+    if feature_names is not None:
+        feature_names = [str(name) for name in feature_names]
+
+    return {
+        "model": model,
         "feature_names": feature_names,
     }
 
@@ -878,8 +1297,11 @@ _DIRECTION_MODEL_LOADERS = {
     "bilstm": _load_bilstm_direction_model,
     "gru": _load_gru_direction_model,
     "cnn_lstm": _load_cnn_lstm_direction_model,
+    "cnn_bilstm": _load_cnn_bilstm_direction_model,
+    "garch_lstm": _load_garch_lstm_direction_model,
     "transformer": _load_transformer_direction_model,
     "transformer_large": _load_transformer_large_direction_model,
+    "lgbm": _load_lgbm_direction_model,
 }
 
 
@@ -893,22 +1315,56 @@ def load_models(
 ) -> Dict[str, Any]:
     models: Dict[str, Any] = {}
 
-    reg = XGBRegressor()
-    if not getattr(reg, "_estimator_type", None):
-        reg._estimator_type = "regressor"
-    reg.load_model(reg_model_path)
-    models["reg"] = reg
-    reg_meta_path = Path(reg_model_path).with_name("model_metadata.json")
-    if reg_meta_path.exists():
-        try:
-            metadata = json.loads(reg_meta_path.read_text())
-        except json.JSONDecodeError:
-            metadata = {}
-        feature_names = metadata.get("feature_names")
-        if isinstance(feature_names, list) and feature_names:
-            models["reg_feature_names"] = [str(name) for name in feature_names]
-        target_scale = float(metadata.get("target_scale", 1.0)) or 1.0
-        models["reg_target_scale"] = target_scale
+    if reg_model_path.startswith("models:/"):
+        reg_info = get_model_info(reg_model_path)
+        reg = _load_xgb_registry_model(
+            reg_model_path,
+            estimator="regressor",
+            label="Return",
+        )
+        models["reg"] = reg
+        reg_feature_names = _extract_xgb_feature_names(reg)
+        if reg_feature_names is None and reg_info.run_id:
+            try:
+                meta_path = mlflow.artifacts.download_artifacts(
+                    run_id=reg_info.run_id,
+                    artifact_path="model_metadata.json",
+                )
+                meta_file = _resolve_mlflow_artifact_file(
+                    meta_path,
+                    "model_metadata.json",
+                    label="Return metadata",
+                )
+                metadata = json.loads(Path(meta_file).read_text())
+            except Exception:
+                metadata = {}
+            reg_feature_names = metadata.get("feature_names")
+            if isinstance(reg_feature_names, list):
+                reg_feature_names = [str(name) for name in reg_feature_names]
+            else:
+                reg_feature_names = None
+            if metadata:
+                target_scale = float(metadata.get("target_scale", 1.0)) or 1.0
+                models["reg_target_scale"] = target_scale
+        if reg_feature_names:
+            models["reg_feature_names"] = reg_feature_names
+    else:
+        reg = XGBRegressor()
+        if not getattr(reg, "_estimator_type", None):
+            reg._estimator_type = "regressor"
+        reg.load_model(reg_model_path)
+        models["reg"] = reg
+        reg_meta_path = Path(reg_model_path).with_name("model_metadata.json")
+        if reg_meta_path.exists():
+            try:
+                metadata = json.loads(reg_meta_path.read_text())
+            except json.JSONDecodeError:
+                metadata = {}
+            feature_names = metadata.get("feature_names")
+            if isinstance(feature_names, list) and feature_names:
+                models["reg_feature_names"] = [str(name) for name in feature_names]
+            target_scale = float(metadata.get("target_scale", 1.0)) or 1.0
+            models["reg_target_scale"] = target_scale
 
     direction_entries: List[Dict[str, Any]] = []
 
@@ -1172,9 +1628,12 @@ def compute_signal_for_index(
     models: Dict[str, Any],
     p_up_min: float,
     ret_min: float,
+    *,
+    horizon: float | None = None,
     dir_model_weights: Optional[Dict[str, float]] = None,
     volatility_snapshot: Optional[Mapping[str, float]] = None,
     volatility_policy: Optional[Mapping[str, Any]] = None,
+    p_up_calibration: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     if not (0 <= index < len(prepared.df_all)):
         raise IndexError("Index out of range for prepared data.")
@@ -1185,8 +1644,10 @@ def compute_signal_for_index(
     X_scaled_df = pd.DataFrame(X_scaled, columns=prepared.feature_names)
 
     reg = models["reg"]
+    _ensure_estimator_type(reg, "regressor")
     target_scale = float(models.get("reg_target_scale", 1.0)) or 1.0
     dir_model = models.get("dir")
+    _ensure_estimator_type(dir_model, "classifier")
 
     reg_feature_names = models.get("reg_feature_names")
     if reg_feature_names:
@@ -1207,6 +1668,8 @@ def compute_signal_for_index(
         "bilstm": "bi-lstm",
         "gru": "gru",
         "cnn_lstm": "cnn-lstm",
+        "cnn_bilstm": "cnn-bilstm",
+        "garch_lstm": "garch-lstm",
         "transformer": "transformer",
     }
 
@@ -1256,6 +1719,12 @@ def compute_signal_for_index(
             direction_model_kind = "fallback"
         else:
             raise RuntimeError("No direction model available to compute probabilities.")
+
+    if p_up_calibration and horizon is not None:
+        key = f"{horizon:g}h" if horizon >= 1 else f"{horizon * 60:g}m"
+        params = p_up_calibration.get(key)
+        if params:
+            p_up = _apply_platt_calibration(float(p_up), params)
 
     effective_p_up_min = p_up_min
     ret_min_effective = ret_min
@@ -1391,6 +1860,7 @@ def compute_signal_for_index(
     if trend_entry is not None:
         classifier = trend_entry.get("model")
         if classifier is not None:
+            _ensure_estimator_type(classifier, "classifier")
             ti_feature_names = trend_entry.get("feature_names")
             if ti_feature_names:
                 ti_frame = _ensure_feature_columns(X_scaled_df, ti_feature_names, "trend_ignition_model")
