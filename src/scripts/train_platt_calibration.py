@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 import numpy as np
+import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 
@@ -79,6 +80,40 @@ def _fit_platt(p: np.ndarray, y: np.ndarray) -> Dict[str, float]:
     return {"a": a, "b": b}
 
 
+def _fit_regime_calibration_from_labeled_csv(
+    path: str,
+    *,
+    regime_col: str,
+    min_rows: int,
+) -> Dict[str, Dict[str, float]]:
+    df = pd.read_csv(path)
+    required = {"p_up", "y_true"}
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Regime calibration input missing required columns: {missing}")
+
+    has_regime = regime_col in df.columns
+    if not has_regime:
+        # Labeled-input augmentation is strictly for regime-specific keys.
+        return {}
+
+    if "horizon" not in df.columns:
+        df["horizon"] = "1h"
+
+    out: Dict[str, Dict[str, float]] = {}
+    for horizon, horizon_df in df.groupby("horizon"):
+        for regime, g in horizon_df.groupby(regime_col):
+            y_r = pd.to_numeric(g["y_true"], errors="coerce")
+            p_r = pd.to_numeric(g["p_up"], errors="coerce")
+            m_r = y_r.notna() & p_r.notna()
+            yy_r = y_r[m_r].to_numpy(dtype=float).astype(int)
+            pp_r = p_r[m_r].to_numpy(dtype=float)
+            if yy_r.size < min_rows or np.unique(yy_r).size <= 1:
+                continue
+            out[f"{horizon}@{regime}"] = _fit_platt(pp_r, yy_r)
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fit Platt scaling coefficients for XGBoost direction models.")
     parser.add_argument(
@@ -112,6 +147,27 @@ def main() -> None:
         default="artifacts/models/platt_calibration.json",
         help="Output JSON path for calibration coefficients.",
     )
+    parser.add_argument(
+        "--labeled-input",
+        type=str,
+        default=None,
+        help=(
+            "Optional labeled CSV (p_up,y_true,regime_state[,horizon]) used to fit "
+            "additional regime-aware calibration entries like '1h@trend_ignition'."
+        ),
+    )
+    parser.add_argument(
+        "--regime-col",
+        type=str,
+        default="regime_state",
+        help="Column in --labeled-input used as regime identifier.",
+    )
+    parser.add_argument(
+        "--min-regime-rows",
+        type=int,
+        default=100,
+        help="Minimum labeled rows required per horizon@regime for calibration fit.",
+    )
     args = parser.parse_args()
 
     output: Dict[str, Dict[str, float]] = {}
@@ -137,6 +193,16 @@ def main() -> None:
         params = _fit_platt(p_val, y_val)
         output[f"{horizon}h"] = params
         print(f"Calibrated {horizon}h: a={params['a']:.4f} b={params['b']:.4f}")
+
+    if args.labeled_input:
+        extra = _fit_regime_calibration_from_labeled_csv(
+            args.labeled_input,
+            regime_col=args.regime_col,
+            min_rows=max(int(args.min_regime_rows), 20),
+        )
+        if extra:
+            output.update(extra)
+            print(f"Added {len(extra)} horizon/regime calibration entries from labeled input.")
 
     os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
     with open(args.output_path, "w", encoding="utf-8") as handle:
