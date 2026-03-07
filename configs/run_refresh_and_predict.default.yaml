@@ -33,6 +33,13 @@ abstention_policy:
   require_positive_ev: true
   hold_prob_center: 0.5
   hold_prob_band: 0.03
+uncertainty_policy:
+  enabled: true
+  alpha: 0.2
+  hold_prob_center: 0.5
+  max_interval_width: 0.75
+  require_center_cross: true
+  min_component_count: 3
 spot_provider: binanceus
 write_artifacts: false
 disable_monitoring_latest: false
@@ -66,6 +73,11 @@ regime_model_weights:
   trend_ignition: "transformer:2.0,lstm:1.0,gru:1.0,xgb:1.0"
   neutral: "transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:1.0,cnn_bilstm:1.0,garch_lstm:1.0,xgb:1.0"
   chop: "lstm:1.5,bilstm:1.5,xgb:1.0,transformer:0.5"
+regime_model_dirs:
+  enabled: false
+  trend_ignition: {}
+  neutral: {}
+  chop: {}
 intrabar_aggregation:
   enabled: true
   interval: 15m

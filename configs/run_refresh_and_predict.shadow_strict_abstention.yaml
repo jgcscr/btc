@@ -29,6 +29,13 @@ abstention_policy:
   require_positive_ev: true
   hold_prob_center: 0.5
   hold_prob_band: 0.08
+uncertainty_policy:
+  enabled: true
+  alpha: 0.25
+  hold_prob_center: 0.5
+  max_interval_width: 0.65
+  require_center_cross: true
+  min_component_count: 3
 spot_provider: binanceus
 write_artifacts: true
 disable_monitoring_latest: false
@@ -58,6 +65,11 @@ adaptive_thresholds:
   ret_min_ceiling: 0.003
 regime_model_weights:
   enabled: false
+regime_model_dirs:
+  enabled: false
+  trend_ignition: {}
+  neutral: {}
+  chop: {}
 intrabar_aggregation:
   enabled: true
   interval: 15m

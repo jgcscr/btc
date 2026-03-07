@@ -8,6 +8,7 @@ from typing import Dict, Any, List
 
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 
@@ -80,12 +81,54 @@ def _fit_platt(p: np.ndarray, y: np.ndarray) -> Dict[str, float]:
     return {"a": a, "b": b}
 
 
+def _fit_isotonic(p: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
+    p = np.clip(p.astype(float), 1e-6, 1.0 - 1e-6)
+    model = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    model.fit(p, y.astype(int))
+    x = np.asarray(getattr(model, "X_thresholds_", []), dtype=float)
+    yhat = np.asarray(getattr(model, "y_thresholds_", []), dtype=float)
+    if x.size == 0 or yhat.size == 0:
+        # Fallback to identity when thresholds are unavailable.
+        x = np.array([0.0, 1.0], dtype=float)
+        yhat = np.array([0.0, 1.0], dtype=float)
+    return {"x": x.tolist(), "y": yhat.tolist()}
+
+
+def _fit_beta_calibration(p: np.ndarray, y: np.ndarray) -> Dict[str, float]:
+    # Beta calibration: sigma(a*log(p) + b*log(1-p) + c)
+    p = np.clip(p.astype(float), 1e-6, 1.0 - 1e-6)
+    X = np.column_stack([np.log(p), np.log(1.0 - p)])
+    clf = LogisticRegression(solver="lbfgs")
+    clf.fit(X, y.astype(int))
+    coef = clf.coef_.reshape(-1)
+    intercept = float(clf.intercept_.reshape(-1)[0])
+    return {"a": float(coef[0]), "b": float(coef[1]), "c": intercept}
+
+
+def _fit_calibrator(p: np.ndarray, y: np.ndarray, method: str) -> Dict[str, Any]:
+    method_norm = str(method).strip().lower()
+    if method_norm == "platt":
+        params = _fit_platt(p, y)
+        params["method"] = "platt"
+        return params
+    if method_norm == "isotonic":
+        params = _fit_isotonic(p, y)
+        params["method"] = "isotonic"
+        return params
+    if method_norm == "beta":
+        params = _fit_beta_calibration(p, y)
+        params["method"] = "beta"
+        return params
+    raise ValueError(f"Unsupported calibration method: {method}")
+
+
 def _fit_regime_calibration_from_labeled_csv(
     path: str,
     *,
     regime_col: str,
     min_rows: int,
-) -> Dict[str, Dict[str, float]]:
+    method: str,
+) -> Dict[str, Dict[str, Any]]:
     df = pd.read_csv(path)
     required = {"p_up", "y_true"}
     missing = [c for c in required if c not in df.columns]
@@ -100,7 +143,7 @@ def _fit_regime_calibration_from_labeled_csv(
     if "horizon" not in df.columns:
         df["horizon"] = "1h"
 
-    out: Dict[str, Dict[str, float]] = {}
+    out: Dict[str, Dict[str, Any]] = {}
     for horizon, horizon_df in df.groupby("horizon"):
         for regime, g in horizon_df.groupby(regime_col):
             y_r = pd.to_numeric(g["y_true"], errors="coerce")
@@ -110,7 +153,7 @@ def _fit_regime_calibration_from_labeled_csv(
             pp_r = p_r[m_r].to_numpy(dtype=float)
             if yy_r.size < min_rows or np.unique(yy_r).size <= 1:
                 continue
-            out[f"{horizon}@{regime}"] = _fit_platt(pp_r, yy_r)
+            out[f"{horizon}@{regime}"] = _fit_calibrator(pp_r, yy_r, method)
     return out
 
 
@@ -148,6 +191,13 @@ def main() -> None:
         help="Output JSON path for calibration coefficients.",
     )
     parser.add_argument(
+        "--method",
+        type=str,
+        choices=("platt", "isotonic", "beta"),
+        default="platt",
+        help="Calibration method to fit for horizon-wide and regime-aware entries.",
+    )
+    parser.add_argument(
         "--labeled-input",
         type=str,
         default=None,
@@ -170,7 +220,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    output: Dict[str, Dict[str, float]] = {}
+    output: Dict[str, Dict[str, Any]] = {}
     for horizon in args.horizons:
         dataset_path = args.dataset_1h if horizon == 1 else args.dataset_multi
         model_path = _resolve_xgb_dir_model_path(args.model_root, horizon)
@@ -190,15 +240,24 @@ def main() -> None:
         X_val = _align_features(X_val, dataset_feature_names, model_feature_names)
 
         p_val = model.predict_proba(X_val)[:, 1]
-        params = _fit_platt(p_val, y_val)
+        params = _fit_calibrator(p_val, y_val, args.method)
         output[f"{horizon}h"] = params
-        print(f"Calibrated {horizon}h: a={params['a']:.4f} b={params['b']:.4f}")
+        if args.method == "platt":
+            print(f"Calibrated {horizon}h (platt): a={params['a']:.4f} b={params['b']:.4f}")
+        elif args.method == "beta":
+            print(
+                "Calibrated "
+                f"{horizon}h (beta): a={params['a']:.4f} b={params['b']:.4f} c={params['c']:.4f}"
+            )
+        else:
+            print(f"Calibrated {horizon}h (isotonic): {len(params.get('x', []))} knots")
 
     if args.labeled_input:
         extra = _fit_regime_calibration_from_labeled_csv(
             args.labeled_input,
             regime_col=args.regime_col,
             min_rows=max(int(args.min_regime_rows), 20),
+            method=args.method,
         )
         if extra:
             output.update(extra)

@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.config import PROJECT_ID, BQ_DATASET_CURATED, BQ_TABLE_FEATURES_15M
 from src.data.labeling import binary_direction_labels, triple_barrier_direction_labels
+from src.data.labeling import binary_direction_labels_with_no_trade
 from src.data.bq_loader import load_btc_features_15m
 from src.data.dataset_preparation import make_features_and_target, time_series_train_val_test_split
 from src.scripts import build_training_dataset as hourly_builder
@@ -39,6 +40,8 @@ def _build_direction_targets(
     tb_vol_window: int,
     tb_upper_mult: float,
     tb_lower_mult: float,
+    no_trade_abs_ret: float,
+    no_trade_vol_mult: float,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     result = df.copy()
     if "ret_15m" not in result.columns:
@@ -52,6 +55,16 @@ def _build_direction_targets(
             lower_mult=tb_lower_mult,
         )
         result["dir_15m"] = labels
+        return result, stats
+    if no_trade_abs_ret > 0.0 or no_trade_vol_mult > 0.0:
+        labels, stats = binary_direction_labels_with_no_trade(
+            result["ret_15m"],
+            threshold=threshold,
+            no_trade_abs_ret=no_trade_abs_ret,
+            no_trade_vol_mult=no_trade_vol_mult,
+            vol_window=tb_vol_window,
+        )
+        result["dir_15m"] = labels.astype(float)
         return result, stats
     result["dir_15m"] = np.where(
         result["ret_15m"].notna(),
@@ -72,6 +85,10 @@ def build_direction_dataset(
     tb_vol_window: int,
     tb_upper_mult: float,
     tb_lower_mult: float,
+    no_trade_abs_ret: float,
+    no_trade_vol_mult: float,
+    feature_reliability_json: str | None,
+    feature_reliability_min_score: float,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -124,6 +141,8 @@ def build_direction_dataset(
         tb_vol_window=tb_vol_window,
         tb_upper_mult=tb_upper_mult,
         tb_lower_mult=tb_lower_mult,
+        no_trade_abs_ret=no_trade_abs_ret,
+        no_trade_vol_mult=no_trade_vol_mult,
     )
 
     df, dup_after_merge, gap_after_merge = enforce_unique_hourly_index(
@@ -146,6 +165,31 @@ def build_direction_dataset(
         if column in df.columns and column not in allowed_features:
             allowed_features.append(column)
     allowed_features = hourly_builder._append_technical_feature_columns(df, allowed_features)
+    if feature_reliability_json:
+        reliability_path = Path(feature_reliability_json)
+        if reliability_path.exists():
+            payload = json.loads(reliability_path.read_text(encoding="utf-8"))
+            accepted = payload.get("accepted_features")
+            score_map = payload.get("feature_scores", {}) if isinstance(payload, dict) else {}
+            if isinstance(accepted, list):
+                accepted_set = {str(v) for v in accepted}
+                filtered: list[str] = []
+                for feature in allowed_features:
+                    if feature in accepted_set:
+                        filtered.append(feature)
+                        continue
+                    score_obj = score_map.get(feature) if isinstance(score_map, dict) else None
+                    score = None
+                    if isinstance(score_obj, dict) and "score" in score_obj:
+                        try:
+                            score = float(score_obj["score"])
+                        except Exception:
+                            score = None
+                    if score is not None and score >= float(feature_reliability_min_score):
+                        filtered.append(feature)
+                if filtered:
+                    print(f"Feature reliability filter kept {len(filtered)} / {len(allowed_features)} features.")
+                    allowed_features = filtered
     df = hourly_builder._enforce_feature_coverage(df, allowed_features)
 
     X, y = make_features_and_target(
@@ -226,6 +270,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--tb-vol-window", type=int, default=96)
     parser.add_argument("--tb-upper-mult", type=float, default=1.0)
     parser.add_argument("--tb-lower-mult", type=float, default=1.0)
+    parser.add_argument("--no-trade-abs-ret", type=float, default=0.0)
+    parser.add_argument("--no-trade-vol-mult", type=float, default=0.0)
+    parser.add_argument("--feature-reliability-json", type=str, default=None)
+    parser.add_argument("--feature-reliability-min-score", type=float, default=0.55)
     args = parser.parse_args(argv)
 
     build_direction_dataset(
@@ -238,6 +286,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         tb_vol_window=args.tb_vol_window,
         tb_upper_mult=args.tb_upper_mult,
         tb_lower_mult=args.tb_lower_mult,
+        no_trade_abs_ret=args.no_trade_abs_ret,
+        no_trade_vol_mult=args.no_trade_vol_mult,
+        feature_reliability_json=args.feature_reliability_json,
+        feature_reliability_min_score=args.feature_reliability_min_score,
     )
 
 

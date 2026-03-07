@@ -392,6 +392,9 @@ def search_ensemble_thresholds(
     objective: str = "cumret",
     max_dd: Optional[float] = None,
     min_trades_constraint: Optional[int] = None,
+    utility_dd_penalty: float = 2.0,
+    utility_std_penalty: float = 0.5,
+    utility_turnover_penalty: float = 0.5,
     model_suffix: str = "1h",
     target_key: Optional[str] = None,
     label: Optional[str] = None,
@@ -499,6 +502,8 @@ def search_ensemble_thresholds(
         ret_val_eff = ret_val
         ret_test_eff = ret_test
 
+    val_obs = max(int(len(ret_val_eff)), 1)
+
     # Evaluate all combinations on validation
     results: List[ThresholdCandidate] = []
     for p_up_min in p_up_min_list:
@@ -580,6 +585,16 @@ def search_ensemble_thresholds(
         if objective_name == "sharpe_like":
             return max(constrained, key=lambda r: (r.sharpe_like_val, r.cum_ret_val))
 
+        if objective_name == "utility_stability":
+            def _utility_score(r: ThresholdCandidate) -> float:
+                dd_pen = float(utility_dd_penalty) * abs(min(r.max_drawdown_val, 0.0))
+                std_pen = float(utility_std_penalty) * max(r.ret_std_val, 0.0)
+                trade_rate = max(float(r.n_trades_val) / float(val_obs), 0.0)
+                turn_pen = float(utility_turnover_penalty) * trade_rate
+                return float(r.cum_ret_val - dd_pen - std_pen - turn_pen)
+
+            return max(constrained, key=lambda r: (_utility_score(r), r.cum_ret_val, -r.ret_std_val))
+
         if objective_name == "cumret_with_dd_constraint":
             return max(constrained, key=lambda r: (r.cum_ret_val, r.hit_rate_val))
 
@@ -646,6 +661,16 @@ def search_ensemble_thresholds(
 
     if objective == "sharpe_like":
         print(f"  sharpe_like_val*: {recommended.sharpe_like_val:.6f}")
+    if objective == "utility_stability":
+        trade_rate_star = float(recommended.n_trades_val) / float(val_obs)
+        utility_star = (
+            recommended.cum_ret_val
+            - float(utility_dd_penalty) * abs(min(recommended.max_drawdown_val, 0.0))
+            - float(utility_std_penalty) * max(recommended.ret_std_val, 0.0)
+            - float(utility_turnover_penalty) * max(trade_rate_star, 0.0)
+        )
+        print(f"  utility_val*: {utility_star:.6f}")
+        print(f"  trade_rate_val*: {trade_rate_star:.6f}")
     if objective == "cumret_with_dd_constraint" and max_dd is not None:
         constraint_ok = recommended.max_drawdown_val >= float(max_dd)
         print(f"  satisfied_max_dd_constraint: {constraint_ok}")
@@ -677,6 +702,11 @@ def search_ensemble_thresholds(
             "cum_ret": float(recommended.cum_ret_val),
             "ret_std": float(recommended.ret_std_val),
             "max_drawdown": float(recommended.max_drawdown_val),
+        },
+        "utility": {
+            "dd_penalty": float(utility_dd_penalty),
+            "std_penalty": float(utility_std_penalty),
+            "turnover_penalty": float(utility_turnover_penalty),
         },
         "test_ensemble": stats_test_ensemble,
         "test_direction_baseline": stats_test_dir_only,
@@ -838,14 +868,17 @@ def main() -> None:
     parser.add_argument(
         "--objective",
         type=str,
-        choices=["cumret", "sharpe_like", "cumret_with_dd_constraint"],
+        choices=["cumret", "sharpe_like", "cumret_with_dd_constraint", "utility_stability"],
         default="cumret",
         help=(
             "Objective used for selecting thresholds. 'cumret' maximizes cumulative return (default). "
             "'sharpe_like' maximizes return/std for active trades. 'cumret_with_dd_constraint' maximizes return "
-            "subject to an optional drawdown cap."
+            "subject to an optional drawdown cap. 'utility_stability' penalizes drawdown, variance, and turnover."
         ),
     )
+    parser.add_argument("--utility-dd-penalty", type=float, default=2.0)
+    parser.add_argument("--utility-std-penalty", type=float, default=0.5)
+    parser.add_argument("--utility-turnover-penalty", type=float, default=0.5)
     parser.add_argument(
         "--max-dd",
         type=float,
@@ -951,6 +984,9 @@ def main() -> None:
                 objective=args.objective,
                 max_dd=args.max_dd,
                 min_trades_constraint=args.min_trades,
+                utility_dd_penalty=args.utility_dd_penalty,
+                utility_std_penalty=args.utility_std_penalty,
+                utility_turnover_penalty=args.utility_turnover_penalty,
                 model_suffix=suffix_label,
                 target_key=target_key,
                 label=suffix_label,
@@ -1004,6 +1040,9 @@ def main() -> None:
         objective=args.objective,
         max_dd=args.max_dd,
         min_trades_constraint=args.min_trades,
+        utility_dd_penalty=args.utility_dd_penalty,
+        utility_std_penalty=args.utility_std_penalty,
+        utility_turnover_penalty=args.utility_turnover_penalty,
     )
 
 

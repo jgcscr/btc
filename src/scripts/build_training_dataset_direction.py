@@ -11,7 +11,11 @@ import pandas as pd
 from src.config import PROJECT_ID, BQ_DATASET_CURATED, BQ_TABLE_FEATURES_1H
 from src.data.bq_loader import load_btc_features_1h
 from src.data.dataset_preparation import make_features_and_target, time_series_train_val_test_split
-from src.data.labeling import binary_direction_labels, triple_barrier_direction_labels
+from src.data.labeling import (
+    binary_direction_labels,
+    binary_direction_labels_with_no_trade,
+    triple_barrier_direction_labels,
+)
 from src.scripts.build_training_dataset import _apply_funding_rate_features
 from src.trading.volatility import (
     DEFAULT_REALIZED_WINDOWS,
@@ -92,6 +96,7 @@ TECHNICAL_PREFIXES = (
     "candle_",
     "close_lag_",
     "interaction_",
+    "intrabar_",
     "log_",
     "mom_",
     "pattern_",
@@ -106,6 +111,44 @@ TECHNICAL_PREFIXES = (
     "volume_",
     "vol_",
 )
+
+
+def _filter_features_by_reliability(
+    allowed_features: list[str],
+    reliability_json: str | None,
+    min_score: float,
+) -> list[str]:
+    if not reliability_json:
+        return allowed_features
+    payload_path = Path(reliability_json)
+    if not payload_path.exists():
+        print(f"Feature reliability file not found at {payload_path}; skipping reliability filter.")
+        return allowed_features
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    accepted = payload.get("accepted_features")
+    if not isinstance(accepted, list):
+        return allowed_features
+    accepted_set = {str(v) for v in accepted}
+    feature_scores = payload.get("feature_scores", {}) if isinstance(payload, dict) else {}
+    filtered: list[str] = []
+    for feature in allowed_features:
+        if feature in accepted_set:
+            filtered.append(feature)
+            continue
+        score_obj = feature_scores.get(feature) if isinstance(feature_scores, dict) else None
+        score = None
+        if isinstance(score_obj, dict) and "score" in score_obj:
+            try:
+                score = float(score_obj["score"])
+            except Exception:
+                score = None
+        if score is not None and score >= float(min_score):
+            filtered.append(feature)
+    if filtered:
+        print(f"Feature reliability filter kept {len(filtered)} / {len(allowed_features)} features.")
+        return filtered
+    print("Feature reliability filter removed all allowed features; using original set as fallback.")
+    return allowed_features
 
 
 def _drop_external_source_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -347,6 +390,10 @@ def build_direction_splits(
     tb_vol_window: int = 24,
     tb_upper_mult: float = 1.0,
     tb_lower_mult: float = 1.0,
+    no_trade_abs_ret: float = 0.0,
+    no_trade_vol_mult: float = 0.0,
+    reliability_json: str | None = None,
+    reliability_min_score: float = 0.55,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -382,6 +429,11 @@ def build_direction_splits(
         if column not in allowed_features:
             allowed_features.append(column)
     allowed_features = _append_technical_feature_columns(df, allowed_features)
+    allowed_features = _filter_features_by_reliability(
+        allowed_features,
+        reliability_json=reliability_json,
+        min_score=reliability_min_score,
+    )
 
     if allowed_features:
         df = _enforce_feature_coverage(df, allowed_features)
@@ -405,7 +457,18 @@ def build_direction_splits(
         y_dir = labels_raw.dropna().astype(int)
         X = X.loc[y_dir.index]
     else:
-        y_dir = make_direction_labels(y_ret, threshold=threshold)
+        if no_trade_abs_ret > 0.0 or no_trade_vol_mult > 0.0:
+            y_labels, labeling_stats = binary_direction_labels_with_no_trade(
+                y_ret,
+                threshold=threshold,
+                no_trade_abs_ret=no_trade_abs_ret,
+                no_trade_vol_mult=no_trade_vol_mult,
+                vol_window=24,
+            )
+            y_dir = y_labels.dropna().astype(int)
+            X = X.loc[y_dir.index]
+        else:
+            y_dir = make_direction_labels(y_ret, threshold=threshold)
 
     splits = time_series_train_val_test_split(X, y_dir)
 
@@ -469,6 +532,10 @@ def build_direction_splits(
             "lower_mult": float(tb_lower_mult),
             "stats": labeling_stats,
         },
+        "no_trade_zone": {
+            "no_trade_abs_ret": float(no_trade_abs_ret),
+            "no_trade_vol_mult": float(no_trade_vol_mult),
+        },
         "volatility": {
             "columns": sorted(volatility_columns),
             "realized_windows": list(DEFAULT_REALIZED_WINDOWS),
@@ -512,6 +579,10 @@ def main() -> None:
     parser.add_argument("--tb-vol-window", type=int, default=24, help="Rolling volatility window for barriers.")
     parser.add_argument("--tb-upper-mult", type=float, default=1.0, help="Upper barrier multiplier.")
     parser.add_argument("--tb-lower-mult", type=float, default=1.0, help="Lower barrier multiplier.")
+    parser.add_argument("--no-trade-abs-ret", type=float, default=0.0, help="Absolute return no-trade band for binary labels.")
+    parser.add_argument("--no-trade-vol-mult", type=float, default=0.0, help="Volatility-multiplier no-trade band for binary labels.")
+    parser.add_argument("--feature-reliability-json", type=str, default=None, help="Optional feature reliability JSON with accepted_features.")
+    parser.add_argument("--feature-reliability-min-score", type=float, default=0.55, help="Minimum feature score when reliability JSON provides per-feature scores.")
     args = parser.parse_args()
 
     build_direction_splits(
@@ -522,6 +593,10 @@ def main() -> None:
         tb_vol_window=args.tb_vol_window,
         tb_upper_mult=args.tb_upper_mult,
         tb_lower_mult=args.tb_lower_mult,
+        no_trade_abs_ret=args.no_trade_abs_ret,
+        no_trade_vol_mult=args.no_trade_vol_mult,
+        reliability_json=args.feature_reliability_json,
+        reliability_min_score=args.feature_reliability_min_score,
     )
 
 

@@ -13,6 +13,9 @@ search:
   n_trials: 25
   timeout: null
   threshold_objective: cumret_with_dd_constraint
+  utility_dd_penalty: 2.0
+  utility_std_penalty: 0.5
+  utility_turnover_penalty: 0.5
   max_drawdown: -0.08
   min_trades: 10
   meta_weight_threshold: 0.5
@@ -70,12 +73,44 @@ quality:
     max_drawdown: -0.12
   calibration_robustness:
     enabled: true
+    method: platt
     baseline_window: 240
     recent_window: 120
     max_ece_drift: 0.02
     regime_aware: true
     regime_col: regime_state
     min_regime_rows: 100
+  leakage_audit:
+    enabled: true
+    y_key: y
+    corr_alert: 0.98
+  cv_stress_sweep:
+    enabled: true
+    y_key: y
+    folds: 4
+    train_size: 2400
+    val_size: 400
+    test_size: 400
+    gap: 24
+    purge_list: "0,12,24"
+    embargo_list: "0,12,24"
+    mode: expanding
+  feature_reliability:
+    enabled: true
+    baseline_window: 240
+    recent_window: 120
+    min_score: 0.55
+    max_features: 0
+  champion_challenger:
+    enabled: false
+    enforce: false
+    baseline_input: null
+    candidate_input: null
+    baseline_col: ret_ensemble_net
+    candidate_col: ret_ensemble_net
+    alpha: 0.05
+    n_boot: 2000
+    seed: 42
   no_trade:
     enabled: true
     trigger_trade_count_below: 10

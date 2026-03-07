@@ -159,7 +159,9 @@ CONFIG_ALLOWED_KEYS = {
     "position_size_floor",
     "position_size_cap",
     "abstention_policy",
+    "uncertainty_policy",
     "regime_model_weights",
+    "regime_model_dirs",
     "intrabar_aggregation",
 }
 # boolean config keys; converted with _bool_env
@@ -412,6 +414,51 @@ def _normalize_regime_model_weights_block(value: Mapping[str, Any]) -> Dict[str,
     return normalized
 
 
+def _normalize_uncertainty_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("uncertainty_policy config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key in {"enabled", "require_center_cross"}:
+            normalized[key] = bool(raw_value)
+        elif key in {"alpha", "hold_prob_center", "max_interval_width", "min_component_count"}:
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        else:
+            print(
+                f"Warning: Unknown uncertainty_policy config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
+    return normalized
+
+
+def _normalize_regime_model_dirs_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("regime_model_dirs config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key == "enabled":
+            normalized[key] = bool(raw_value)
+            continue
+        if key in {REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP}:
+            if isinstance(raw_value, Mapping):
+                normalized[key] = {str(k): str(v) for k, v in raw_value.items() if v is not None}
+            else:
+                print(
+                    f"Warning: regime_model_dirs.{raw_key} must be a mapping of horizon->path; ignored.",
+                    file=sys.stderr,
+                )
+            continue
+        print(
+            f"Warning: Unknown regime_model_dirs config key '{raw_key}' ignored.",
+            file=sys.stderr,
+        )
+    return normalized
+
+
 def _normalize_intrabar_aggregation_block(value: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("intrabar_aggregation config must be a mapping.")
@@ -484,8 +531,12 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_data_quality_block(value)
         if name == "abstention_policy" and value is not None:
             return _normalize_abstention_policy_block(value)
+        if name == "uncertainty_policy" and value is not None:
+            return _normalize_uncertainty_policy_block(value)
         if name == "regime_model_weights" and value is not None:
             return _normalize_regime_model_weights_block(value)
+        if name == "regime_model_dirs" and value is not None:
+            return _normalize_regime_model_dirs_block(value)
         if name == "intrabar_aggregation" and value is not None:
             return _normalize_intrabar_aggregation_block(value)
         return value
@@ -1021,6 +1072,62 @@ def _resolve_regime_model_weights_policy(config: Mapping[str, Any] | None) -> Op
     }
 
 
+def _resolve_uncertainty_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    cfg = config or {}
+    alpha = float(cfg.get("alpha") or 0.2)
+    alpha = max(0.01, min(0.49, alpha))
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "alpha": alpha,
+        "hold_prob_center": max(0.0, min(1.0, float(cfg.get("hold_prob_center") or 0.5))),
+        "max_interval_width": max(float(cfg.get("max_interval_width") or 1.0), 0.0),
+        "require_center_cross": bool(cfg.get("require_center_cross", True)),
+        "min_component_count": max(int(float(cfg.get("min_component_count") or 3)), 1),
+    }
+
+
+def _resolve_regime_model_dirs_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    if not config or not bool(config.get("enabled", False)):
+        return {"enabled": False, "paths": {}}
+
+    paths: Dict[str, Dict[str, str]] = {}
+    for regime in (REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP):
+        raw = config.get(regime)
+        if isinstance(raw, Mapping):
+            paths[regime] = {str(k): str(v) for k, v in raw.items() if v is not None}
+    return {"enabled": True, "paths": paths}
+
+
+def _resolve_regime_specific_dir_path(
+    default_path: Path,
+    *,
+    regime_state: str,
+    horizon_label: str,
+    policy: Mapping[str, Any],
+) -> Path:
+    if not policy or not bool(policy.get("enabled", False)):
+        return default_path
+    path_map = policy.get("paths", {})
+    regime_map = path_map.get(regime_state) if isinstance(path_map, Mapping) else None
+    if not isinstance(regime_map, Mapping):
+        return default_path
+    override = regime_map.get(horizon_label)
+    if not override:
+        return default_path
+    override_path = Path(str(override)).expanduser()
+    if override_path.is_dir():
+        model_file = override_path / f"xgb_dir{horizon_label}_model.json"
+        if model_file.exists():
+            override_path = model_file
+    if not override_path.exists():
+        print(
+            f"Warning: regime model dir override not found for {horizon_label}@{regime_state}: {override_path}",
+            file=sys.stderr,
+        )
+        return default_path
+    return override_path
+
+
 def _apply_regime_weight_overrides(
     base_weights: Mapping[str, float],
     *,
@@ -1079,6 +1186,55 @@ def _apply_abstention_policy(
         return True, "probability_in_hold_band"
 
     return False, "pass"
+
+
+def _apply_uncertainty_abstention(
+    *,
+    trade_action: str,
+    p_up_components: Mapping[str, Any],
+    policy: Mapping[str, Any],
+) -> tuple[bool, str, Dict[str, Any]]:
+    if trade_action == "hold":
+        return False, "already_hold", {"available": False}
+    if not bool(policy.get("enabled", False)):
+        return False, "disabled", {"available": False}
+
+    vals: List[float] = []
+    for value in p_up_components.values():
+        try:
+            vals.append(float(value))
+        except Exception:
+            continue
+    if len(vals) < int(policy.get("min_component_count", 3)):
+        return False, "insufficient_components", {"available": False, "component_count": len(vals)}
+
+    arr = np.clip(np.asarray(vals, dtype=float), 0.0, 1.0)
+    alpha = float(policy.get("alpha", 0.2))
+    lo = float(np.quantile(arr, alpha / 2.0))
+    hi = float(np.quantile(arr, 1.0 - alpha / 2.0))
+    width = hi - lo
+    center = float(policy.get("hold_prob_center", 0.5))
+    cross_center = bool(lo <= center <= hi)
+    max_width = float(policy.get("max_interval_width", 1.0))
+    too_wide = width > max_width
+
+    should_abstain = False
+    reason = "pass"
+    if bool(policy.get("require_center_cross", True)) and cross_center:
+        should_abstain = True
+        reason = "uncertainty_interval_crosses_center"
+    if too_wide:
+        should_abstain = True
+        reason = "uncertainty_interval_too_wide"
+
+    return should_abstain, reason, {
+        "available": True,
+        "component_count": int(arr.size),
+        "interval_low": lo,
+        "interval_high": hi,
+        "interval_width": width,
+        "crosses_hold_center": cross_center,
+    }
 
 
 def _compute_confidence_score(p_up: float, expected_value: float, residual_std: float) -> float:
@@ -2093,7 +2249,7 @@ def _direction_configs_for_horizon(
     return configs, weight_map
 
 
-def _load_platt_calibration(path: str | None) -> Dict[str, Dict[str, float]]:
+def _load_platt_calibration(path: str | None) -> Dict[str, Dict[str, Any]]:
     if not path:
         return {}
     path_obj = Path(path).expanduser()
@@ -2103,13 +2259,54 @@ def _load_platt_calibration(path: str | None) -> Dict[str, Dict[str, float]]:
     payload = json.loads(path_obj.read_text())
     if not isinstance(payload, dict):
         raise ValueError("Platt calibration file must contain a JSON object keyed by horizon.")
-    result: Dict[str, Dict[str, float]] = {}
+    result: Dict[str, Dict[str, Any]] = {}
     for key, value in payload.items():
         if not isinstance(value, dict):
             continue
+        method = str(value.get("method", "platt")).lower()
+        if method == "platt" and "a" in value and "b" in value:
+            result[str(key)] = {"method": "platt", "a": float(value["a"]), "b": float(value["b"])}
+            continue
+        if method == "beta" and all(k in value for k in ("a", "b", "c")):
+            result[str(key)] = {
+                "method": "beta",
+                "a": float(value["a"]),
+                "b": float(value["b"]),
+                "c": float(value["c"]),
+            }
+            continue
+        if method == "isotonic" and all(k in value for k in ("x", "y")):
+            x = [float(v) for v in value.get("x", [])]
+            y = [float(v) for v in value.get("y", [])]
+            if x and y and len(x) == len(y):
+                result[str(key)] = {"method": "isotonic", "x": x, "y": y}
+                continue
+        # Backward-compatible platt payloads without explicit method.
         if "a" in value and "b" in value:
-            result[str(key)] = {"a": float(value["a"]), "b": float(value["b"])}
+            result[str(key)] = {"method": "platt", "a": float(value["a"]), "b": float(value["b"])}
     return result
+
+
+def _apply_probability_calibration(p: float, params: Mapping[str, Any]) -> float:
+    p_clip = min(max(float(p), 1e-6), 1.0 - 1e-6)
+    method = str(params.get("method", "platt")).lower()
+    if method == "platt":
+        a = float(params.get("a", 1.0))
+        b = float(params.get("b", 0.0))
+        logit = math.log(p_clip / (1.0 - p_clip))
+        return float(1.0 / (1.0 + math.exp(-(a * logit + b))))
+    if method == "beta":
+        a = float(params.get("a", 1.0))
+        b = float(params.get("b", -1.0))
+        c = float(params.get("c", 0.0))
+        z = a * math.log(p_clip) + b * math.log(1.0 - p_clip) + c
+        return float(1.0 / (1.0 + math.exp(-z)))
+    if method == "isotonic":
+        x = np.asarray(params.get("x", []), dtype=float)
+        y = np.asarray(params.get("y", []), dtype=float)
+        if x.size >= 2 and y.size == x.size:
+            return float(np.interp(p_clip, x, y, left=y[0], right=y[-1]))
+    return float(p_clip)
 
 
 def _load_prepared(dataset_path: Path, *, target_column: str, offline: bool = False) -> tuple:
@@ -2205,9 +2402,11 @@ def run_predictions(
     direction_only_fallback: Mapping[str, Any] | None = None,
     adaptive_thresholds: Mapping[str, Any] | None = None,
     target_range_models: Mapping[str, Any] | None = None,
-    platt_calibration: Mapping[str, Mapping[str, float]] | None = None,
+    platt_calibration: Mapping[str, Mapping[str, Any]] | None = None,
     abstention_policy: Mapping[str, Any] | None = None,
+    uncertainty_policy: Mapping[str, Any] | None = None,
     regime_model_weights: Mapping[str, Any] | None = None,
+    regime_model_dirs: Mapping[str, Any] | None = None,
     latest_close: float | None = None,
     confidence_min: float = CONFIDENCE_MIN_DEFAULT,
     position_size_floor: float = POSITION_SIZE_FLOOR_DEFAULT,
@@ -2222,7 +2421,9 @@ def run_predictions(
     adaptive_policy = _resolve_adaptive_thresholds_policy(adaptive_thresholds)
     target_range_policy = _resolve_target_range_policy(target_range_models)
     abstention_policy_resolved = _resolve_abstention_policy(abstention_policy)
+    uncertainty_policy_resolved = _resolve_uncertainty_policy(uncertainty_policy)
     regime_weight_policy = _resolve_regime_model_weights_policy(regime_model_weights)
+    regime_model_dirs_policy = _resolve_regime_model_dirs_policy(regime_model_dirs)
     confidence_min = max(0.0, min(1.0, float(confidence_min)))
     position_size_floor = max(0.0, float(position_size_floor))
     position_size_cap = max(position_size_floor, float(position_size_cap))
@@ -2347,13 +2548,29 @@ def run_predictions(
         volatility_snapshot = volatility_snapshots.get(profile_key, {})
         row_features = prepared.df_all.iloc[index]
         label = _format_horizon_label(horizon)
-        reg_path, dir_path = _model_paths_for_horizon(horizon)
-        if not reg_path.exists() or not dir_path.exists():
+        reg_path, dir_path_default = _model_paths_for_horizon(horizon)
+        if not reg_path.exists() or not dir_path_default.exists():
             print(
                 f"Warning: skipping {label} horizon because model files are missing",
                 file=sys.stderr,
             )
             continue
+
+        regime_state = REGIME_NEUTRAL
+        regime_score = None
+        adaptive_scale = 1.0
+        if adaptive_policy and adaptive_policy.get("enabled"):
+            profile_score = breakout_scores.get(profile_key)
+            if profile_score is not None:
+                regime_score = profile_score
+                regime_state = _classify_regime_from_score(profile_score, adaptive_policy)
+
+        dir_path = _resolve_regime_specific_dir_path(
+            dir_path_default,
+            regime_state=regime_state,
+            horizon_label=label,
+            policy=regime_model_dirs_policy,
+        )
 
         direction_configs, base_dir_weight_map = _direction_configs_for_horizon(
             base_direction_configs,
@@ -2376,14 +2593,9 @@ def run_predictions(
         )
         horizon_p_up = horizon_thresholds["p_up_min"]
         horizon_ret = horizon_thresholds["ret_min"]
-        regime_state = REGIME_NEUTRAL
-        regime_score = None
-        adaptive_scale = 1.0
         if adaptive_policy and adaptive_policy.get("enabled"):
             profile_score = breakout_scores.get(profile_key)
             if profile_score is not None:
-                regime_score = profile_score
-                regime_state = _classify_regime_from_score(profile_score, adaptive_policy)
                 horizon_p_up, horizon_ret, adaptive_scale = _apply_adaptive_thresholds(
                     adaptive_policy,
                     horizon_p_up,
@@ -2406,7 +2618,7 @@ def run_predictions(
             dir_model_weights=dir_weight_map,
             volatility_snapshot=volatility_snapshot,
             volatility_policy=horizon_thresholds,
-            p_up_calibration=platt_calibration,
+            p_up_calibration=None,
         )
         # override direction-only signal using configurable threshold
         try:
@@ -2445,15 +2657,12 @@ def run_predictions(
         expected_value *= ev_multiplier
         confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
 
-        # Optional regime-aware calibration entries can override horizon-wide calibration.
+        # Apply optional horizon/regime calibration with support for platt/isotonic/beta payloads.
         if platt_calibration:
             regime_key = f"{label}@{regime_state}"
-            params = platt_calibration.get(regime_key)
-            if isinstance(params, Mapping) and "a" in params and "b" in params:
-                p = min(max(float(p_up), 1e-6), 1.0 - 1e-6)
-                logit = math.log(p / (1.0 - p))
-                calibrated = 1.0 / (1.0 + math.exp(-(float(params["a"]) * logit + float(params["b"])) ))
-                p_up = float(calibrated)
+            params = platt_calibration.get(regime_key) or platt_calibration.get(label)
+            if isinstance(params, Mapping):
+                p_up = _apply_probability_calibration(float(p_up), params)
                 signal_dir_only = int(p_up >= thresh)
                 signal_ensemble = int((p_up >= horizon_p_up) and (ret_pred >= horizon_ret) and (not bool(signal.get("volatility_flag"))))
                 expected_value = p_up * ret_pred - (1 - p_up) * residual_std
@@ -2612,6 +2821,21 @@ def run_predictions(
         if abstain:
             result["trade_action"] = "hold"
             result["signal_ensemble"] = 0
+
+        uncertainty_abstain, uncertainty_reason, uncertainty_payload = _apply_uncertainty_abstention(
+            trade_action=str(result["trade_action"]),
+            p_up_components=result.get("p_up_components", {}),
+            policy=uncertainty_policy_resolved,
+        )
+        result["uncertainty"] = uncertainty_payload
+        if uncertainty_abstain:
+            result["trade_action"] = "hold"
+            result["signal_ensemble"] = 0
+            result["abstention"] = {
+                "enabled": True,
+                "triggered": True,
+                "reason": uncertainty_reason,
+            }
 
         summary[label] = result
     if trend_payload and pending_trend_ts:
@@ -3034,8 +3258,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.data_quality = None
     if not hasattr(args, "abstention_policy"):
         args.abstention_policy = None
+    if not hasattr(args, "uncertainty_policy"):
+        args.uncertainty_policy = None
     if not hasattr(args, "regime_model_weights"):
         args.regime_model_weights = None
+    if not hasattr(args, "regime_model_dirs"):
+        args.regime_model_dirs = None
     if not hasattr(args, "intrabar_aggregation"):
         args.intrabar_aggregation = None
     if args.data_quality is None:
@@ -3293,7 +3521,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             target_range_models=getattr(args, "target_range_models", None),
             platt_calibration=platt_calibration,
             abstention_policy=getattr(args, "abstention_policy", None),
+            uncertainty_policy=getattr(args, "uncertainty_policy", None),
             regime_model_weights=getattr(args, "regime_model_weights", None),
+            regime_model_dirs=getattr(args, "regime_model_dirs", None),
             latest_close=latest_close,
             confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
             position_size_floor=float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),

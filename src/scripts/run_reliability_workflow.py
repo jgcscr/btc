@@ -151,6 +151,10 @@ def main() -> None:
     tuning_cfg = quality_cfg.get("joint_threshold_tuning", {}) if isinstance(quality_cfg, dict) else {}
     calibration_cfg = quality_cfg.get("calibration_robustness", {}) if isinstance(quality_cfg, dict) else {}
     no_trade_cfg = quality_cfg.get("no_trade", {}) if isinstance(quality_cfg, dict) else {}
+    leakage_cfg = quality_cfg.get("leakage_audit", {}) if isinstance(quality_cfg, dict) else {}
+    cv_stress_cfg = quality_cfg.get("cv_stress_sweep", {}) if isinstance(quality_cfg, dict) else {}
+    feature_rel_cfg = quality_cfg.get("feature_reliability", {}) if isinstance(quality_cfg, dict) else {}
+    champ_cfg = quality_cfg.get("champion_challenger", {}) if isinstance(quality_cfg, dict) else {}
 
     horizons = [int(v) for v in search_cfg.get("horizons", [1, 4, 8, 12])]
     n_trials = int(search_cfg.get("n_trials", 25))
@@ -293,6 +297,8 @@ def main() -> None:
             *[str(h) for h in horizons],
             "--output-path",
             str(summary_dir / "platt_calibration.json"),
+            "--method",
+            str(calibration_cfg.get("method", "platt")),
         ]
         results.append(_run_step("platt_calibration", calibr_cmd, logs_dir / "platt_calibration.log", args.dry_run))
 
@@ -316,6 +322,17 @@ def main() -> None:
             "--output",
             str(thresholds_path),
         ]
+        if threshold_objective == "utility_stability":
+            thresholds_cmd.extend(
+                [
+                    "--utility-dd-penalty",
+                    str(float(search_cfg.get("utility_dd_penalty", 2.0))),
+                    "--utility-std-penalty",
+                    str(float(search_cfg.get("utility_std_penalty", 0.5))),
+                    "--utility-turnover-penalty",
+                    str(float(search_cfg.get("utility_turnover_penalty", 0.5))),
+                ]
+            )
         results.append(_run_step("threshold_search", thresholds_cmd, logs_dir / "threshold_search.log", args.dry_run))
 
     if not args.skip_ensemble:
@@ -417,6 +434,52 @@ def main() -> None:
             ]
             results.append(_run_step("walkforward_validation", walkforward_cmd, logs_dir / "walkforward_validation.log", args.dry_run))
 
+        if bool(leakage_cfg.get("enabled", True)):
+            leakage_cmd = [
+                python,
+                "-m",
+                "src.scripts.audit_point_in_time_integrity",
+                "--dataset-path",
+                str(walkforward_dataset),
+                "--y-key",
+                str(leakage_cfg.get("y_key", walkforward_target)),
+                "--leakage-corr-alert",
+                str(float(leakage_cfg.get("corr_alert", 0.98))),
+                "--output",
+                str(summary_dir / "point_in_time_audit.json"),
+            ]
+            results.append(_run_step("point_in_time_audit", leakage_cmd, logs_dir / "point_in_time_audit.log", args.dry_run))
+
+        if bool(cv_stress_cfg.get("enabled", True)):
+            cv_stress_cmd = [
+                python,
+                "-m",
+                "src.scripts.run_cv_stress_sweep",
+                "--dataset-path",
+                str(walkforward_dataset),
+                "--y-key",
+                str(cv_stress_cfg.get("y_key", walkforward_target)),
+                "--folds",
+                str(int(cv_stress_cfg.get("folds", cv_folds))),
+                "--train-size",
+                str(int(cv_stress_cfg.get("train_size", cv_train_size))),
+                "--val-size",
+                str(int(cv_stress_cfg.get("val_size", cv_val_size))),
+                "--test-size",
+                str(int(cv_stress_cfg.get("test_size", cv_test_size))),
+                "--gap",
+                str(int(cv_stress_cfg.get("gap", cv_gap))),
+                "--purge-list",
+                str(cv_stress_cfg.get("purge_list", "0,12,24")),
+                "--embargo-list",
+                str(cv_stress_cfg.get("embargo_list", "0,12,24")),
+                "--mode",
+                str(cv_stress_cfg.get("mode", cv_mode)),
+                "--output",
+                str(summary_dir / "cv_stress_sweep.json"),
+            ]
+            results.append(_run_step("cv_stress_sweep", cv_stress_cmd, logs_dir / "cv_stress_sweep.log", args.dry_run))
+
         if quality_input.exists() or args.dry_run:
             quality_cmd = [
                 python,
@@ -467,6 +530,33 @@ def main() -> None:
                 ]
                 results.append(_run_step("joint_threshold_tuning", tuning_cmd, logs_dir / "joint_threshold_tuning.log", args.dry_run))
 
+            if bool(feature_rel_cfg.get("enabled", True)):
+                feature_rel_cmd = [
+                    python,
+                    "-m",
+                    "src.scripts.evaluate_feature_reliability",
+                    "--input",
+                    str(quality_input),
+                    "--baseline-window",
+                    str(int(feature_rel_cfg.get("baseline_window", 240))),
+                    "--recent-window",
+                    str(int(feature_rel_cfg.get("recent_window", 120))),
+                    "--min-score",
+                    str(float(feature_rel_cfg.get("min_score", 0.55))),
+                    "--max-features",
+                    str(int(feature_rel_cfg.get("max_features", 0))),
+                    "--output",
+                    str(summary_dir / "feature_reliability.json"),
+                ]
+                results.append(
+                    _run_step(
+                        "feature_reliability",
+                        feature_rel_cmd,
+                        logs_dir / "feature_reliability.log",
+                        args.dry_run,
+                    )
+                )
+
             if bool(calibration_cfg.get("enabled", True)):
                 calibration_cmd = [
                     python,
@@ -494,6 +584,8 @@ def main() -> None:
                         *[str(h) for h in horizons],
                         "--output-path",
                         str(summary_dir / "platt_calibration.json"),
+                        "--method",
+                        str(calibration_cfg.get("method", "platt")),
                         "--labeled-input",
                         str(quality_input),
                         "--regime-col",
@@ -592,38 +684,92 @@ def main() -> None:
             )
 
         candidate_quality_path = summary_dir / "model_quality_candidate.json"
-        if incumbent_quality_path and (candidate_quality_path.exists() or args.dry_run):
-            promote_cmd = [
-                python,
-                "-m",
-                "src.scripts.evaluate_shadow_promotion",
-                "--incumbent",
-                str(incumbent_quality_path),
-                "--candidate",
-                str(candidate_quality_path),
-                "--min-auc-delta",
-                str(float(quality_cfg.get("min_auc_delta", 0.002))),
-                "--max-brier-increase",
-                str(float(quality_cfg.get("max_brier_increase", 0.0))),
-                "--max-ece-increase",
-                str(float(quality_cfg.get("max_ece_increase", 0.01))),
-                "--min-trade-count",
-                str(int(quality_cfg.get("min_trade_count", 10))),
-                "--trade-count-key",
-                str(quality_cfg.get("trade_count_key", "trade_count")),
-                "--output",
-                str(summary_dir / "promotion_gate.json"),
-            ]
-            promotion_allowed = [0, 3] if args.continue_on_promotion_fail else [0]
-            results.append(
-                _run_step(
-                    "promotion_gate",
-                    promote_cmd,
-                    logs_dir / "promotion_gate.log",
-                    args.dry_run,
-                    allowed_returncodes=promotion_allowed,
+        champion_gate_payload: Dict[str, Any] | None = None
+        if bool(champ_cfg.get("enabled", False)):
+            baseline_input = champ_cfg.get("baseline_input")
+            candidate_input = champ_cfg.get("candidate_input")
+            if baseline_input and candidate_input:
+                champ_cmd = [
+                    python,
+                    "-m",
+                    "src.scripts.evaluate_champion_challenger",
+                    "--baseline",
+                    str(baseline_input),
+                    "--candidate",
+                    str(candidate_input),
+                    "--baseline-col",
+                    str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                    "--candidate-col",
+                    str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                    "--n-boot",
+                    str(int(champ_cfg.get("n_boot", 2000))),
+                    "--alpha",
+                    str(float(champ_cfg.get("alpha", 0.05))),
+                    "--seed",
+                    str(int(champ_cfg.get("seed", 42))),
+                    "--output",
+                    str(summary_dir / "champion_challenger_gate.json"),
+                ]
+                results.append(
+                    _run_step(
+                        "champion_challenger_gate",
+                        champ_cmd,
+                        logs_dir / "champion_challenger_gate.log",
+                        args.dry_run,
+                    )
                 )
-            )
+                gate_path = summary_dir / "champion_challenger_gate.json"
+                if gate_path.exists() and not args.dry_run:
+                    champion_gate_payload = _load_json(gate_path)
+
+        champion_blocked = bool(
+            champion_gate_payload
+            and bool(champ_cfg.get("enforce", False))
+            and not bool(champion_gate_payload.get("promote", False))
+        )
+
+        if incumbent_quality_path and (candidate_quality_path.exists() or args.dry_run):
+            if champion_blocked and not args.dry_run:
+                synthetic_gate = {
+                    "promote": False,
+                    "reason": "champion_challenger_blocked",
+                    "champion_challenger": champion_gate_payload,
+                }
+                gate_out = summary_dir / "promotion_gate.json"
+                gate_out.write_text(json.dumps(synthetic_gate, indent=2), encoding="utf-8")
+                print("Promotion gate blocked by champion-challenger significance gate.", file=sys.stderr)
+            else:
+                promote_cmd = [
+                    python,
+                    "-m",
+                    "src.scripts.evaluate_shadow_promotion",
+                    "--incumbent",
+                    str(incumbent_quality_path),
+                    "--candidate",
+                    str(candidate_quality_path),
+                    "--min-auc-delta",
+                    str(float(quality_cfg.get("min_auc_delta", 0.002))),
+                    "--max-brier-increase",
+                    str(float(quality_cfg.get("max_brier_increase", 0.0))),
+                    "--max-ece-increase",
+                    str(float(quality_cfg.get("max_ece_increase", 0.01))),
+                    "--min-trade-count",
+                    str(int(quality_cfg.get("min_trade_count", 10))),
+                    "--trade-count-key",
+                    str(quality_cfg.get("trade_count_key", "trade_count")),
+                    "--output",
+                    str(summary_dir / "promotion_gate.json"),
+                ]
+                promotion_allowed = [0, 3] if args.continue_on_promotion_fail else [0]
+                results.append(
+                    _run_step(
+                        "promotion_gate",
+                        promote_cmd,
+                        logs_dir / "promotion_gate.log",
+                        args.dry_run,
+                        allowed_returncodes=promotion_allowed,
+                    )
+                )
 
         # If quality indicates a no-trade or low-trade regime, trigger a relaxed threshold search for paper-live continuity.
         no_trade_regime = {

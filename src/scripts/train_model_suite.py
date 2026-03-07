@@ -75,6 +75,10 @@ def _build_datasets(
     tb_vol_window: int,
     tb_upper_mult: float,
     tb_lower_mult: float,
+    no_trade_abs_ret: float,
+    no_trade_vol_mult: float,
+    feature_reliability_json: str | None,
+    feature_reliability_min_score: float,
 ) -> None:
     if any(h < 1.0 for h in targets):
         _run_command(["src.scripts.build_training_dataset_15m", "--output-dir", "artifacts/datasets"])
@@ -93,7 +97,21 @@ def _build_datasets(
                 str(tb_upper_mult),
                 "--tb-lower-mult",
                 str(tb_lower_mult),
+                "--no-trade-abs-ret",
+                str(no_trade_abs_ret),
+                "--no-trade-vol-mult",
+                str(no_trade_vol_mult),
             ]
+            + (
+                [
+                    "--feature-reliability-json",
+                    str(feature_reliability_json),
+                    "--feature-reliability-min-score",
+                    str(feature_reliability_min_score),
+                ]
+                if feature_reliability_json
+                else []
+            )
         )
     if any(h >= 1.0 for h in targets):
         _run_command(["src.scripts.build_training_dataset", "--output-dir", "artifacts/datasets"])
@@ -112,7 +130,21 @@ def _build_datasets(
                 str(tb_upper_mult),
                 "--tb-lower-mult",
                 str(tb_lower_mult),
+                "--no-trade-abs-ret",
+                str(no_trade_abs_ret),
+                "--no-trade-vol-mult",
+                str(no_trade_vol_mult),
             ]
+            + (
+                [
+                    "--feature-reliability-json",
+                    str(feature_reliability_json),
+                    "--feature-reliability-min-score",
+                    str(feature_reliability_min_score),
+                ]
+                if feature_reliability_json
+                else []
+            )
         )
         _run_command(
             [
@@ -340,6 +372,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--tb-vol-window", type=int, default=24, help="Triple-barrier rolling volatility window.")
     parser.add_argument("--tb-upper-mult", type=float, default=1.0, help="Triple-barrier upper multiplier.")
     parser.add_argument("--tb-lower-mult", type=float, default=1.0, help="Triple-barrier lower multiplier.")
+    parser.add_argument("--no-trade-abs-ret", type=float, default=0.0, help="No-trade abs-return band for binary labels.")
+    parser.add_argument("--no-trade-vol-mult", type=float, default=0.0, help="No-trade volatility multiplier for binary labels.")
+    parser.add_argument("--feature-reliability-json", type=str, default=None, help="Optional feature reliability JSON used for feature filtering.")
+    parser.add_argument("--feature-reliability-min-score", type=float, default=0.55, help="Minimum feature score when filtering from reliability JSON.")
     parser.add_argument(
         "--transformer-preset",
         type=str,
@@ -361,6 +397,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             tb_vol_window=args.tb_vol_window,
             tb_upper_mult=args.tb_upper_mult,
             tb_lower_mult=args.tb_lower_mult,
+            no_trade_abs_ret=args.no_trade_abs_ret,
+            no_trade_vol_mult=args.no_trade_vol_mult,
+            feature_reliability_json=args.feature_reliability_json,
+            feature_reliability_min_score=args.feature_reliability_min_score,
         )
 
     for horizon in targets:
