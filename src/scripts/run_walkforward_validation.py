@@ -36,6 +36,8 @@ def main() -> None:
     parser.add_argument("--val-size", type=int, default=300)
     parser.add_argument("--test-size", type=int, default=300)
     parser.add_argument("--gap", type=int, default=24)
+    parser.add_argument("--purge-size", type=int, default=0)
+    parser.add_argument("--embargo-size", type=int, default=0)
     parser.add_argument("--mode", choices=("expanding", "rolling"), default="expanding")
     parser.add_argument("--output", type=Path, default=Path("artifacts/monitoring/walkforward_validation.json"))
     args = parser.parse_args()
@@ -48,6 +50,8 @@ def main() -> None:
         val_size=args.val_size,
         test_size=args.test_size,
         gap=args.gap,
+        purge_size=args.purge_size,
+        embargo_size=args.embargo_size,
         mode=args.mode,
     )
 

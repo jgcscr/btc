@@ -152,6 +152,7 @@ TECHNICAL_PREFIXES = (
     "candle_",
     "close_lag_",
     "interaction_",
+    "intrabar_",
     "log_",
     "mom_",
     "pattern_",

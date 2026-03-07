@@ -5,11 +5,14 @@ cv:
   val_size: 60
   test_size: 40
   gap: 4
+  purge_size: 0
+  embargo_size: 4
 
 search:
   horizons: [1, 4, 8, 12]
   n_trials: 5
   timeout: null
+  threshold_objective: cumret_with_dd_constraint
   max_drawdown: -0.08
   min_trades: 10
   meta_weight_threshold: 0.5
@@ -68,6 +71,9 @@ quality:
     baseline_window: 240
     recent_window: 120
     max_ece_drift: 0.02
+    regime_aware: true
+    regime_col: regime_state
+    min_regime_rows: 80
   no_trade:
     enabled: true
     trigger_trade_count_below: 10

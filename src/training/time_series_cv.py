@@ -34,6 +34,8 @@ def build_time_series_folds(
     val_size: int,
     test_size: int,
     gap: int = 0,
+    purge_size: int = 0,
+    embargo_size: int = 0,
     step_size: int | None = None,
     mode: str = "expanding",
 ) -> List[TimeSeriesFold]:
@@ -45,6 +47,10 @@ def build_time_series_folds(
         raise ValueError("train_size, val_size, and test_size must be positive")
     if gap < 0:
         raise ValueError("gap must be >= 0")
+    if purge_size < 0:
+        raise ValueError("purge_size must be >= 0")
+    if embargo_size < 0:
+        raise ValueError("embargo_size must be >= 0")
 
     if mode not in {"expanding", "rolling"}:
         raise ValueError("mode must be 'expanding' or 'rolling'")
@@ -63,9 +69,12 @@ def build_time_series_folds(
             train_start = offset
             train_end = train_start + train_size
 
-        val_start = train_end + gap
+        # Purge removes observations adjacent to validation/test boundaries from train.
+        # Embargo leaves additional spacing before validation starts.
+        effective_gap = gap + purge_size + embargo_size
+        val_start = train_end + effective_gap
         val_end = val_start + val_size
-        test_start = val_end + gap
+        test_start = val_end + gap + purge_size
         test_end = test_start + test_size
 
         if test_end > n_samples:

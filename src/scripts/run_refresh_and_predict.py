@@ -34,6 +34,8 @@ from src.scripts.build_signal_baseline import (
 from src.config_trading import (
     DEFAULT_DIR_MODEL_WEIGHTS_1H,
     DEFAULT_DIR_MODELS_1H,
+    DEFAULT_FEE_BPS,
+    DEFAULT_SLIPPAGE_BPS,
     DEFAULT_TRANSFORMER_MODEL_DIR_BY_SUFFIX,
 )
 from src.trading.direction_config import (
@@ -44,6 +46,7 @@ from src.trading.direction_config import (
     log_direction_model_configs,
     resolve_direction_model_configs,
 )
+from src.trading.ensembles import parse_weight_spec
 from src.trading.signals import (
     DEFAULT_RESIDUAL_STD,
     PreparedData,
@@ -106,6 +109,7 @@ LOCAL_FEATURE_OPTIONAL_PATHS: tuple[tuple[str, str], ...] = (
     ("onchain_path", "onchain"),
     ("cryptoquant_path", "cryptoquant"),
     ("funding_path", "funding"),
+    ("intrabar_path", "intrabar"),
 )
 
 LOCAL_FEATURE_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -133,6 +137,7 @@ CONFIG_ALLOWED_KEYS = {
     "onchain_path",
     "cryptoquant_path",
     "funding_path",
+    "intrabar_path",
     "write_artifacts",
     "disable_monitoring_latest",
     "dir_lstm_path",
@@ -153,6 +158,9 @@ CONFIG_ALLOWED_KEYS = {
     "confidence_min",
     "position_size_floor",
     "position_size_cap",
+    "abstention_policy",
+    "regime_model_weights",
+    "intrabar_aggregation",
 }
 # boolean config keys; converted with _bool_env
 CONFIG_BOOL_FIELDS = {
@@ -178,6 +186,7 @@ CONFIG_PATH_FIELDS = {
     "onchain_path",
     "cryptoquant_path",
     "funding_path",
+    "intrabar_path",
     "dir_lstm_path",
     "dir_bilstm_path",
     "dir_gru_path",
@@ -357,6 +366,73 @@ def _normalize_data_quality_block(value: Mapping[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _normalize_abstention_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("abstention_policy config must be a mapping.")
+
+    numeric_keys = {
+        "min_confidence",
+        "min_abs_expected_value",
+        "min_edge_over_fee",
+        "hold_prob_center",
+        "hold_prob_band",
+    }
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key in {"enabled", "require_positive_ev"}:
+            normalized[key] = bool(raw_value)
+        elif key in numeric_keys:
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        else:
+            print(
+                f"Warning: Unknown abstention_policy config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
+    return normalized
+
+
+def _normalize_regime_model_weights_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("regime_model_weights config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key == "enabled":
+            normalized[key] = bool(raw_value)
+            continue
+        if key in {REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP}:
+            normalized[key] = str(raw_value) if raw_value is not None else None
+            continue
+        print(
+            f"Warning: Unknown regime_model_weights config key '{raw_key}' ignored.",
+            file=sys.stderr,
+        )
+    return normalized
+
+
+def _normalize_intrabar_aggregation_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("intrabar_aggregation config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key == "enabled":
+            normalized[key] = bool(raw_value)
+        elif key == "interval":
+            normalized[key] = str(raw_value) if raw_value is not None else None
+        elif key in {"hours_multiplier", "max_rows"}:
+            normalized[key] = int(raw_value) if raw_value is not None else None
+        else:
+            print(
+                f"Warning: Unknown intrabar_aggregation config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
+    return normalized
+
+
 def _normalize_config_value(name: str, value: Any) -> Any:
     if name == "targets":
         if value is None:
@@ -406,6 +482,12 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_target_range_block(value)
         if name == "data_quality" and value is not None:
             return _normalize_data_quality_block(value)
+        if name == "abstention_policy" and value is not None:
+            return _normalize_abstention_policy_block(value)
+        if name == "regime_model_weights" and value is not None:
+            return _normalize_regime_model_weights_block(value)
+        if name == "intrabar_aggregation" and value is not None:
+            return _normalize_intrabar_aggregation_block(value)
         return value
     raise ValueError(f"Unsupported config key: {name}")
 
@@ -906,6 +988,99 @@ def _resolve_data_quality_policy(config: Mapping[str, Any] | None) -> Dict[str, 
     }
 
 
+def _resolve_abstention_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    cfg = config or {}
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "min_confidence": max(0.0, min(1.0, float(cfg.get("min_confidence") or 0.0))),
+        "min_abs_expected_value": max(float(cfg.get("min_abs_expected_value") or 0.0), 0.0),
+        "min_edge_over_fee": max(float(cfg.get("min_edge_over_fee") or 0.0), 0.0),
+        "require_positive_ev": bool(cfg.get("require_positive_ev", False)),
+        "hold_prob_center": max(0.0, min(1.0, float(cfg.get("hold_prob_center") or 0.5))),
+        "hold_prob_band": max(0.0, min(0.5, float(cfg.get("hold_prob_band") or 0.0))),
+    }
+
+
+def _resolve_regime_model_weights_policy(config: Mapping[str, Any] | None) -> Optional[Dict[str, Any]]:
+    if not config:
+        return None
+    if not bool(config.get("enabled", False)):
+        return {"enabled": False, "weights_by_regime": {}}
+
+    weights_by_regime: Dict[str, Dict[str, float]] = {}
+    for regime in (REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP):
+        raw = config.get(regime)
+        if not raw:
+            continue
+        parsed = parse_weight_spec(str(raw))
+        if parsed:
+            weights_by_regime[regime] = {str(k): float(v) for k, v in parsed.items()}
+    return {
+        "enabled": True,
+        "weights_by_regime": weights_by_regime,
+    }
+
+
+def _apply_regime_weight_overrides(
+    base_weights: Mapping[str, float],
+    *,
+    regime_state: str,
+    policy: Optional[Mapping[str, Any]],
+) -> Dict[str, float]:
+    resolved = {str(k): float(v) for k, v in base_weights.items()}
+    if not policy or not bool(policy.get("enabled")):
+        return resolved
+    weights_by_regime = policy.get("weights_by_regime") or {}
+    override = weights_by_regime.get(regime_state)
+    if not isinstance(override, Mapping):
+        return resolved
+    for key, value in override.items():
+        key_str = str(key)
+        # Accept both model names and type aliases in the weight map.
+        resolved[key_str] = float(value)
+    return resolved
+
+
+def _apply_abstention_policy(
+    *,
+    trade_action: str,
+    p_up: float,
+    confidence_score: float,
+    expected_value: float,
+    fee_bps: float,
+    slippage_bps: float,
+    policy: Mapping[str, Any],
+) -> tuple[bool, str]:
+    if trade_action == "hold":
+        return False, "already_hold"
+    if not bool(policy.get("enabled", False)):
+        return False, "disabled"
+
+    min_confidence = float(policy.get("min_confidence", 0.0))
+    if confidence_score < min_confidence:
+        return True, "confidence_below_min"
+
+    abs_ev_floor = float(policy.get("min_abs_expected_value", 0.0))
+    if abs(expected_value) < abs_ev_floor:
+        return True, "expected_value_below_abs_floor"
+
+    if bool(policy.get("require_positive_ev", False)) and expected_value <= 0.0:
+        return True, "non_positive_expected_value"
+
+    edge_over_fee_floor = float(policy.get("min_edge_over_fee", 0.0))
+    total_cost = max(fee_bps + slippage_bps, 0.0) / 10_000.0
+    edge_over_fee = expected_value - total_cost
+    if edge_over_fee < edge_over_fee_floor:
+        return True, "edge_over_fee_below_min"
+
+    hold_center = float(policy.get("hold_prob_center", 0.5))
+    hold_band = float(policy.get("hold_prob_band", 0.0))
+    if hold_band > 0.0 and abs(float(p_up) - hold_center) <= hold_band:
+        return True, "probability_in_hold_band"
+
+    return False, "pass"
+
+
 def _compute_confidence_score(p_up: float, expected_value: float, residual_std: float) -> float:
     # Blend directional conviction with risk-adjusted edge into a bounded confidence score.
     directional = min(1.0, abs(p_up - 0.5) * 2.0)
@@ -1192,6 +1367,92 @@ def run_ingestion(
     output_path = ingest_binance_us_spot(symbol=symbol, interval=interval, limit=limit)
     print(f"Saved spot tidy parquet to {output_path}")
     return output_path
+
+
+def _pivot_tidy_spot_ohlcv(path: Path) -> pd.DataFrame:
+    tidy = pd.read_parquet(path)
+    wide = tidy.pivot(index="ts", columns="metric", values="value").reset_index()
+    rename_map = {
+        "spot_open": "open",
+        "spot_high": "high",
+        "spot_low": "low",
+        "spot_close": "close",
+        "spot_volume": "volume",
+        "spot_quote_volume": "quote_volume",
+        "spot_num_trades": "num_trades",
+        "spot_taker_buy_base_volume": "taker_buy_base_volume",
+        "spot_taker_buy_quote_volume": "taker_buy_quote_volume",
+    }
+    wide = wide.rename(columns=rename_map)
+    wide["ts"] = pd.to_datetime(wide["ts"], utc=True, errors="coerce")
+    wide = wide.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+    return wide
+
+
+def _compute_intrabar_features_from_15m(path_15m_tidy: Path) -> pd.DataFrame:
+    frame = _pivot_tidy_spot_ohlcv(path_15m_tidy)
+    required = {"open", "high", "low", "close", "volume"}
+    missing = [col for col in required if col not in frame.columns]
+    if missing:
+        raise RuntimeError(f"15m frame missing columns required for intrabar aggregation: {missing}")
+
+    for col in ("open", "high", "low", "close", "volume"):
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    for optional_col in ("num_trades", "taker_buy_base_volume"):
+        if optional_col not in frame.columns:
+            frame[optional_col] = 0.0
+        frame[optional_col] = pd.to_numeric(frame[optional_col], errors="coerce").fillna(0.0)
+    frame = frame.dropna(subset=["open", "high", "low", "close", "volume"]).copy()
+
+    frame["hour_ts"] = frame["ts"].dt.ceil("h")
+    frame["bar_ret"] = frame["close"].pct_change().replace([np.inf, -np.inf], np.nan)
+    frame["is_up_bar"] = (frame["close"] > frame["open"]).astype(float)
+    frame["range"] = (frame["high"] - frame["low"]).abs()
+    frame["body"] = (frame["close"] - frame["open"]).abs()
+    wick = (frame["range"] - frame["body"]).clip(lower=0.0)
+    frame["wick_ratio"] = wick / frame["range"].replace(0.0, np.nan)
+
+    grouped = frame.groupby("hour_ts", as_index=False).agg(
+        intrabar_ret_std_15m_1h=("bar_ret", "std"),
+        intrabar_up_bar_ratio_15m_1h=("is_up_bar", "mean"),
+        intrabar_wick_ratio_15m_1h=("wick_ratio", "mean"),
+        intrabar_sum_range_15m_1h=("range", "sum"),
+        intrabar_sum_volume_15m_1h=("volume", "sum"),
+        intrabar_mean_trade_count_15m_1h=("num_trades", "mean"),
+        intrabar_taker_buy_base_sum_15m_1h=("taker_buy_base_volume", "sum"),
+        intrabar_open_first_15m_1h=("open", "first"),
+        intrabar_close_last_15m_1h=("close", "last"),
+        intrabar_high_max_15m_1h=("high", "max"),
+        intrabar_low_min_15m_1h=("low", "min"),
+    )
+
+    grouped["intrabar_trend_strength_15m_1h"] = (
+        (grouped["intrabar_close_last_15m_1h"] - grouped["intrabar_open_first_15m_1h"]).abs()
+        /
+        (grouped["intrabar_high_max_15m_1h"] - grouped["intrabar_low_min_15m_1h"]).replace(0.0, np.nan)
+    )
+    grouped["intrabar_range_ratio_15m_1h"] = (
+        grouped["intrabar_sum_range_15m_1h"]
+        /
+        grouped["intrabar_close_last_15m_1h"].replace(0.0, np.nan)
+    )
+    grouped["intrabar_taker_buy_ratio_15m_1h"] = (
+        grouped["intrabar_taker_buy_base_sum_15m_1h"]
+        /
+        grouped["intrabar_sum_volume_15m_1h"].replace(0.0, np.nan)
+    )
+
+    grouped = grouped.rename(columns={"hour_ts": "ts"})
+    grouped = grouped.drop(
+        columns=[
+            "intrabar_open_first_15m_1h",
+            "intrabar_close_last_15m_1h",
+            "intrabar_high_max_15m_1h",
+            "intrabar_low_min_15m_1h",
+        ],
+        errors="ignore",
+    )
+    return grouped.sort_values("ts").reset_index(drop=True)
 
 
 def _build_ohlcv_frame_from_tidy(df: pd.DataFrame) -> pd.DataFrame:
@@ -1945,6 +2206,8 @@ def run_predictions(
     adaptive_thresholds: Mapping[str, Any] | None = None,
     target_range_models: Mapping[str, Any] | None = None,
     platt_calibration: Mapping[str, Mapping[str, float]] | None = None,
+    abstention_policy: Mapping[str, Any] | None = None,
+    regime_model_weights: Mapping[str, Any] | None = None,
     latest_close: float | None = None,
     confidence_min: float = CONFIDENCE_MIN_DEFAULT,
     position_size_floor: float = POSITION_SIZE_FLOOR_DEFAULT,
@@ -1958,6 +2221,8 @@ def run_predictions(
     direction_fallback_policy = _resolve_direction_fallback_policy(direction_only_fallback)
     adaptive_policy = _resolve_adaptive_thresholds_policy(adaptive_thresholds)
     target_range_policy = _resolve_target_range_policy(target_range_models)
+    abstention_policy_resolved = _resolve_abstention_policy(abstention_policy)
+    regime_weight_policy = _resolve_regime_model_weights_policy(regime_model_weights)
     confidence_min = max(0.0, min(1.0, float(confidence_min)))
     position_size_floor = max(0.0, float(position_size_floor))
     position_size_cap = max(position_size_floor, float(position_size_cap))
@@ -2090,7 +2355,7 @@ def run_predictions(
             )
             continue
 
-        direction_configs, dir_weight_map = _direction_configs_for_horizon(
+        direction_configs, base_dir_weight_map = _direction_configs_for_horizon(
             base_direction_configs,
             dir_model_path=str(dir_path),
             horizon=horizon,
@@ -2125,6 +2390,12 @@ def run_predictions(
                     horizon_ret,
                     regime_state,
                 )
+        dir_weight_map = _apply_regime_weight_overrides(
+            base_dir_weight_map,
+            regime_state=regime_state,
+            policy=regime_weight_policy,
+        )
+
         signal = compute_signal_for_index(
             prepared=prepared,
             index=index,
@@ -2173,6 +2444,21 @@ def run_predictions(
         ev_multiplier = float(horizon_thresholds.get("expected_value_multiplier", 1.0))
         expected_value *= ev_multiplier
         confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
+
+        # Optional regime-aware calibration entries can override horizon-wide calibration.
+        if platt_calibration:
+            regime_key = f"{label}@{regime_state}"
+            params = platt_calibration.get(regime_key)
+            if isinstance(params, Mapping) and "a" in params and "b" in params:
+                p = min(max(float(p_up), 1e-6), 1.0 - 1e-6)
+                logit = math.log(p / (1.0 - p))
+                calibrated = 1.0 / (1.0 + math.exp(-(float(params["a"]) * logit + float(params["b"])) ))
+                p_up = float(calibrated)
+                signal_dir_only = int(p_up >= thresh)
+                signal_ensemble = int((p_up >= horizon_p_up) and (ret_pred >= horizon_ret) and (not bool(signal.get("volatility_flag"))))
+                expected_value = p_up * ret_pred - (1 - p_up) * residual_std
+                expected_value *= ev_multiplier
+                confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
         position_size = _compute_position_size(
             confidence_score,
             confidence_min=confidence_min,
@@ -2245,6 +2531,11 @@ def run_predictions(
             "expected_value": expected_value,
             "thresholds": horizon_thresholds,
             "regime_state": regime_state,
+            "regime_weight_overrides": (
+                regime_weight_policy.get("weights_by_regime", {}).get(regime_state)
+                if regime_weight_policy and regime_weight_policy.get("enabled")
+                else None
+            ),
             "projected_high": target_projection.get("projected_high") if target_projection else None,
             "projected_low": target_projection.get("projected_low") if target_projection else None,
             "projected_high_confidence": target_projection.get("projected_high_confidence", 0.0)
@@ -2303,6 +2594,25 @@ def run_predictions(
             result["confidence_filter_triggered"] = False
         if fallback_triggered:
             pending_direction_fallback_ts = signal_ts
+
+        abstain, abstain_reason = _apply_abstention_policy(
+            trade_action=str(result["trade_action"]),
+            p_up=p_up,
+            confidence_score=confidence_score,
+            expected_value=expected_value,
+            fee_bps=float(DEFAULT_FEE_BPS),
+            slippage_bps=float(DEFAULT_SLIPPAGE_BPS),
+            policy=abstention_policy_resolved,
+        )
+        result["abstention"] = {
+            "enabled": bool(abstention_policy_resolved.get("enabled", False)),
+            "triggered": bool(abstain),
+            "reason": abstain_reason,
+        }
+        if abstain:
+            result["trade_action"] = "hold"
+            result["signal_ensemble"] = 0
+
         summary[label] = result
     if trend_payload and pending_trend_ts:
         _write_trend_ignition_state(pending_trend_ts)
@@ -2605,6 +2915,35 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional funding parquet/CSV used only for metadata when --use-local-features is enabled.",
     )
     parser.add_argument(
+        "--intrabar-path",
+        type=str,
+        default=None,
+        help="Optional intrabar (15m->1h aggregated) parquet/CSV merged when --use-local-features is enabled.",
+    )
+    parser.add_argument(
+        "--intrabar-enabled",
+        action="store_true",
+        help="Fetch 15m Binance candles and aggregate intrabar features into the live inference bundle.",
+    )
+    parser.add_argument(
+        "--intrabar-interval",
+        type=str,
+        default="15m",
+        help="Binance interval used for intrabar aggregation (default: 15m).",
+    )
+    parser.add_argument(
+        "--intrabar-hours-multiplier",
+        type=int,
+        default=4,
+        help="Multiplier for intrabar fetch size relative to --hours (default: 4 for 15m).",
+    )
+    parser.add_argument(
+        "--intrabar-max-rows",
+        type=int,
+        default=4000,
+        help="Upper bound on intrabar rows fetched from Binance for aggregation.",
+    )
+    parser.add_argument(
         "--write-artifacts",
         action="store_true",
         help="Update monitoring artifacts (trade_ready_summary + meta baseline) after predictions complete.",
@@ -2693,6 +3032,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.target_range_models = None
     if not hasattr(args, "data_quality"):
         args.data_quality = None
+    if not hasattr(args, "abstention_policy"):
+        args.abstention_policy = None
+    if not hasattr(args, "regime_model_weights"):
+        args.regime_model_weights = None
+    if not hasattr(args, "intrabar_aggregation"):
+        args.intrabar_aggregation = None
     if args.data_quality is None:
         args.data_quality = {}
     if args.data_quality_enabled:
@@ -2704,6 +3049,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     args.data_quality["min_rows"] = args.min_rows
     prepared_override: tuple[PreparedData, int, float, str] | None = None
     args.local_feature_metadata = None
+
+    intrabar_cfg = dict(getattr(args, "intrabar_aggregation", {}) or {})
+    if args.intrabar_enabled:
+        intrabar_cfg["enabled"] = True
+    if args.intrabar_interval:
+        intrabar_cfg.setdefault("interval", args.intrabar_interval)
+    intrabar_cfg.setdefault("hours_multiplier", args.intrabar_hours_multiplier)
+    intrabar_cfg.setdefault("max_rows", args.intrabar_max_rows)
+    intrabar_enabled = bool(intrabar_cfg.get("enabled", False))
 
     if getattr(args, "config", None):
         print(f"Loaded CLI defaults from config: {args.config}")
@@ -2717,6 +3071,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     latest_close: float | None = None
     latest_spot_features_path: str | None = None
+    intrabar_features_path: str | None = None
     if args.use_local_features:
         try:
             optional_sources = {
@@ -2754,6 +3109,27 @@ def main(argv: Sequence[str] | None = None) -> None:
     else:
         try:
             output_path = run_ingestion(hours=args.hours, provider=args.spot_provider)
+
+            if intrabar_enabled:
+                intrabar_interval = str(intrabar_cfg.get("interval") or "15m")
+                hours_mult = max(int(intrabar_cfg.get("hours_multiplier") or 4), 1)
+                max_rows = max(int(intrabar_cfg.get("max_rows") or 4000), 1)
+                intrabar_limit = min(max_rows, max(args.hours * hours_mult, args.hours))
+                intrabar_tidy_path = run_ingestion(
+                    hours=intrabar_limit,
+                    interval=intrabar_interval,
+                    provider=args.spot_provider,
+                )
+                intrabar_df = _compute_intrabar_features_from_15m(intrabar_tidy_path)
+                intrabar_output = Path("data/processed/technical") / "intrabar_features_15m_to_1h.parquet"
+                intrabar_output.parent.mkdir(parents=True, exist_ok=True)
+                intrabar_df.to_parquet(intrabar_output, index=False)
+                intrabar_features_path = str(intrabar_output)
+                print(
+                    "Saved intrabar aggregated features to "
+                    f"{intrabar_output} (rows={len(intrabar_df)}, interval={intrabar_interval}).",
+                )
+
             # Save latest price data to spot_klines for dataset building
             if output_path and output_path.exists():
                 df = pd.read_parquet(output_path)
@@ -2820,7 +3196,15 @@ def main(argv: Sequence[str] | None = None) -> None:
                 prepared_override, metadata = _prepare_local_feature_bundle(
                     features_path=latest_spot_features_path,
                     hours=args.hours,
-                    optional_sources={"technical": technical_features_path} if technical_features_path else None,
+                    optional_sources={
+                        key: value
+                        for key, value in {
+                            "technical": technical_features_path,
+                            "intrabar": intrabar_features_path,
+                        }.items()
+                        if value
+                    }
+                    or None,
                 )
                 args.local_feature_metadata = metadata
                 print(
@@ -2908,6 +3292,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             adaptive_thresholds=getattr(args, "adaptive_thresholds", None),
             target_range_models=getattr(args, "target_range_models", None),
             platt_calibration=platt_calibration,
+            abstention_policy=getattr(args, "abstention_policy", None),
+            regime_model_weights=getattr(args, "regime_model_weights", None),
             latest_close=latest_close,
             confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
             position_size_floor=float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),

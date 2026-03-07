@@ -161,6 +161,8 @@ def main() -> None:
     cv_val_size = int(cv_cfg.get("val_size", 400))
     cv_test_size = int(cv_cfg.get("test_size", 400))
     cv_gap = int(cv_cfg.get("gap", 24))
+    cv_purge_size = int(cv_cfg.get("purge_size", 0))
+    cv_embargo_size = int(cv_cfg.get("embargo_size", 0))
     cv_mode = str(cv_cfg.get("mode", "expanding"))
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -202,6 +204,10 @@ def main() -> None:
                 str(cv_test_size),
                 "--cv-gap",
                 str(cv_gap),
+                "--cv-purge-size",
+                str(cv_purge_size),
+                "--cv-embargo-size",
+                str(cv_embargo_size),
                 "--cv-mode",
                 cv_mode,
             ]
@@ -233,6 +239,10 @@ def main() -> None:
                     str(cv_test_size),
                     "--cv-gap",
                     str(cv_gap),
+                    "--cv-purge-size",
+                    str(cv_purge_size),
+                    "--cv-embargo-size",
+                    str(cv_embargo_size),
                     "--cv-mode",
                     cv_mode,
                 ]
@@ -263,6 +273,10 @@ def main() -> None:
                     str(cv_test_size),
                     "--cv-gap",
                     str(cv_gap),
+                    "--cv-purge-size",
+                    str(cv_purge_size),
+                    "--cv-embargo-size",
+                    str(cv_embargo_size),
                     "--cv-mode",
                     cv_mode,
                 ]
@@ -284,6 +298,7 @@ def main() -> None:
 
     thresholds_path = summary_dir / "calibrated_thresholds.json"
     if not args.skip_thresholds:
+        threshold_objective = str(search_cfg.get("threshold_objective", "cumret_with_dd_constraint"))
         thresholds_cmd = [
             python,
             "-m",
@@ -291,7 +306,7 @@ def main() -> None:
             "--targets",
             _join_horizons(horizons),
             "--objective",
-            "cumret_with_dd_constraint",
+            threshold_objective,
             "--max-dd",
             str(search_cfg.get("max_drawdown", -0.08)),
             "--min-trades",
@@ -391,6 +406,10 @@ def main() -> None:
                 str(cv_test_size),
                 "--gap",
                 str(cv_gap),
+                "--purge-size",
+                str(cv_purge_size),
+                "--embargo-size",
+                str(cv_embargo_size),
                 "--mode",
                 cv_mode,
                 "--output",
@@ -465,6 +484,31 @@ def main() -> None:
                     str(summary_dir / "calibration_robustness.json"),
                 ]
                 results.append(_run_step("calibration_robustness", calibration_cmd, logs_dir / "calibration_robustness.log", args.dry_run))
+
+                if bool(calibration_cfg.get("regime_aware", True)):
+                    regime_calib_cmd = [
+                        python,
+                        "-m",
+                        "src.scripts.train_platt_calibration",
+                        "--horizons",
+                        *[str(h) for h in horizons],
+                        "--output-path",
+                        str(summary_dir / "platt_calibration.json"),
+                        "--labeled-input",
+                        str(quality_input),
+                        "--regime-col",
+                        str(calibration_cfg.get("regime_col", "regime_state")),
+                        "--min-regime-rows",
+                        str(int(calibration_cfg.get("min_regime_rows", 100))),
+                    ]
+                    results.append(
+                        _run_step(
+                            "platt_calibration_regime_aware",
+                            regime_calib_cmd,
+                            logs_dir / "platt_calibration_regime_aware.log",
+                            args.dry_run,
+                        )
+                    )
 
             if bool(rolling_ab_cfg.get("enabled", False)):
                 baseline_input = rolling_ab_cfg.get("baseline_input")

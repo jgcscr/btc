@@ -60,6 +60,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cv-val-size", type=int, default=0, help="Validation window size for each fold.")
     parser.add_argument("--cv-test-size", type=int, default=0, help="Test window size for each fold.")
     parser.add_argument("--cv-gap", type=int, default=0, help="Gap size between train/val/test windows.")
+    parser.add_argument("--cv-purge-size", type=int, default=0, help="Rows purged between train/val and val/test boundaries.")
+    parser.add_argument("--cv-embargo-size", type=int, default=0, help="Rows embargoed between train and validation windows.")
     parser.add_argument("--cv-step-size", type=int, default=None, help="Step size between folds (defaults to test size).")
     parser.add_argument("--cv-mode", type=str, default="expanding", choices=["expanding", "rolling"], help="Time-series CV mode.")
     return parser.parse_args()
@@ -201,6 +203,8 @@ def main() -> None:
                 val_size=args.cv_val_size,
                 test_size=args.cv_test_size,
                 gap=args.cv_gap,
+                purge_size=args.cv_purge_size,
+                embargo_size=args.cv_embargo_size,
                 step_size=args.cv_step_size,
                 mode=args.cv_mode,
             )
@@ -310,6 +314,8 @@ def main() -> None:
             "val_size": args.cv_val_size,
             "test_size": args.cv_test_size,
             "gap": args.cv_gap,
+            "purge_size": args.cv_purge_size,
+            "embargo_size": args.cv_embargo_size,
             "step_size": args.cv_step_size,
             "mode": args.cv_mode,
         }
@@ -324,6 +330,8 @@ def main() -> None:
             val_size=args.cv_val_size,
             test_size=args.cv_test_size,
             gap=args.cv_gap,
+            purge_size=args.cv_purge_size,
+            embargo_size=args.cv_embargo_size,
             step_size=args.cv_step_size,
             mode=args.cv_mode,
         )

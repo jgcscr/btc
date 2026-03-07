@@ -67,13 +67,53 @@ def _run_command(args: Sequence[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
-def _build_datasets(targets: Iterable[float]) -> None:
+def _build_datasets(
+    targets: Iterable[float],
+    *,
+    labeling_scheme: str,
+    tb_horizon_steps: int,
+    tb_vol_window: int,
+    tb_upper_mult: float,
+    tb_lower_mult: float,
+) -> None:
     if any(h < 1.0 for h in targets):
         _run_command(["src.scripts.build_training_dataset_15m", "--output-dir", "artifacts/datasets"])
-        _run_command(["src.scripts.build_training_dataset_direction_15m", "--output-dir", "artifacts/datasets"])
+        _run_command(
+            [
+                "src.scripts.build_training_dataset_direction_15m",
+                "--output-dir",
+                "artifacts/datasets",
+                "--labeling-scheme",
+                labeling_scheme,
+                "--tb-horizon-steps",
+                str(tb_horizon_steps),
+                "--tb-vol-window",
+                str(tb_vol_window),
+                "--tb-upper-mult",
+                str(tb_upper_mult),
+                "--tb-lower-mult",
+                str(tb_lower_mult),
+            ]
+        )
     if any(h >= 1.0 for h in targets):
         _run_command(["src.scripts.build_training_dataset", "--output-dir", "artifacts/datasets"])
-        _run_command(["src.scripts.build_training_dataset_direction", "--output-dir", "artifacts/datasets"])
+        _run_command(
+            [
+                "src.scripts.build_training_dataset_direction",
+                "--output-dir",
+                "artifacts/datasets",
+                "--labeling-scheme",
+                labeling_scheme,
+                "--tb-horizon-steps",
+                str(tb_horizon_steps),
+                "--tb-vol-window",
+                str(tb_vol_window),
+                "--tb-upper-mult",
+                str(tb_upper_mult),
+                "--tb-lower-mult",
+                str(tb_lower_mult),
+            ]
+        )
         _run_command(
             [
                 "src.scripts.build_training_dataset_multi_horizon",
@@ -290,6 +330,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Sequence length for recurrent/transformer models (default: 24).",
     )
     parser.add_argument(
+        "--labeling-scheme",
+        type=str,
+        default="triple_barrier",
+        choices=["binary", "triple_barrier"],
+        help="Direction label strategy for dataset rebuilds (default: triple_barrier).",
+    )
+    parser.add_argument("--tb-horizon-steps", type=int, default=1, help="Triple-barrier forward steps.")
+    parser.add_argument("--tb-vol-window", type=int, default=24, help="Triple-barrier rolling volatility window.")
+    parser.add_argument("--tb-upper-mult", type=float, default=1.0, help="Triple-barrier upper multiplier.")
+    parser.add_argument("--tb-lower-mult", type=float, default=1.0, help="Triple-barrier lower multiplier.")
+    parser.add_argument(
         "--transformer-preset",
         type=str,
         default="base",
@@ -303,7 +354,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise SystemExit("No horizons provided.")
 
     if args.rebuild_datasets:
-        _build_datasets(targets)
+        _build_datasets(
+            targets,
+            labeling_scheme=args.labeling_scheme,
+            tb_horizon_steps=args.tb_horizon_steps,
+            tb_vol_window=args.tb_vol_window,
+            tb_upper_mult=args.tb_upper_mult,
+            tb_lower_mult=args.tb_lower_mult,
+        )
 
     for horizon in targets:
         dataset = _dataset_for_horizon(horizon)

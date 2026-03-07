@@ -21,6 +21,14 @@ data_quality:
 confidence_min: 0.0
 position_size_floor: 0.0
 position_size_cap: 1.0
+abstention_policy:
+  enabled: true
+  min_confidence: 0.2
+  min_abs_expected_value: 0.0002
+  min_edge_over_fee: 0.0001
+  require_positive_ev: true
+  hold_prob_center: 0.5
+  hold_prob_band: 0.03
 spot_provider: binanceus
 write_artifacts: true
 disable_monitoring_latest: false
@@ -49,6 +57,13 @@ adaptive_thresholds:
   p_up_min_ceiling: 0.75
   ret_min_floor: -0.0005
   ret_min_ceiling: 0.003
+regime_model_weights:
+  enabled: false
+intrabar_aggregation:
+  enabled: true
+  interval: 15m
+  hours_multiplier: 4
+  max_rows: 4000
 target_range_models:
   enabled: false
   model_dir: artifacts/models/target_ranges
