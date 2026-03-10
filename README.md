@@ -325,6 +325,19 @@ python -m src.scripts.analyze_overlap_trust_flip \
 
 For exact fold-level bar attribution, rerun overlap compare with the standard workflow settings and inspect the emitted `*_rows.csv` files for the selected model. `src.scripts.compare_walkforward_models` now writes per-bar fold exports alongside each model summary JSON.
 
+Export raw overlap feature-row deltas for the bars that actually flipped trust:
+
+```bash
+python -m src.scripts.analyze_overlap_feature_drift \
+  --trusted-run-id <trusted-default-run-id> \
+  --drift-run-id <drifting-default-run-id> \
+  --run-root artifacts/reliability \
+  --detail-analysis artifacts/analysis/overlap_trust_flip_detailed_latest.json \
+  --output artifacts/analysis/overlap_feature_drift_latest.json
+```
+
+The feature-drift artifact includes the worst-fold train-window boundaries plus the matched per-bar `p_up`, signal, and `ret_net` values for each changed row when the detailed overlap row exports are available.
+
 Supporting comparison/watchlist scripts currently present:
 
 - `src.scripts.build_default_vs_midband_paper_live_longitudinal`
