@@ -36,6 +36,22 @@ uncertainty_policy:
   max_interval_width: 0.75
   require_center_cross: true
   min_component_count: 3
+trade_decision_policy:
+  enabled: true
+  model_path: artifacts/models/trade_decision_model.json
+  threshold: 0.58
+  use_oof_expected_value: true
+  oof_expected_value_mode: max_with_raw_calibrated
+  enforce_positive_oof_envelope: true
+  block_when_no_positive_oof_bin: true
+  positive_oof_min_samples: 4
+  allow_raw_ev_fallback_when_no_positive_oof_bin: true
+  raw_ev_fallback_quantile: 0.9
+  raw_ev_fallback_min_edge_over_fee: 0.0
+  min_expected_net: 0.0
+  min_edge_over_fee: 0.0
+  replace_threshold_rule: true
+  require_direction_ret_alignment: true
 spot_provider: binanceus
 write_artifacts: true
 disable_monitoring_latest: false
@@ -55,7 +71,7 @@ direction_only_fallback:
   cooldown_hours: 4
   ignition_ev_extension: 0.0002
 adaptive_thresholds:
-  enabled: false
+  enabled: true
   breakout_score_threshold: 0.8
   chop_score_threshold: 0.3
   breakout_scale: 0.9
@@ -65,19 +81,34 @@ adaptive_thresholds:
   ret_min_floor: -0.0005
   ret_min_ceiling: 0.003
 regime_model_weights:
-  enabled: false
+  enabled: true
+  trend_ignition: "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.0"
+  neutral: "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.5"
+  chop: "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5,lgbm:1.5"
 regime_model_dirs:
-  enabled: false
-  trend_ignition: {}
-  neutral: {}
-  chop: {}
+  enabled: true
+  trend_ignition:
+    "1h": artifacts/models/xgb_dir1h_v2
+    "4h": artifacts/models/xgb_dir4h_v2
+    "8h": artifacts/models/xgb_dir8h_v2
+    "12h": artifacts/models/xgb_dir12h_v2
+  neutral:
+    "1h": artifacts/models/xgb_dir1h_v2
+    "4h": artifacts/models/xgb_dir4h_v2
+    "8h": artifacts/models/xgb_dir8h_v2
+    "12h": artifacts/models/xgb_dir12h_v2
+  chop:
+    "1h": artifacts/models/xgb_dir1h_v2
+    "4h": artifacts/models/xgb_dir4h_v2
+    "8h": artifacts/models/xgb_dir8h_v2
+    "12h": artifacts/models/xgb_dir12h_v2
 intrabar_aggregation:
   enabled: true
   interval: 15m
   hours_multiplier: 4
   max_rows: 4000
 target_range_models:
-  enabled: false
+  enabled: true
   model_dir: artifacts/models/target_ranges
   horizons: [4, 8, 12]
   override_ratio: 0.01

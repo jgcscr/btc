@@ -1,3 +1,7 @@
+profile:
+  id: midband_paper_evaluation
+  name: Midband Paper Evaluation Runtime
+
 cv:
   folds: 2
   mode: expanding
@@ -266,7 +270,8 @@ quality:
     raw_ev_calibration_source: weighted_hybrid
     raw_ev_candidate_weight: 4.0
     weak_band_candidate_only_veto:
-      enabled: false
+      enabled: true
+      official_mode: midband
       p_up_low: 0.55
       p_up_high: 0.60
       high_inclusive: false
@@ -285,7 +290,7 @@ quality:
         high_inclusive: false
         min_abs_ret_pred: 0.0005
         max_abs_ret_pred: 0.001
-        incumbent_reference_path: null
+        incumbent_reference_path: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
       raw_ev_sign:
         enabled: false
         p_up_low: 0.55

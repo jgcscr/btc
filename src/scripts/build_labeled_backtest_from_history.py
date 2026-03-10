@@ -42,7 +42,18 @@ def _load_history_rows(path: Path, horizon: str) -> pd.DataFrame:
             "ts": ts_value,
             "generated_at": entry.get("generated_at") if isinstance(entry, dict) else None,
             "p_up": p_up,
+            "ret_pred": horizon_pred.get("ret_pred"),
+            "signal_dir_only": horizon_pred.get("signal_dir_only"),
+            "expected_value": horizon_pred.get("expected_value"),
+            "regime_state": horizon_pred.get("regime_state"),
         }
+        volatility = horizon_pred.get("volatility", {})
+        if isinstance(volatility, dict):
+            snapshot = volatility.get("snapshot", {})
+            if isinstance(snapshot, dict):
+                row["volatility_realized_24h"] = snapshot.get("volatility_realized_24h")
+                row["volatility_ewm_24h"] = snapshot.get("volatility_ewm_24h")
+                row["volatility_garch_like"] = snapshot.get("volatility_garch_like")
         components = horizon_pred.get("p_up_components", {})
         if isinstance(components, dict):
             for name, value in components.items():
@@ -146,6 +157,45 @@ def _load_backtest_rows(path: Path) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+def _enrich_with_history_decision_features(
+    base: pd.DataFrame,
+    history_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if base.empty or history_df.empty:
+        return base
+
+    enrich_cols = [
+        "ret_pred",
+        "signal_dir_only",
+        "expected_value",
+        "regime_state",
+        "volatility_realized_24h",
+        "volatility_ewm_24h",
+        "volatility_garch_like",
+    ]
+    available_cols = [c for c in enrich_cols if c in history_df.columns]
+    if not available_cols:
+        return base
+
+    out = base.copy()
+    out["ts_hour"] = pd.to_datetime(out["ts"], utc=True, errors="coerce").dt.floor("h")
+    hist = history_df.copy()
+    hist["ts_hour"] = pd.to_datetime(hist["ts"], utc=True, errors="coerce").dt.floor("h")
+    hist = hist.dropna(subset=["ts_hour"]).drop_duplicates(subset=["ts_hour"], keep="last")
+    mapped = hist.loc[:, ["ts_hour", *available_cols]]
+    merged = out.merge(mapped, on="ts_hour", how="left", suffixes=("", "_hist"))
+    for col in available_cols:
+        hist_col = f"{col}_hist"
+        if hist_col not in merged.columns:
+            continue
+        if col not in merged.columns:
+            merged[col] = merged[hist_col]
+        else:
+            merged[col] = merged[col].where(merged[col].notna(), merged[hist_col])
+        merged = merged.drop(columns=[hist_col])
+    return merged.drop(columns=["ts_hour"], errors="ignore")
+
+
 def _apply_time_filters(
     df: pd.DataFrame,
     lookback_rows: Optional[int],
@@ -168,6 +218,8 @@ def _assign_fold(df: pd.DataFrame, fold_size: int) -> pd.DataFrame:
 
 def _build_from_backtest(
     backtest_csv: Path,
+    history_path: Path,
+    horizon: str,
     fold_size: int,
     lookback_rows: Optional[int],
     lookback_hours: Optional[int],
@@ -179,6 +231,12 @@ def _build_from_backtest(
             "Backtest CSV must include y_true or ret_1h to derive labels."
         )
     labeled = backtest.dropna(subset=["y_true"]).copy()
+    try:
+        history_df = _load_history_rows(history_path, horizon)
+        labeled = _enrich_with_history_decision_features(labeled, history_df)
+    except Exception:
+        # Keep canonical backtest behavior even when history enrichment is unavailable.
+        pass
     labeled["y_true"] = labeled["y_true"].astype(int)
     labeled = _assign_fold(labeled, fold_size)
     meta = {
@@ -300,6 +358,8 @@ def main() -> None:
             backtest_csv = _select_best_backtest_candidate(args.backtest_csv, min_rows_hint=int(args.min_rows))
             labeled, meta = _build_from_backtest(
                 backtest_csv,
+                history_path=args.history_path,
+                horizon=args.horizon,
                 fold_size=args.fold_size,
                 lookback_rows=lookback_rows,
                 lookback_hours=lookback_hours,

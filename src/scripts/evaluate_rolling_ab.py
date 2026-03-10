@@ -63,6 +63,11 @@ def main() -> None:
     parser.add_argument("--window-size", type=int, default=168, help="Window size in rows (default 168 ~ 1 week hourly).")
     parser.add_argument("--step-size", type=int, default=24, help="Window step in rows (default 24 ~ 1 day hourly).")
     parser.add_argument("--min-window-trades", type=int, default=5, help="Minimum trades per policy in a window to count it.")
+    parser.add_argument(
+        "--allow-no-trade-baseline",
+        action="store_true",
+        help="Treat windows with baseline no-trade as valid when candidate meets min-window-trades.",
+    )
     parser.add_argument("--output", type=Path, default=Path("artifacts/monitoring/rolling_ab_report.json"))
     parser.add_argument("--output-md", type=Path, default=Path("artifacts/monitoring/rolling_ab_report.md"))
     args = parser.parse_args()
@@ -88,7 +93,12 @@ def main() -> None:
         b_stats = _window_stats(w["ret_baseline"].to_numpy(dtype=float), w["signal_baseline"].to_numpy(dtype=float))
         c_stats = _window_stats(w["ret_candidate"].to_numpy(dtype=float), w["signal_candidate"].to_numpy(dtype=float))
 
-        valid = b_stats["n_trades"] >= int(args.min_window_trades) and c_stats["n_trades"] >= int(args.min_window_trades)
+        min_trades = int(args.min_window_trades)
+        baseline_ok = b_stats["n_trades"] >= min_trades
+        candidate_ok = c_stats["n_trades"] >= min_trades
+        valid = baseline_ok and candidate_ok
+        if bool(args.allow_no_trade_baseline) and (not baseline_ok) and int(b_stats["n_trades"]) == 0 and candidate_ok:
+            valid = True
         winner = "insufficient_trades"
         if valid:
             if c_stats["cum_ret"] > b_stats["cum_ret"]:
@@ -108,6 +118,11 @@ def main() -> None:
                 "end_ts": w["ts"].iloc[-1].isoformat(),
                 "valid": valid,
                 "winner": winner,
+                "validity_context": {
+                    "baseline_ok": bool(baseline_ok),
+                    "candidate_ok": bool(candidate_ok),
+                    "allow_no_trade_baseline": bool(args.allow_no_trade_baseline),
+                },
                 "baseline": b_stats,
                 "candidate": c_stats,
                 "delta_cum_ret": float(c_stats["cum_ret"] - b_stats["cum_ret"]),
@@ -122,6 +137,7 @@ def main() -> None:
         "window_size": int(args.window_size),
         "step_size": int(args.step_size),
         "min_window_trades": int(args.min_window_trades),
+        "allow_no_trade_baseline": bool(args.allow_no_trade_baseline),
         "overall": {
             "baseline": overall_baseline,
             "candidate": overall_candidate,

@@ -364,9 +364,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--labeling-scheme",
         type=str,
-        default="triple_barrier",
-        choices=["binary", "triple_barrier"],
-        help="Direction label strategy for dataset rebuilds (default: triple_barrier).",
+        default="binary",
+        choices=["binary", "binary_no_trade", "triple_barrier"],
+        help="Direction label strategy for dataset rebuilds (default: binary).",
     )
     parser.add_argument("--tb-horizon-steps", type=int, default=1, help="Triple-barrier forward steps.")
     parser.add_argument("--tb-vol-window", type=int, default=24, help="Triple-barrier rolling volatility window.")

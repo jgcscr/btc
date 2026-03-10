@@ -107,6 +107,18 @@ def main() -> None:
         "fold_auc_stability": fold_metrics,
     }
 
+    if "ret_ensemble_net" in df.columns:
+        ret_net = pd.to_numeric(df["ret_ensemble_net"], errors="coerce").fillna(0.0)
+        payload["net_return_total"] = float(ret_net.sum())
+        payload["net_return_mean"] = float(ret_net.mean())
+        if args.signal_col in df.columns:
+            signal = pd.to_numeric(df[args.signal_col], errors="coerce").fillna(0.0)
+            active = signal > 0
+            if int(active.sum()) > 0:
+                payload["net_return_per_trade_mean"] = float(ret_net[active].mean())
+            else:
+                payload["net_return_per_trade_mean"] = float("nan")
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps(payload, indent=2))

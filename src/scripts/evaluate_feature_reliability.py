@@ -64,13 +64,24 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("artifacts/monitoring/feature_reliability.json"))
     args = parser.parse_args()
 
-    if args.input.suffix.lower() == ".parquet":
+    if args.input.suffix.lower() == ".npz":
+        with np.load(args.input, allow_pickle=True) as data:
+            required = {"X_train", "X_val", "X_test", "feature_names"}
+            missing = required.difference(set(data.files))
+            if missing:
+                raise KeyError(f"Dataset NPZ missing required keys: {sorted(missing)}")
+            X_all = np.concatenate([data["X_train"], data["X_val"], data["X_test"]], axis=0)
+            feature_names = [str(v) for v in data["feature_names"].tolist()]
+            df = pd.DataFrame(X_all, columns=feature_names)
+    elif args.input.suffix.lower() == ".parquet":
         df = pd.read_parquet(args.input)
     else:
         df = pd.read_csv(args.input)
 
     feature_cols: List[str] = [
-        c for c in df.columns if c not in {"ts", "timestamp", "y", "y_true", "ret_1h", "horizon"}
+        c
+        for c in df.columns
+        if c not in {"ts", "timestamp", "y", "y_true", "ret_1h", "horizon", "signal_ensemble", "ret_pred", "p_up"}
     ]
     scores: Dict[str, Dict[str, float]] = {}
     for col in feature_cols:

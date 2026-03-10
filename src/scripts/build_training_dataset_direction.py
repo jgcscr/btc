@@ -17,6 +17,8 @@ from src.data.labeling import (
     triple_barrier_direction_labels,
 )
 from src.scripts.build_training_dataset import _apply_funding_rate_features
+from src.scripts.build_training_dataset import _load_local_features as _load_hourly_local_features
+from src.scripts.build_training_dataset import merge_intrahour_15m_features
 from src.trading.volatility import (
     DEFAULT_REALIZED_WINDOWS,
     add_volatility_columns,
@@ -28,9 +30,6 @@ PROCESSED_PATHS = [
     Path("data/processed/technical/hourly_features.parquet"),
     Path("data/processed/funding/hourly_features.parquet"),
 ]
-
-SPOT_KLINES_DIR = Path("data/spot_klines")
-_BINANCE_SPOT_FEATURES: Optional[pd.DataFrame] = None
 
 META_PATH = Path("artifacts/datasets/btc_features_1h_direction_meta.json")
 
@@ -366,19 +365,8 @@ def make_direction_labels(y_ret: pd.Series, threshold: float) -> pd.Series:
 
 
 def _load_local_features() -> pd.DataFrame:
-    """Load features from local files instead of BigQuery."""
-    # Load spot klines
-    spot_files = list(SPOT_KLINES_DIR.glob("*.parquet"))
-    if not spot_files:
-        raise FileNotFoundError(f"No spot klines found in {SPOT_KLINES_DIR}")
-    
-    spot_df = pd.concat([pd.read_parquet(f) for f in spot_files], ignore_index=True)
-    # ts is already datetime
-    spot_df = spot_df[["ts", "open", "high", "low", "close", "volume", "quote_volume", "num_trades", "taker_buy_base_volume", "taker_buy_quote_volume"]]
-    
-    # Merge with processed features
-    df = _merge_processed_features(spot_df, PROCESSED_PATHS)
-    return df
+    """Load local hourly features from the expanded Binance-only source stack."""
+    return _load_hourly_local_features()
 
 
 def build_direction_splits(
@@ -394,6 +382,7 @@ def build_direction_splits(
     no_trade_vol_mult: float = 0.0,
     reliability_json: str | None = None,
     reliability_min_score: float = 0.55,
+    meta_path: str | None = None,
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -410,6 +399,7 @@ def build_direction_splits(
     df = df.sort_values("ts").drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
 
     df = _merge_processed_features(df, PROCESSED_PATHS)
+    df = merge_intrahour_15m_features(df)
     df = _apply_funding_rate_features(df)
     df = _drop_external_source_columns(df)
     df = _augment_price_features(df)
@@ -456,32 +446,41 @@ def build_direction_splits(
         )
         y_dir = labels_raw.dropna().astype(int)
         X = X.loc[y_dir.index]
+    elif labeling_scheme == "binary_no_trade":
+        y_labels, labeling_stats = binary_direction_labels_with_no_trade(
+            y_ret,
+            threshold=threshold,
+            no_trade_abs_ret=no_trade_abs_ret,
+            no_trade_vol_mult=no_trade_vol_mult,
+            vol_window=24,
+        )
+        y_dir = y_labels.dropna().astype(int)
+        X = X.loc[y_dir.index]
     else:
-        if no_trade_abs_ret > 0.0 or no_trade_vol_mult > 0.0:
-            y_labels, labeling_stats = binary_direction_labels_with_no_trade(
-                y_ret,
-                threshold=threshold,
-                no_trade_abs_ret=no_trade_abs_ret,
-                no_trade_vol_mult=no_trade_vol_mult,
-                vol_window=24,
-            )
-            y_dir = y_labels.dropna().astype(int)
-            X = X.loc[y_dir.index]
-        else:
-            y_dir = make_direction_labels(y_ret, threshold=threshold)
+        y_dir = make_direction_labels(y_ret, threshold=threshold)
+        X = X.loc[y_dir.index]
+
+    y_dir = y_dir.loc[X.index]
+    y_ret_selected = pd.to_numeric(y_ret.loc[X.index], errors="coerce").fillna(0.0)
+    ts_selected = pd.to_datetime(ts_series.loc[X.index], utc=True, errors="coerce")
+    aligned_df = df.loc[X.index].reset_index(drop=True)
 
     splits = time_series_train_val_test_split(X, y_dir)
 
     output_path = os.path.join(output_dir, "btc_features_1h_direction_splits.npz")
-    ts_values = ts_series.to_numpy(dtype="datetime64[ns]")
+    ts_values = ts_selected.to_numpy(dtype="datetime64[ns]")
     n_train = splits.X_train.shape[0]
     n_val = splits.X_val.shape[0]
+    y_ret_values = y_ret_selected.to_numpy(dtype=np.float32, copy=False)
+    y_ret_train = y_ret_values[:n_train]
+    y_ret_val = y_ret_values[n_train:n_train + n_val]
+    y_ret_test = y_ret_values[n_train + n_val :]
     ts_train = ts_values[:n_train]
     ts_val = ts_values[n_train:n_train + n_val]
     ts_test = ts_values[n_train + n_val :]
 
     volatility_arrays = split_volatility_arrays(
-        df,
+        aligned_df,
         volatility_columns,
         n_train=n_train,
         n_val=n_val,
@@ -495,6 +494,9 @@ def build_direction_splits(
         y_val=splits.y_val,
         X_test=splits.X_test,
         y_test=splits.y_test,
+        y_ret_train=y_ret_train,
+        y_ret_val=y_ret_val,
+        y_ret_test=y_ret_test,
         ts_train=ts_train,
         ts_val=ts_val,
         ts_test=ts_test,
@@ -547,9 +549,10 @@ def build_direction_splits(
             "test": _describe(ts_test),
         },
     }
-    META_PATH.parent.mkdir(parents=True, exist_ok=True)
-    META_PATH.write_text(json.dumps(meta_payload, indent=2))
-    print(f"Wrote direction dataset meta summary to {META_PATH}")
+    resolved_meta_path = Path(meta_path) if meta_path else Path(output_dir) / "btc_features_1h_direction_meta.json"
+    resolved_meta_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_meta_path.write_text(json.dumps(meta_payload, indent=2))
+    print(f"Wrote direction dataset meta summary to {resolved_meta_path}")
     return output_path
 
 
@@ -571,7 +574,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--labeling-scheme",
-        choices=("binary", "triple_barrier"),
+        choices=("binary", "binary_no_trade", "triple_barrier"),
         default="binary",
         help="Direction label construction strategy.",
     )
@@ -583,6 +586,7 @@ def main() -> None:
     parser.add_argument("--no-trade-vol-mult", type=float, default=0.0, help="Volatility-multiplier no-trade band for binary labels.")
     parser.add_argument("--feature-reliability-json", type=str, default=None, help="Optional feature reliability JSON with accepted_features.")
     parser.add_argument("--feature-reliability-min-score", type=float, default=0.55, help="Minimum feature score when reliability JSON provides per-feature scores.")
+    parser.add_argument("--meta-path", type=str, default=None, help="Optional output path for direction dataset metadata JSON.")
     args = parser.parse_args()
 
     build_direction_splits(
@@ -597,6 +601,7 @@ def main() -> None:
         no_trade_vol_mult=args.no_trade_vol_mult,
         reliability_json=args.feature_reliability_json,
         reliability_min_score=args.feature_reliability_min_score,
+        meta_path=args.meta_path,
     )
 
 

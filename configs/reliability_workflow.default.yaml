@@ -37,33 +37,136 @@ cadence:
   weekly_recalibration_weekday: mon
 
 quality:
-  enabled: false
+  enabled: true
   # Build canonical evaluation slice consumed by all quality/calibration/tuning checks.
   build_labeled_dataset: true
   backtest_csv: artifacts/backtests/latest/backtest_signals.csv
   prefer_backtest: true
-  lookback_rows: 2000
-  lookback_hours: 0
-  min_labeled_rows: 200
+  lookback_rows: 12000
+  lookback_hours: 2160
+  min_labeled_rows: 300
   fold_size: 12
   walkforward_horizon: 1
   walkforward_dataset: artifacts/datasets/btc_features_1h_direction_splits.npz
   walkforward_y_key: y
+  walkforward_model_kind: xgb
+  walkforward_signal_threshold: 0.5
+  walkforward_fee_bps: 2.0
+  walkforward_slippage_bps: 1.0
+  walkforward_model_compare:
+    enabled: true
+    selection_policy: best_cum_ret
+    folds: 5
+    train_size: 36
+    val_size: 12
+    test_size: 10
+    gap: 2
+    purge_size: 0
+    embargo_size: 2
+    mode: rolling
+    min_train_size: 20
+    min_val_size: 10
+    min_test_size: 10
+    signal_threshold: 0.5
+    fee_bps: 2.0
+    slippage_bps: 1.0
+    rolling_guard: true
+    meta_margin: 0.001
+    meta_min_rolling_trades: 40
+  walkforward_labeled_reconciliation:
+    enabled: true
+    use_as_primary: true
+    ts_col: ts
+    min_rows: 80
+    min_overlap_cum_ret: -0.005
+    require_non_negative_overlap_selected: true
+    max_abs_cum_ret_gap: 0.03
+    min_overlap_folds: 4
+    min_overlap_test_rows: 48
+    overlap_compare:
+      folds: 8
+      train_size: 28
+      val_size: 10
+      test_size: 8
+      gap: 1
+      purge_size: 0
+      embargo_size: 1
+      mode: rolling
+      min_train_size: 16
+      min_val_size: 8
+      min_test_size: 8
+      selection_policy: best_cum_ret
+    overlap_model_selection:
+      enabled: true
+      primary_model: xgb
+      fallback_model: meta_stack
+      min_ret_improvement: 0.0
+      only_when_primary_negative: true
+      require_fallback_auc_non_worse: false
+      min_fallback_trades: 10
+    enforce_for_paper_live: true
+  overlap_pre_tuning:
+    enabled: true
+    use_overlap_feature_reliability_for_ablation: true
+    feature_reliability:
+      enabled: true
+      baseline_window: 80
+      recent_window: 40
+      min_score: 0.55
+      max_features: 0
+    model_pruning:
+      enabled: true
+      min_cum_ret: 0.0
+      min_trade_count: 10
+      require_viable_model_for_tuning: true
+      fallback_tuning:
+        enabled: true
+        p_up_grid: "0.58,0.60,0.62"
+        ret_min_grid: "0.0,0.0001,0.0002"
+        direction_threshold_grid: "0.54,0.56,0.58"
+        min_trades: 10
+        max_drawdown: -0.12
+        min_cum_ret: 0.0
+        selection_metric: economics_score
+        economics_turnover_penalty: 0.002
+        economics_downside_penalty: 2.0
+        stability_gap_penalty: 1.5
+        max_stability_gap: 0.03
+        min_overlap_rows: 80
+        enforce_deployable: true
+  canonical_direction_dataset:
+    enabled: true
+    rebuild_hourly: true
+    output_dir: artifacts/datasets
+    meta_path: artifacts/datasets/btc_features_1h_direction_meta.json
+    enforce_binary_label_policy: false
+    threshold: 0.0
+    labeling_scheme: triple_barrier
+    tb_horizon_steps: 3
+    tb_vol_window: 24
+    tb_upper_mult: 1.5
+    tb_lower_mult: 1.5
+    no_trade_abs_ret: 0.0
+    no_trade_vol_mult: 0.0
   quality_input: artifacts/monitoring/labeled_backtest_1h.csv
   # Optional incumbent baseline; if provided, promotion gate will run.
   incumbent_quality_path: null
   min_auc_delta: 0.002
   max_brier_increase: 0.0
   max_ece_increase: 0.01
+  min_net_return: 0.0
+  net_return_key: net_return_total
   min_trade_count: 10
   trade_count_key: trade_count
+  require_champion_significance: true
   rolling_ab:
     enabled: false
-    baseline_input: null
-    candidate_input: null
-    window_size: 168
+    baseline_input: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+    candidate_input: artifacts/backtests/historical_1h_pup060_full_simplified/backtest_signals.csv
+    window_size: 240
     step_size: 24
     min_window_trades: 5
+    allow_no_trade_baseline: true
   joint_threshold_tuning:
     enabled: true
     p_up_grid: "0.50,0.55,0.60,0.65"
@@ -71,6 +174,22 @@ quality:
     direction_threshold_grid: "0.50,0.55,0.60"
     min_trades: 10
     max_drawdown: -0.12
+    min_cum_ret: 0.0
+    selection_metric: economics_score
+    economics_turnover_penalty: 0.002
+    economics_downside_penalty: 2.0
+    stability_gap_penalty: 1.5
+    max_stability_gap: 0.03
+    min_overlap_rows: 80
+    optimize_on_labeled_overlap: true
+    enforce_deployable: true
+    fallback_to_last_deployable_on_reject: true
+    last_deployable_thresholds_path: artifacts/monitoring/calibrated_thresholds_last_deployable.json
+    overlap_threshold_sweep_fallback:
+      enabled: true
+      threshold_grid: "0.45,0.48,0.50,0.52,0.55,0.58,0.60,0.62"
+      min_trades: 10
+      min_cum_ret: 0.0
   calibration_robustness:
     enabled: true
     method: platt
@@ -97,20 +216,146 @@ quality:
     mode: expanding
   feature_reliability:
     enabled: true
+    input: artifacts/datasets/btc_features_1h_direction_splits.npz
     baseline_window: 240
     recent_window: 120
     min_score: 0.55
     max_features: 0
+  regime_weakness:
+    enabled: true
+    max_ece_drift: 0.02
+    min_net_return: 0.0
   champion_challenger:
     enabled: false
-    enforce: false
-    baseline_input: null
-    candidate_input: null
+    enforce: true
+    baseline_input: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+    candidate_input: artifacts/backtests/historical_1h_pup060_full_simplified/backtest_signals.csv
     baseline_col: ret_ensemble_net
     candidate_col: ret_ensemble_net
     alpha: 0.05
     n_boot: 2000
     seed: 42
+  label_ablation:
+    enabled: true
+    threshold: 0.0
+    folds: 4
+    train_size: 2400
+    val_size: 400
+    test_size: 400
+    gap: 24
+    purge_size: 0
+    embargo_size: 24
+    mode: expanding
+    model_kind: xgb
+    signal_threshold: 0.5
+    fee_bps: 2.0
+    slippage_bps: 1.0
+    economics_min_trades: 10
+    economics_min_cum_ret: 0.0
+    economics_turnover_penalty: 0.002
+    economics_downside_penalty: 2.0
+  trade_decision_model:
+    enabled: true
+    target_col: ret_ensemble_net
+    signal_col: signal_ensemble
+    threshold: 0.58
+    min_rows: 300
+    candidate_only: false
+    ev_calibration_source: hybrid
+    ev_min_candidate_rows: 20
+    ev_bins: 6
+    min_bin_samples: 4
+    raw_ev_calibration_source: weighted_hybrid
+    raw_ev_candidate_weight: 4.0
+    weak_band_candidate_only_veto:
+      enabled: false
+      p_up_low: 0.55
+      p_up_high: 0.60
+      high_inclusive: false
+      incumbent_reference_path: null
+      refined:
+        enabled: false
+        p_up_low: 0.55
+        p_up_high: 0.60
+        high_inclusive: false
+        min_abs_ret_pred: 0.001
+        incumbent_reference_path: null
+      midband:
+        enabled: false
+        p_up_low: 0.55
+        p_up_high: 0.60
+        high_inclusive: false
+        min_abs_ret_pred: 0.0005
+        max_abs_ret_pred: 0.001
+        incumbent_reference_path: null
+      raw_ev_sign:
+        enabled: false
+        p_up_low: 0.55
+        p_up_high: 0.60
+        high_inclusive: false
+        raw_ev_sign_max: 0.0
+        incumbent_reference_path: null
+      direction_alignment:
+        enabled: false
+        p_up_low: 0.55
+        p_up_high: 0.60
+        high_inclusive: false
+        require_aligned: false
+        use_midband_slice: true
+        min_abs_ret_pred: 0.0005
+        max_abs_ret_pred: 0.001
+        incumbent_reference_path: null
+      joint_direction_midband:
+        enabled: false
+        p_up_low: 0.55
+        p_up_high: 0.60
+        high_inclusive: false
+        require_aligned: false
+        min_abs_ret_pred: 0.0005
+        max_abs_ret_pred: 0.001
+        incumbent_reference_path: null
+      regime_state:
+        enabled: false
+        p_up_low: 0.55
+        p_up_high: 0.60
+        high_inclusive: false
+        regime_states: []
+        use_midband_slice: false
+        min_abs_ret_pred: 0.0005
+        max_abs_ret_pred: 0.001
+        min_regime_rows: 1
+        incumbent_reference_path: null
+      chop_high_volatility:
+        enabled: false
+        p_up_low: 0.55
+        p_up_high: 0.60
+        high_inclusive: false
+        regime_state: chop
+        volatility_col: volatility_realized_24h
+        min_volatility: null
+        use_midband_slice: false
+        min_abs_ret_pred: 0.0005
+        max_abs_ret_pred: 0.001
+        incumbent_reference_path: null
+      volatility_only:
+        enabled: false
+        p_up_low: 0.55
+        p_up_high: 0.60
+        high_inclusive: false
+        volatility_col: volatility_realized_24h
+        min_volatility: null
+        use_midband_slice: false
+        min_abs_ret_pred: 0.0005
+        max_abs_ret_pred: 0.001
+        incumbent_reference_path: null
+      retrospective:
+        enabled: true
+        window_size: 120
+        step_size: 24
+        min_rows: 80
+        n_boot: 1000
+        seed: 42
+        longitudinal_output: artifacts/reliability/midband_shadow_longitudinal.json
   no_trade:
     enabled: true
     trigger_trade_count_below: 10

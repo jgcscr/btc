@@ -160,6 +160,7 @@ CONFIG_ALLOWED_KEYS = {
     "position_size_cap",
     "abstention_policy",
     "uncertainty_policy",
+    "trade_decision_policy",
     "regime_model_weights",
     "regime_model_dirs",
     "intrabar_aggregation",
@@ -433,6 +434,44 @@ def _normalize_uncertainty_policy_block(value: Mapping[str, Any]) -> Dict[str, A
     return normalized
 
 
+def _normalize_trade_decision_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("trade_decision_policy config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key in {
+            "enabled",
+            "replace_threshold_rule",
+            "require_direction_ret_alignment",
+            "use_oof_expected_value",
+            "enforce_positive_oof_envelope",
+            "block_when_no_positive_oof_bin",
+            "allow_raw_ev_fallback_when_no_positive_oof_bin",
+        }:
+            normalized[key] = bool(raw_value)
+        elif key in {
+            "threshold",
+            "min_expected_net",
+            "min_edge_over_fee",
+            "positive_oof_min_samples",
+            "raw_ev_fallback_quantile",
+            "raw_ev_fallback_min_edge_over_fee",
+        }:
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key == "oof_expected_value_mode":
+            normalized[key] = str(raw_value).lower() if raw_value is not None else None
+        elif key == "model_path":
+            normalized[key] = str(raw_value) if raw_value is not None else None
+        else:
+            print(
+                f"Warning: Unknown trade_decision_policy config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
+    return normalized
+
+
 def _normalize_regime_model_dirs_block(value: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("regime_model_dirs config must be a mapping.")
@@ -533,6 +572,8 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_abstention_policy_block(value)
         if name == "uncertainty_policy" and value is not None:
             return _normalize_uncertainty_policy_block(value)
+        if name == "trade_decision_policy" and value is not None:
+            return _normalize_trade_decision_policy_block(value)
         if name == "regime_model_weights" and value is not None:
             return _normalize_regime_model_weights_block(value)
         if name == "regime_model_dirs" and value is not None:
@@ -1083,6 +1124,322 @@ def _resolve_uncertainty_policy(config: Mapping[str, Any] | None) -> Dict[str, A
         "max_interval_width": max(float(cfg.get("max_interval_width") or 1.0), 0.0),
         "require_center_cross": bool(cfg.get("require_center_cross", True)),
         "min_component_count": max(int(float(cfg.get("min_component_count") or 3)), 1),
+    }
+
+
+def _resolve_trade_decision_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    cfg = config or {}
+    model_payload = None
+    model_path = cfg.get("model_path")
+    if model_path:
+        path = Path(str(model_path)).expanduser()
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    model_payload = payload
+            except Exception as exc:
+                print(f"Warning: failed to parse trade decision model {path}: {exc}", file=sys.stderr)
+        else:
+            print(f"Warning: trade decision model not found at {path}; policy disabled.", file=sys.stderr)
+    enabled = bool(cfg.get("enabled", False) and model_payload is not None)
+    return {
+        "enabled": enabled,
+        "replace_threshold_rule": bool(cfg.get("replace_threshold_rule", True)),
+        "require_direction_ret_alignment": bool(cfg.get("require_direction_ret_alignment", True)),
+        "use_oof_expected_value": bool(cfg.get("use_oof_expected_value", True)),
+        "oof_expected_value_mode": str(cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")).lower(),
+        "enforce_positive_oof_envelope": bool(cfg.get("enforce_positive_oof_envelope", False)),
+        "block_when_no_positive_oof_bin": bool(cfg.get("block_when_no_positive_oof_bin", True)),
+        "positive_oof_min_samples": int(float(cfg.get("positive_oof_min_samples", 4))),
+        "allow_raw_ev_fallback_when_no_positive_oof_bin": bool(cfg.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False)),
+        "raw_ev_fallback_quantile": float(cfg.get("raw_ev_fallback_quantile", 0.9)),
+        "raw_ev_fallback_min_edge_over_fee": float(cfg.get("raw_ev_fallback_min_edge_over_fee", 0.0)),
+        "threshold": float(cfg.get("threshold") if cfg.get("threshold") is not None else (model_payload or {}).get("threshold", 0.55)),
+        "min_expected_net": float(cfg.get("min_expected_net", 0.0)),
+        "min_edge_over_fee": float(cfg.get("min_edge_over_fee", 0.0)),
+        "model": model_payload,
+    }
+
+
+def _sigmoid(value: float) -> float:
+    clipped = max(min(float(value), 60.0), -60.0)
+    return float(1.0 / (1.0 + math.exp(-clipped)))
+
+
+def _lookup_oof_expected_net(model: Mapping[str, Any], prob: float) -> float | None:
+    oof_payload = model.get("oof_expected_value") if isinstance(model, Mapping) else None
+    if not isinstance(oof_payload, Mapping):
+        return None
+    bins = oof_payload.get("bins")
+    if not isinstance(bins, list):
+        return None
+    p = float(max(0.0, min(1.0, prob)))
+    for idx, bucket in enumerate(bins):
+        if not isinstance(bucket, Mapping):
+            continue
+        lo = float(bucket.get("p_min", 0.0))
+        hi = float(bucket.get("p_max", 1.0))
+        in_range = (p >= lo and p < hi) if idx < len(bins) - 1 else (p >= lo and p <= hi)
+        if in_range:
+            return float(bucket.get("mean_ret_net", 0.0))
+    default_value = oof_payload.get("default_expected_net")
+    return float(default_value) if default_value is not None else None
+
+
+def _lookup_raw_ev_expected_net(model: Mapping[str, Any], raw_ev: float) -> float | None:
+    iso_payload = model.get("raw_ev_isotonic") if isinstance(model, Mapping) else None
+    if isinstance(iso_payload, Mapping):
+        x_vals = iso_payload.get("x_thresholds")
+        y_vals = iso_payload.get("y_thresholds")
+        if isinstance(x_vals, list) and isinstance(y_vals, list) and len(x_vals) >= 2 and len(x_vals) == len(y_vals):
+            try:
+                x = np.asarray([float(v) for v in x_vals], dtype=float)
+                y = np.asarray([float(v) for v in y_vals], dtype=float)
+                return float(np.interp(float(raw_ev), x, y, left=y[0], right=y[-1]))
+            except Exception:
+                pass
+
+    payload = model.get("raw_ev_expected_value") if isinstance(model, Mapping) else None
+    if not isinstance(payload, Mapping):
+        return None
+    bins = payload.get("bins")
+    if not isinstance(bins, list):
+        return None
+    x = float(raw_ev)
+    for idx, bucket in enumerate(bins):
+        if not isinstance(bucket, Mapping):
+            continue
+        lo = float(bucket.get("x_min", float("-inf")))
+        hi = float(bucket.get("x_max", float("inf")))
+        in_range = (x >= lo and x < hi) if idx < len(bins) - 1 else (x >= lo and x <= hi)
+        if in_range:
+            return float(bucket.get("mean_ret_net", 0.0))
+    default_value = payload.get("default_expected_net")
+    return float(default_value) if default_value is not None else None
+
+
+def _oof_positive_envelope_status(model: Mapping[str, Any], prob: float, min_samples: int) -> Dict[str, Any]:
+    oof_payload = model.get("oof_expected_value") if isinstance(model, Mapping) else None
+    if not isinstance(oof_payload, Mapping):
+        return {
+            "available": False,
+            "positive_bin_count": 0,
+            "has_positive_bin": False,
+            "in_positive_bin": False,
+        }
+
+    bins = oof_payload.get("bins")
+    if not isinstance(bins, list):
+        return {
+            "available": False,
+            "positive_bin_count": 0,
+            "has_positive_bin": False,
+            "in_positive_bin": False,
+        }
+
+    p = float(max(0.0, min(1.0, prob)))
+    positive_ranges: List[tuple[float, float]] = []
+    best_positive_mean = float("-inf")
+    for bucket in bins:
+        if not isinstance(bucket, Mapping):
+            continue
+        count = int(bucket.get("samples", 0) or 0)
+        mean_ret_net = float(bucket.get("mean_ret_net", 0.0))
+        if count < int(min_samples) or mean_ret_net <= 0.0:
+            continue
+        lo = float(bucket.get("p_min", 0.0))
+        hi = float(bucket.get("p_max", 1.0))
+        positive_ranges.append((lo, hi))
+        best_positive_mean = max(best_positive_mean, mean_ret_net)
+
+    in_positive = any((p >= lo and p <= hi) for lo, hi in positive_ranges)
+    return {
+        "available": True,
+        "positive_bin_count": int(len(positive_ranges)),
+        "has_positive_bin": bool(len(positive_ranges) > 0),
+        "in_positive_bin": bool(in_positive),
+        "best_positive_mean_ret_net": (None if best_positive_mean == float("-inf") else float(best_positive_mean)),
+    }
+
+
+def _lookup_raw_ev_fallback_threshold(model: Mapping[str, Any], quantile: float) -> float | None:
+    payload = model.get("raw_ev_fallback") if isinstance(model, Mapping) else None
+    if not isinstance(payload, Mapping):
+        return None
+    quantiles = payload.get("quantiles")
+    if not isinstance(quantiles, Mapping):
+        return None
+
+    q = float(max(0.0, min(1.0, quantile)))
+    key = f"q{int(round(q * 100))}"
+    direct = quantiles.get(key)
+    if direct is not None:
+        return float(direct)
+
+    # Fallback to nearest available quantile key if exact one is missing.
+    best_dist = float("inf")
+    best_value: float | None = None
+    for k, v in quantiles.items():
+        if not isinstance(k, str) or not k.startswith("q"):
+            continue
+        try:
+            kq = float(k[1:]) / 100.0
+            dist = abs(kq - q)
+            if dist < best_dist:
+                best_dist = dist
+                best_value = float(v)
+        except Exception:
+            continue
+    return best_value
+
+
+def _apply_trade_decision_model(
+    *,
+    result: Dict[str, Any],
+    regime_state: str,
+    residual_std: float,
+    policy: Mapping[str, Any],
+    fee_bps: float,
+    slippage_bps: float,
+) -> Dict[str, Any]:
+    if not policy or not bool(policy.get("enabled", False)):
+        return {
+            "enabled": bool(policy.get("enabled", False)) if isinstance(policy, Mapping) else False,
+            "triggered": False,
+            "reason": "disabled",
+        }
+
+    model = policy.get("model") if isinstance(policy, Mapping) else None
+    if not isinstance(model, Mapping):
+        return {"enabled": True, "triggered": False, "reason": "missing_model"}
+
+    feature_names = [str(v) for v in model.get("feature_columns", [])] if isinstance(model.get("feature_columns"), list) else []
+    coefficients = [float(v) for v in model.get("coefficients", [])] if isinstance(model.get("coefficients"), list) else []
+    intercept = float(model.get("intercept", 0.0))
+    if not feature_names or len(feature_names) != len(coefficients):
+        return {"enabled": True, "triggered": False, "reason": "bad_model_shape"}
+
+    vol_payload = result.get("volatility", {}) if isinstance(result.get("volatility"), Mapping) else {}
+    vol_snapshot = vol_payload.get("snapshot", {}) if isinstance(vol_payload, Mapping) else {}
+
+    feature_values: Dict[str, float] = {
+        "p_up": float(result.get("p_up", 0.0)),
+        "ret_pred": float(result.get("ret_pred", 0.0)),
+        "expected_value_proxy": float(result.get("p_up", 0.0)) * float(result.get("ret_pred", 0.0)),
+        "abs_ret_pred": abs(float(result.get("ret_pred", 0.0))),
+        "volatility_realized_24h": float(vol_snapshot.get("volatility_realized_24h", 0.0) or 0.0),
+        "volatility_ewm_24h": float(vol_snapshot.get("volatility_ewm_24h", 0.0) or 0.0),
+        "volatility_garch_like": float(vol_snapshot.get("volatility_garch_like", 0.0) or 0.0),
+        "regime_is_trend": 1.0 if regime_state == REGIME_TREND else 0.0,
+        "regime_is_neutral": 1.0 if regime_state == REGIME_NEUTRAL else 0.0,
+        "regime_is_chop": 1.0 if regime_state == REGIME_CHOP else 0.0,
+    }
+
+    logit = intercept
+    for name, coef in zip(feature_names, coefficients):
+        logit += coef * float(feature_values.get(name, 0.0))
+    trade_prob = _sigmoid(logit)
+
+    threshold = max(0.0, min(1.0, float(policy.get("threshold", 0.55))))
+    expected_net_raw = float(result.get("expected_value", 0.0))
+    expected_net_oof = _lookup_oof_expected_net(model, trade_prob)
+    expected_net_raw_calibrated = _lookup_raw_ev_expected_net(model, expected_net_raw)
+    use_oof_expected_value = bool(policy.get("use_oof_expected_value", True))
+    oof_mode = str(policy.get("oof_expected_value_mode", "max_with_raw_calibrated")).lower()
+    if oof_mode == "calibrated_only":
+        expected_net = float(expected_net_raw_calibrated) if expected_net_raw_calibrated is not None else float(expected_net_raw)
+    elif use_oof_expected_value and expected_net_oof is not None and oof_mode == "strict":
+        expected_net = float(expected_net_oof)
+    elif use_oof_expected_value and expected_net_oof is not None and oof_mode == "blend":
+        expected_net = 0.5 * (float(expected_net_raw) + float(expected_net_oof))
+    else:
+        candidates = [float(expected_net_raw)]
+        if use_oof_expected_value and expected_net_oof is not None:
+            candidates.append(float(expected_net_oof))
+        if expected_net_raw_calibrated is not None:
+            candidates.append(float(expected_net_raw_calibrated))
+        expected_net = max(candidates)
+    fee_cost = (float(fee_bps) + float(slippage_bps)) / 10_000.0
+    edge_over_fee = expected_net - fee_cost
+    ret_pred = float(result.get("ret_pred", 0.0))
+    signal_dir_only = int(result.get("signal_dir_only", 0))
+    aligned = ((signal_dir_only == 1 and ret_pred > 0.0) or (signal_dir_only == 0 and ret_pred < 0.0))
+
+    trade_ok = trade_prob >= threshold
+    if expected_net < float(policy.get("min_expected_net", 0.0)):
+        trade_ok = False
+    if edge_over_fee < float(policy.get("min_edge_over_fee", 0.0)):
+        trade_ok = False
+    if bool(policy.get("require_direction_ret_alignment", True)) and not aligned:
+        trade_ok = False
+
+    envelope = _oof_positive_envelope_status(
+        model,
+        trade_prob,
+        min_samples=int(policy.get("positive_oof_min_samples", 4)),
+    )
+    if bool(policy.get("enforce_positive_oof_envelope", False)) and envelope.get("available", False):
+        has_positive = bool(envelope.get("has_positive_bin", False))
+        in_positive = bool(envelope.get("in_positive_bin", False))
+        raw_ev_fallback_threshold: float | None = None
+        raw_ev_fallback_pass = False
+        if has_positive and not in_positive:
+            trade_ok = False
+        if (not has_positive) and bool(policy.get("block_when_no_positive_oof_bin", True)):
+            allow_raw_fallback = bool(policy.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False))
+            if allow_raw_fallback:
+                fallback_threshold = _lookup_raw_ev_fallback_threshold(
+                    model,
+                    quantile=float(policy.get("raw_ev_fallback_quantile", 0.9)),
+                )
+                raw_edge_over_fee = float(expected_net_raw) - fee_cost
+                min_raw_edge = float(policy.get("raw_ev_fallback_min_edge_over_fee", 0.0))
+                raw_ev_fallback_threshold = None if fallback_threshold is None else float(fallback_threshold)
+                fallback_pass = (
+                    fallback_threshold is not None
+                    and float(expected_net_raw) >= float(fallback_threshold)
+                    and raw_edge_over_fee >= min_raw_edge
+                )
+                raw_ev_fallback_pass = bool(fallback_pass)
+                if not fallback_pass:
+                    trade_ok = False
+            else:
+                trade_ok = False
+    else:
+        raw_ev_fallback_threshold = None
+        raw_ev_fallback_pass = False
+
+    if bool(policy.get("replace_threshold_rule", True)):
+        result["signal_ensemble"] = int(trade_ok)
+        result["trade_action"] = (
+            "long" if int(trade_ok) == 1 and signal_dir_only == 1 else
+            "short" if int(trade_ok) == 1 and signal_dir_only == 0 else
+            "hold"
+        )
+
+    return {
+        "enabled": True,
+        "triggered": bool(trade_ok),
+        "trade_probability": float(trade_prob),
+        "threshold": float(threshold),
+        "expected_net": float(expected_net),
+        "expected_net_raw": float(expected_net_raw),
+        "expected_net_raw_calibrated": None if expected_net_raw_calibrated is None else float(expected_net_raw_calibrated),
+        "expected_net_oof": None if expected_net_oof is None else float(expected_net_oof),
+        "oof_expected_value_mode": oof_mode,
+        "use_oof_expected_value": use_oof_expected_value,
+        "positive_oof_envelope": envelope,
+        "enforce_positive_oof_envelope": bool(policy.get("enforce_positive_oof_envelope", False)),
+        "allow_raw_ev_fallback_when_no_positive_oof_bin": bool(
+            policy.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False)
+        ),
+        "raw_ev_fallback_quantile": float(policy.get("raw_ev_fallback_quantile", 0.9)),
+        "raw_ev_fallback_threshold": raw_ev_fallback_threshold,
+        "raw_ev_fallback_pass": bool(raw_ev_fallback_pass),
+        "edge_over_fee": float(edge_over_fee),
+        "direction_ret_aligned": bool(aligned),
+        "replace_threshold_rule": bool(policy.get("replace_threshold_rule", True)),
     }
 
 
@@ -2405,6 +2762,7 @@ def run_predictions(
     platt_calibration: Mapping[str, Mapping[str, Any]] | None = None,
     abstention_policy: Mapping[str, Any] | None = None,
     uncertainty_policy: Mapping[str, Any] | None = None,
+    trade_decision_policy: Mapping[str, Any] | None = None,
     regime_model_weights: Mapping[str, Any] | None = None,
     regime_model_dirs: Mapping[str, Any] | None = None,
     latest_close: float | None = None,
@@ -2422,6 +2780,7 @@ def run_predictions(
     target_range_policy = _resolve_target_range_policy(target_range_models)
     abstention_policy_resolved = _resolve_abstention_policy(abstention_policy)
     uncertainty_policy_resolved = _resolve_uncertainty_policy(uncertainty_policy)
+    trade_decision_policy_resolved = _resolve_trade_decision_policy(trade_decision_policy)
     regime_weight_policy = _resolve_regime_model_weights_policy(regime_model_weights)
     regime_model_dirs_policy = _resolve_regime_model_dirs_policy(regime_model_dirs)
     confidence_min = max(0.0, min(1.0, float(confidence_min)))
@@ -2779,6 +3138,15 @@ def run_predictions(
             result["stop_loss"] = updated_stop
             result["take_profit"] = updated_take
         result["target_range_overrides"] = overrides_payload
+        trade_decision_payload = _apply_trade_decision_model(
+            result=result,
+            regime_state=regime_state,
+            residual_std=residual_std,
+            policy=trade_decision_policy_resolved,
+            fee_bps=float(DEFAULT_FEE_BPS),
+            slippage_bps=float(DEFAULT_SLIPPAGE_BPS),
+        )
+        result["trade_decision"] = trade_decision_payload
         entry_price = float(result["entry_price"])
         stop_loss = float(result["stop_loss"])
         take_profit = float(result["take_profit"])
@@ -3168,6 +3536,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Upper bound on intrabar rows fetched from Binance for aggregation.",
     )
     parser.add_argument(
+        "--trade-decision-enabled",
+        action="store_true",
+        help="Enable trade decision model override for final trade/no-trade action.",
+    )
+    parser.add_argument(
+        "--trade-decision-model",
+        type=str,
+        default=None,
+        help="Path to JSON trade decision model artifact.",
+    )
+    parser.add_argument(
+        "--trade-decision-threshold",
+        type=float,
+        default=None,
+        help="Optional probability threshold for trade decision model.",
+    )
+    parser.add_argument(
         "--write-artifacts",
         action="store_true",
         help="Update monitoring artifacts (trade_ready_summary + meta baseline) after predictions complete.",
@@ -3264,6 +3649,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.regime_model_weights = None
     if not hasattr(args, "regime_model_dirs"):
         args.regime_model_dirs = None
+    if not hasattr(args, "trade_decision_policy"):
+        args.trade_decision_policy = None
     if not hasattr(args, "intrabar_aggregation"):
         args.intrabar_aggregation = None
     if args.data_quality is None:
@@ -3286,6 +3673,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     intrabar_cfg.setdefault("hours_multiplier", args.intrabar_hours_multiplier)
     intrabar_cfg.setdefault("max_rows", args.intrabar_max_rows)
     intrabar_enabled = bool(intrabar_cfg.get("enabled", False))
+
+    trade_decision_cfg = dict(getattr(args, "trade_decision_policy", {}) or {})
+    if args.trade_decision_enabled:
+        trade_decision_cfg["enabled"] = True
+    if args.trade_decision_model:
+        trade_decision_cfg["model_path"] = str(args.trade_decision_model)
+    if args.trade_decision_threshold is not None:
+        trade_decision_cfg["threshold"] = float(args.trade_decision_threshold)
+    args.trade_decision_policy = trade_decision_cfg
 
     if getattr(args, "config", None):
         print(f"Loaded CLI defaults from config: {args.config}")
@@ -3522,6 +3918,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             platt_calibration=platt_calibration,
             abstention_policy=getattr(args, "abstention_policy", None),
             uncertainty_policy=getattr(args, "uncertainty_policy", None),
+            trade_decision_policy=getattr(args, "trade_decision_policy", None),
             regime_model_weights=getattr(args, "regime_model_weights", None),
             regime_model_dirs=getattr(args, "regime_model_dirs", None),
             latest_close=latest_close,

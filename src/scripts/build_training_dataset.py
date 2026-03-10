@@ -25,19 +25,115 @@ from src.trading.volatility import (
 
 
 def _load_local_features() -> pd.DataFrame:
-    """Load features from local files instead of BigQuery."""
-    # Load spot klines
-    spot_files = list(SPOT_KLINES_DIR.glob("*.parquet"))
-    if not spot_files:
-        raise FileNotFoundError(f"No spot klines found in {SPOT_KLINES_DIR}")
-    
-    spot_df = pd.concat([pd.read_parquet(f) for f in spot_files], ignore_index=True)
-    # ts is already datetime
-    spot_df = spot_df[["ts", "open", "high", "low", "close", "volume", "quote_volume", "num_trades", "taker_buy_base_volume", "taker_buy_quote_volume"]]
-    
-    # Merge with processed features
-    df = _merge_processed_features(spot_df, PROCESSED_PATHS)
-    return df
+    """Load features from local files instead of BigQuery.
+
+    Uses the union of `data/spot_klines` and raw Binance tidy parquet history
+    when available, which materially increases 1h training window coverage.
+    """
+
+    def _load_hourly_from_spot_klines() -> pd.DataFrame:
+        spot_files = sorted(SPOT_KLINES_DIR.glob("*.parquet"))
+        if not spot_files:
+            return pd.DataFrame()
+        frames = []
+        required = {
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "num_trades",
+            "taker_buy_base_volume",
+            "taker_buy_quote_volume",
+        }
+        for path in spot_files:
+            frame = pd.read_parquet(path)
+            if not required.issubset(set(frame.columns)):
+                continue
+            frames.append(frame.loc[:, sorted(required)].copy())
+        if not frames:
+            return pd.DataFrame()
+        out = pd.concat(frames, ignore_index=True)
+        out["ts"] = pd.to_datetime(out["ts"], utc=True, errors="coerce").dt.floor("h")
+        out = out.dropna(subset=["ts"]).sort_values("ts").drop_duplicates(subset="ts", keep="last")
+        return out.reset_index(drop=True)
+
+    def _load_hourly_from_raw_tidy() -> pd.DataFrame:
+        if not RAW_SPOT_METRICS_DIR.exists():
+            return pd.DataFrame()
+        paths = sorted(p for p in RAW_SPOT_METRICS_DIR.glob("*.parquet") if p.is_file())
+        if not paths:
+            return pd.DataFrame()
+        rows: list[pd.DataFrame] = []
+        needed = {"ts", "metric", "value"}
+        for path in paths:
+            frame = pd.read_parquet(path)
+            if not needed.issubset(set(frame.columns)):
+                continue
+            slim = frame.loc[:, ["ts", "metric", "value"]].copy()
+            slim["ts"] = pd.to_datetime(slim["ts"], utc=True, errors="coerce").dt.floor("h")
+            slim = slim.dropna(subset=["ts", "metric"])
+            if not slim.empty:
+                rows.append(slim)
+        if not rows:
+            return pd.DataFrame()
+        tidy = pd.concat(rows, ignore_index=True)
+        tidy = tidy.sort_values("ts").drop_duplicates(subset=["ts", "metric"], keep="last")
+        wide = tidy.pivot(index="ts", columns="metric", values="value").reset_index()
+        rename_map = {
+            "spot_open": "open",
+            "spot_high": "high",
+            "spot_low": "low",
+            "spot_close": "close",
+            "spot_volume": "volume",
+            "spot_quote_volume": "quote_volume",
+            "spot_num_trades": "num_trades",
+            "spot_taker_buy_base_volume": "taker_buy_base_volume",
+            "spot_taker_buy_quote_volume": "taker_buy_quote_volume",
+        }
+        wide = wide.rename(columns=rename_map)
+        required_cols = {
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "num_trades",
+            "taker_buy_base_volume",
+            "taker_buy_quote_volume",
+        }
+        if not required_cols.issubset(set(wide.columns)):
+            return pd.DataFrame()
+        wide = wide.loc[:, sorted(required_cols)].copy()
+        wide["ts"] = pd.to_datetime(wide["ts"], utc=True, errors="coerce").dt.floor("h")
+        wide = wide.dropna(subset=["ts"]).sort_values("ts").drop_duplicates(subset="ts", keep="last")
+        return wide.reset_index(drop=True)
+
+    spot_df = _load_hourly_from_spot_klines()
+    raw_df = _load_hourly_from_raw_tidy()
+    if spot_df.empty and raw_df.empty:
+        raise FileNotFoundError(
+            f"No local Binance hourly source found in {SPOT_KLINES_DIR} or {RAW_SPOT_METRICS_DIR}",
+        )
+
+    if not spot_df.empty and not raw_df.empty:
+        merged = pd.concat([spot_df, raw_df], ignore_index=True)
+        merged = merged.sort_values("ts").drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
+        source_df = merged
+    else:
+        source_df = raw_df if not raw_df.empty else spot_df
+
+    if not source_df.empty:
+        print(
+            "Local 1h source coverage: "
+            f"rows={len(source_df)}, ts_min={source_df['ts'].min()}, ts_max={source_df['ts'].max()}",
+        )
+
+    return _merge_processed_features(source_df, PROCESSED_PATHS)
 
 
 PROCESSED_PATHS = [
@@ -46,7 +142,9 @@ PROCESSED_PATHS = [
 ]
 
 SPOT_KLINES_DIR = Path("data/spot_klines")
+RAW_SPOT_METRICS_DIR = Path("data/raw/market/binanceus/entity=spot/symbol=BINANCEUS_SPOT_BTC_USDT")
 _BINANCE_SPOT_FEATURES: Optional[pd.DataFrame] = None
+_BINANCE_INTRAHOUR_FEATURES: Optional[pd.DataFrame] = None
 
 META_PATH = Path("artifacts/datasets/btc_features_1h_meta.json")
 
@@ -452,7 +550,9 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
     binance_spot = _load_binance_spot_features()
     if binance_spot is not None:
         columns_before = set(augmented.columns)
-        augmented = augmented.merge(binance_spot, on="ts", how="left")
+        merge_columns = ["ts", *[col for col in binance_spot.columns if col != "ts" and col not in columns_before]]
+        if len(merge_columns) > 1:
+            augmented = augmented.merge(binance_spot.loc[:, merge_columns], on="ts", how="left")
         new_columns = [col for col in augmented.columns if col not in columns_before]
         if new_columns:
             preview = ", ".join(new_columns[:5])
@@ -498,6 +598,161 @@ def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.Dat
 
     augmented = augmented.sort_values("ts").drop_duplicates(subset="ts", keep="last").reset_index(drop=True)
     return augmented
+
+
+def _sign_persistence(series: pd.Series) -> float:
+    signs = np.sign(pd.to_numeric(series, errors="coerce").fillna(0.0).to_numpy(dtype=float))
+    if signs.size <= 1:
+        return float("nan")
+    return float(np.mean(signs[1:] == signs[:-1]))
+
+
+def _load_binance_intrahour_features(directory: Path = RAW_SPOT_METRICS_DIR) -> Optional[pd.DataFrame]:
+    global _BINANCE_INTRAHOUR_FEATURES
+    if _BINANCE_INTRAHOUR_FEATURES is not None:
+        return _BINANCE_INTRAHOUR_FEATURES
+
+    if not directory.exists():
+        return None
+
+    parquet_paths = sorted(p for p in directory.glob("*.parquet") if p.is_file())
+    if not parquet_paths:
+        return None
+
+    frames: list[pd.DataFrame] = []
+    for path in parquet_paths:
+        try:
+            frame = pd.read_parquet(path)
+        except Exception as exc:  # pragma: no cover - defensive against partial files
+            print(f"Warning: failed to load intrahour parquet {path}: {exc}; skipping.")
+            continue
+        needed = {"ts", "metric", "value"}
+        if not needed.issubset(frame.columns):
+            continue
+        slim = frame.loc[:, ["ts", "metric", "value"]].copy()
+        slim["ts"] = pd.to_datetime(slim["ts"], utc=True, errors="coerce")
+        slim = slim.dropna(subset=["ts", "metric"]).reset_index(drop=True)
+        if slim.empty:
+            continue
+        frames.append(slim)
+
+    if not frames:
+        return None
+
+    tidy = pd.concat(frames, ignore_index=True)
+    tidy = tidy.sort_values("ts").drop_duplicates(subset=["ts", "metric"], keep="last")
+    wide = tidy.pivot(index="ts", columns="metric", values="value").reset_index()
+    required = {
+        "spot_open",
+        "spot_high",
+        "spot_low",
+        "spot_close",
+        "spot_volume",
+        "spot_quote_volume",
+        "spot_num_trades",
+        "spot_taker_buy_base_volume",
+    }
+    if not required.issubset(set(wide.columns)):
+        return None
+
+    wide = wide.sort_values("ts").reset_index(drop=True)
+    deltas = wide["ts"].diff().dropna()
+    if deltas.empty:
+        return None
+    median_minutes = float(deltas.dt.total_seconds().median() / 60.0)
+    if median_minutes > 20.0:
+        # 1h-only source does not contain true intrahour paths.
+        print("Intrahour 15m features unavailable: raw spot cadence is hourly.")
+        return None
+
+    close = pd.to_numeric(wide["spot_close"], errors="coerce")
+    log_ret_15m = np.log(close.replace(0.0, np.nan)).diff()
+    spread = (pd.to_numeric(wide["spot_high"], errors="coerce") - pd.to_numeric(wide["spot_low"], errors="coerce")).replace(
+        0.0,
+        np.nan,
+    )
+    upper_wick = pd.to_numeric(wide["spot_high"], errors="coerce") - np.maximum(
+        pd.to_numeric(wide["spot_open"], errors="coerce"),
+        close,
+    )
+    lower_wick = np.minimum(pd.to_numeric(wide["spot_open"], errors="coerce"), close) - pd.to_numeric(
+        wide["spot_low"],
+        errors="coerce",
+    )
+    wick_asym = ((upper_wick - lower_wick) / spread).replace([np.inf, -np.inf], np.nan)
+    volume = pd.to_numeric(wide["spot_volume"], errors="coerce")
+    taker_buy = pd.to_numeric(wide["spot_taker_buy_base_volume"], errors="coerce")
+    imbalance = ((2.0 * taker_buy - volume) / volume.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
+
+    enriched = wide.copy()
+    enriched["hour_ts"] = enriched["ts"].dt.ceil("h")
+    enriched["_log_ret_15m"] = log_ret_15m
+    enriched["_wick_asym"] = wick_asym
+    enriched["_imbalance"] = imbalance
+
+    grouped = enriched.groupby("hour_ts", as_index=False)
+    hourly = grouped.agg(
+        intrabar_path_range=("spot_high", "max"),
+        intrabar_low_min=("spot_low", "min"),
+        intrabar_close_last=("spot_close", "last"),
+        intrabar_realized_vol_15m=("_log_ret_15m", "std"),
+        intrabar_taker_imbalance_mean=("_imbalance", "mean"),
+        intrabar_wick_asymmetry_mean=("_wick_asym", "mean"),
+        intrabar_volume_sum=("spot_volume", "sum"),
+        intrabar_quote_volume_sum=("spot_quote_volume", "sum"),
+    )
+    hourly["intrabar_path_range"] = (
+        (hourly["intrabar_path_range"] - hourly["intrabar_low_min"])
+        / hourly["intrabar_close_last"].replace(0.0, np.nan)
+    )
+    hourly = hourly.drop(columns=["intrabar_low_min", "intrabar_close_last"])
+
+    persist_rows = []
+    for hour_ts, bucket in grouped:
+        persist_rows.append(
+            {
+                "hour_ts": hour_ts,
+                "intrabar_taker_imbalance_persistence": _sign_persistence(bucket["_imbalance"]),
+                "intrabar_wick_asymmetry_persistence": _sign_persistence(bucket["_wick_asym"]),
+            }
+        )
+    persist_df = pd.DataFrame(persist_rows)
+    hourly = hourly.merge(persist_df, on="hour_ts", how="left")
+
+    hourly = hourly.sort_values("hour_ts").reset_index(drop=True)
+    rv_short = hourly["intrabar_realized_vol_15m"].rolling(window=6, min_periods=3).mean()
+    rv_long = hourly["intrabar_realized_vol_15m"].rolling(window=24, min_periods=8).mean().replace(0.0, np.nan)
+    hourly["intrabar_vol_term_structure_6h_24h"] = (rv_short / rv_long).replace([np.inf, -np.inf], np.nan)
+
+    vol_mean = hourly["intrabar_volume_sum"].rolling(window=24, min_periods=8).mean()
+    vol_std = hourly["intrabar_volume_sum"].rolling(window=24, min_periods=8).std(ddof=0).replace(0.0, np.nan)
+    hourly["intrabar_volume_regime_zscore_24h"] = (
+        (hourly["intrabar_volume_sum"] - vol_mean) / vol_std
+    ).replace([np.inf, -np.inf], np.nan)
+    hourly["intrabar_volume_regime_transition"] = hourly["intrabar_volume_regime_zscore_24h"].diff().abs()
+
+    intrabar_cols = [col for col in hourly.columns if col.startswith("intrabar_")]
+    for col in intrabar_cols:
+        hourly[col] = pd.to_numeric(hourly[col], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    output = hourly.rename(columns={"hour_ts": "ts"})
+    _BINANCE_INTRAHOUR_FEATURES = output[["ts", *intrabar_cols]].copy()
+    print(
+        f"Built {len(intrabar_cols)} intrahour Binance features from {len(parquet_paths)} raw parquet files.",
+    )
+    return _BINANCE_INTRAHOUR_FEATURES
+
+
+def merge_intrahour_15m_features(df: pd.DataFrame) -> pd.DataFrame:
+    intrahour = _load_binance_intrahour_features()
+    if intrahour is None or intrahour.empty:
+        return df
+    merged = df.merge(intrahour, on="ts", how="left")
+    intrabar_cols = [col for col in intrahour.columns if col != "ts"]
+    for col in intrabar_cols:
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
+    return merged
 
 
 def _load_binance_spot_features(directory: Path = SPOT_KLINES_DIR) -> Optional[pd.DataFrame]:
@@ -570,6 +825,7 @@ def main(output_dir: str) -> None:
         print(f"[curated_features] Reindexed with {backfilled} synthetic hourly rows via forward/back fill.")
 
     df = _merge_processed_features(df, PROCESSED_PATHS)
+    df = merge_intrahour_15m_features(df)
     df = _apply_funding_rate_features(df)
     df = _drop_external_source_columns(df)
     df = _augment_price_features(df)

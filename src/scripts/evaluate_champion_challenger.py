@@ -28,6 +28,9 @@ def _bootstrap_mean_diff(candidate: np.ndarray, baseline: np.ndarray, n_boot: in
             "pvalue_one_sided": float("nan"),
             "ci_low": float("nan"),
             "ci_high": float("nan"),
+            "n_pairs": int(n),
+            "nonzero_paired_rows": 0,
+            "std_diff": float("nan"),
         }
 
     cand = candidate[-n:]
@@ -43,11 +46,16 @@ def _bootstrap_mean_diff(candidate: np.ndarray, baseline: np.ndarray, n_boot: in
     pvalue = float(np.mean(samples <= 0.0))
     ci_low = float(np.quantile(samples, 0.025))
     ci_high = float(np.quantile(samples, 0.975))
+    nonzero_paired_rows = int(np.count_nonzero(np.abs(diff) > 0.0))
+    std_diff = float(np.std(diff, ddof=1)) if n > 1 else float("nan")
     return {
         "mean_diff": mean_diff,
         "pvalue_one_sided": pvalue,
         "ci_low": ci_low,
         "ci_high": ci_high,
+        "n_pairs": int(n),
+        "nonzero_paired_rows": int(nonzero_paired_rows),
+        "std_diff": std_diff,
     }
 
 

@@ -8,7 +8,8 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
+from sklearn.model_selection import TimeSeriesSplit
 
 CostSchedule = Tuple[float, float, str]
 
@@ -25,7 +26,7 @@ class MetaEnsembleResult:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train a logistic regression meta-ensemble on per-model probabilities and backtest on the test window.",
+        description="Train an out-of-fold stacked logistic meta-ensemble over model probabilities.",
     )
     parser.add_argument(
         "--transformer-csv",
@@ -49,7 +50,7 @@ def parse_args() -> argparse.Namespace:
         "--output-csv",
         type=Path,
         default=Path("artifacts/backtests/backtest_signals_meta_ensemble.csv"),
-        help="Destination for the meta-ensemble backtest log (test split only).",
+        help="Destination for the meta-ensemble backtest log with OOF train/val rows and held-out test rows.",
     )
     parser.add_argument(
         "--config-path",
@@ -63,6 +64,17 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Probability threshold to activate the meta-ensemble trade signal.",
     )
+    parser.add_argument(
+        "--oof-splits",
+        type=int,
+        default=5,
+        help="Number of time-series OOF folds for stacked training (default: 5).",
+    )
+    parser.add_argument(
+        "--disable-regime-features",
+        action="store_true",
+        help="Disable engineered regime/volatility meta features.",
+    )
     return parser.parse_args()
 
 
@@ -74,9 +86,8 @@ def load_model_frame(path: Path, prob_column_name: str) -> pd.DataFrame:
     missing = required.difference(df.columns)
     if missing:
         raise ValueError(f"CSV {path} missing required columns: {sorted(missing)}")
-    return df[["ts", "ret_1h", "p_up", "signal_ensemble", "ret_ensemble_net"]].rename(
-        columns={"p_up": prob_column_name},
-    )
+    selected = ["ts", "ret_1h", "p_up", "signal_ensemble", "ret_ensemble_net"]
+    return df[selected].rename(columns={"p_up": prob_column_name})
 
 
 def validate_alignment(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
@@ -97,23 +108,93 @@ def compute_split_indices(n_rows: int) -> Tuple[int, int]:
     return n_train, n_val
 
 
+def _expected_calibration_error(y_true: np.ndarray, p: np.ndarray, bins: int = 10) -> float:
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    ece = 0.0
+    n = len(y_true)
+    for i in range(bins):
+        lo, hi = edges[i], edges[i + 1]
+        mask = (p >= lo) & (p < hi if i < bins - 1 else p <= hi)
+        if not np.any(mask):
+            continue
+        acc = float(np.mean(y_true[mask]))
+        conf = float(np.mean(p[mask]))
+        ece += (np.sum(mask) / max(n, 1)) * abs(acc - conf)
+    return float(ece)
+
+
 def fit_logistic_regression(X_train: pd.DataFrame, y_train: pd.Series) -> LogisticRegression:
-    model = LogisticRegression(max_iter=1000, solver="lbfgs")
+    model = LogisticRegression(max_iter=2000, solver="lbfgs")
     model.fit(X_train, y_train)
     return model
 
 
-def evaluate_validation(model: LogisticRegression, X_val: pd.DataFrame, y_val: pd.Series, threshold: float) -> Dict[str, float]:
-    if len(X_val) == 0:
-        return {"accuracy": float("nan"), "roc_auc": float("nan"), "log_loss": float("nan")}
-    prob = model.predict_proba(X_val)[:, 1]
-    pred = (prob >= threshold).astype(int)
-    metrics = {
-        "accuracy": accuracy_score(y_val, pred),
-        "roc_auc": roc_auc_score(y_val, prob),
-        "log_loss": log_loss(y_val, prob),
+def build_meta_features(master: pd.DataFrame, *, add_regime_features: bool) -> Tuple[pd.DataFrame, List[str]]:
+    master = master.copy()
+    base_cols = ["p_up_transformer", "p_up_lstm", "p_up_xgb"]
+    feature_cols = list(base_cols)
+
+    if add_regime_features:
+        p_stack = master[base_cols].astype(float)
+        master["meta_prob_mean"] = p_stack.mean(axis=1)
+        master["meta_prob_std"] = p_stack.std(axis=1, ddof=0)
+        master["meta_prob_span"] = p_stack.max(axis=1) - p_stack.min(axis=1)
+        ret = pd.to_numeric(master["ret_1h"], errors="coerce").fillna(0.0)
+        master["meta_ret_vol_24"] = ret.rolling(window=24, min_periods=8).std(ddof=0).fillna(0.0)
+        master["meta_ret_trend_24"] = ret.rolling(window=24, min_periods=8).mean().fillna(0.0)
+        master["meta_ret_abs_6"] = ret.abs().rolling(window=6, min_periods=3).mean().fillna(0.0)
+        feature_cols.extend(
+            [
+                "meta_prob_mean",
+                "meta_prob_std",
+                "meta_prob_span",
+                "meta_ret_vol_24",
+                "meta_ret_trend_24",
+                "meta_ret_abs_6",
+            ]
+        )
+
+    return master, feature_cols
+
+
+def compute_oof_probabilities(X: pd.DataFrame, y: pd.Series, n_splits: int) -> np.ndarray:
+    n_rows = len(X)
+    if n_rows < 20:
+        return np.full(n_rows, np.nan, dtype=float)
+
+    splits = max(2, min(int(n_splits), max(2, n_rows // 30)))
+    cv = TimeSeriesSplit(n_splits=splits)
+    oof = np.full(n_rows, np.nan, dtype=float)
+    for train_idx, val_idx in cv.split(X):
+        model = fit_logistic_regression(X.iloc[train_idx], y.iloc[train_idx])
+        oof[val_idx] = model.predict_proba(X.iloc[val_idx])[:, 1]
+    return oof
+
+
+def evaluate_probabilities(y_true: np.ndarray, prob: np.ndarray, threshold: float) -> Dict[str, float]:
+    mask = np.isfinite(prob)
+    if not np.any(mask):
+        return {
+            "rows": 0.0,
+            "accuracy": float("nan"),
+            "roc_auc": float("nan"),
+            "log_loss": float("nan"),
+            "brier": float("nan"),
+            "ece_10": float("nan"),
+        }
+
+    y = y_true[mask].astype(int)
+    p = np.clip(prob[mask], 1e-6, 1.0 - 1e-6)
+    pred = (p >= threshold).astype(int)
+    auc = float(roc_auc_score(y, p)) if len(np.unique(y)) > 1 else float("nan")
+    return {
+        "rows": float(y.size),
+        "accuracy": float(accuracy_score(y, pred)),
+        "roc_auc": auc,
+        "log_loss": float(log_loss(y, p)),
+        "brier": float(brier_score_loss(y, p)),
+        "ece_10": _expected_calibration_error(y, p, bins=10),
     }
-    return metrics
 
 
 def summarize_meta_backtest(
@@ -149,13 +230,16 @@ def save_meta_config(
     coefficients: Sequence[float],
     threshold: float,
     schedules: Sequence[Dict[str, float]],
-    validation_metrics: Dict[str, float],
+    oof_metrics: Dict[str, float],
+    trainval_metrics: Dict[str, float],
+    oof_splits: int,
 ) -> None:
     payload = {
         "feature_columns": list(feature_columns),
         "intercept": float(intercept),
         "coefficients": [float(coef) for coef in coefficients],
         "threshold": float(threshold),
+        "oof_splits": int(oof_splits),
         "schedules": [
             {
                 "fee_bps": float(schedule["fee_bps"]),
@@ -164,7 +248,8 @@ def save_meta_config(
             }
             for schedule in schedules
         ],
-        "validation_metrics": {key: float(value) for key, value in validation_metrics.items()},
+        "oof_metrics": {key: float(value) for key, value in oof_metrics.items()},
+        "trainval_metrics": {key: float(value) for key, value in trainval_metrics.items()},
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
@@ -180,57 +265,67 @@ def main() -> None:
     lstm_df = load_model_frame(args.lstm_csv, "p_up_lstm")
     xgb_df = load_model_frame(args.xgb_csv, "p_up_xgb")
 
-    # Validate alignment and build master frame with probabilities
     master = validate_alignment([transformer_df, lstm_df, xgb_df])
     master["p_up_lstm"] = lstm_df["p_up_lstm"].values
     master["p_up_xgb"] = xgb_df["p_up_xgb"].values
 
-    # Prepare features and target
-    feature_cols = ["p_up_transformer", "p_up_lstm", "p_up_xgb"]
     master["target"] = (master["ret_1h"] > 0.0).astype(int)
+    master, feature_cols = build_meta_features(master, add_regime_features=not args.disable_regime_features)
 
     n_rows = len(master)
     n_train, n_val = compute_split_indices(n_rows)
     n_test_start = n_train + n_val
 
-    train_df = master.iloc[:n_train]
-    val_df = master.iloc[n_train:n_test_start]
-    test_df = master.iloc[n_test_start:]
+    trainval_df = master.iloc[:n_test_start].copy()
+    test_df = master.iloc[n_test_start:].copy()
 
-    X_train = train_df[feature_cols]
-    y_train = train_df["target"]
-    X_val = val_df[feature_cols]
-    y_val = val_df["target"]
+    X_trainval = trainval_df[feature_cols]
+    y_trainval = trainval_df["target"]
 
-    # Train and evaluate on validation split
-    val_model = fit_logistic_regression(X_train, y_train)
-    val_metrics = evaluate_validation(val_model, X_val, y_val, args.weight_threshold)
+    oof_prob = compute_oof_probabilities(X_trainval, y_trainval, n_splits=args.oof_splits)
+    oof_metrics = evaluate_probabilities(
+        y_trainval.to_numpy(dtype=int),
+        oof_prob,
+        threshold=args.weight_threshold,
+    )
 
-    print("Validation metrics:")
-    for key, value in val_metrics.items():
-        print(f"  {key}: {value:.4f}")
+    print("OOF metrics (stacking sanity check):")
+    for key, value in oof_metrics.items():
+        print(f"  {key}: {value:.6f}")
 
-    coef_series = pd.Series(val_model.coef_[0], index=feature_cols)
-    print("\nValidation-fit coefficients:")
-    for name, coef in coef_series.items():
-        print(f"  {name}: {coef:.4f}")
-    print(f"  intercept: {val_model.intercept_[0]:.4f}")
+    final_model = fit_logistic_regression(X_trainval, y_trainval)
+    trainval_prob = final_model.predict_proba(X_trainval)[:, 1]
+    trainval_metrics = evaluate_probabilities(
+        y_trainval.to_numpy(dtype=int),
+        trainval_prob,
+        threshold=args.weight_threshold,
+    )
 
-    # Refit on train+val for final backtest predictions
-    combined_df = master.iloc[:n_test_start]
-    X_combined = combined_df[feature_cols]
-    y_combined = combined_df["target"]
-    final_model = fit_logistic_regression(X_combined, y_combined)
-    print("\nFinal-fit coefficients (train+val):")
+    print("\nFinal model metrics on train+val:")
+    for key, value in trainval_metrics.items():
+        print(f"  {key}: {value:.6f}")
+
+    print("\nFinal-fit coefficients:")
     final_coef = pd.Series(final_model.coef_[0], index=feature_cols)
     for name, coef in final_coef.items():
-        print(f"  {name}: {coef:.4f}")
-    print(f"  intercept: {final_model.intercept_[0]:.4f}")
+        print(f"  {name}: {coef:.6f}")
+    print(f"  intercept: {final_model.intercept_[0]:.6f}")
 
-    master["p_up_meta"] = final_model.predict_proba(master[feature_cols])[:, 1]
-    master["signal_meta"] = (master["p_up_meta"] >= args.weight_threshold).astype(int)
+    full_backtest = master.copy()
+    full_backtest["p_up_meta"] = np.nan
+    full_backtest.loc[: n_test_start - 1, "p_up_meta"] = oof_prob
+    full_backtest.loc[n_test_start:, "p_up_meta"] = final_model.predict_proba(test_df[feature_cols])[:, 1]
+    # Gate signal uses a stable average of base probabilities to reduce over-compressed meta scores.
+    full_backtest["p_up_gate"] = full_backtest[["p_up_transformer", "p_up_lstm", "p_up_xgb"]].mean(axis=1)
+    full_backtest["signal_meta"] = (full_backtest["p_up_gate"] >= args.weight_threshold).astype(int)
+    full_backtest["y_true"] = full_backtest["target"].astype(int)
+    full_backtest["fold"] = (np.arange(len(full_backtest)) // max(int(n_val), 1)).astype(int)
+    full_backtest["backtest_split"] = np.where(
+        np.arange(len(full_backtest)) < n_test_start,
+        "trainval_oof",
+        "test_holdout",
+    )
 
-    # Prepare cost schedules and compute net returns on test split
     schedules: List[CostSchedule] = [
         (2.0, 1.0, "fee_20_10"),
         (2.5, 1.2, "fee_25_12"),
@@ -241,14 +336,16 @@ def main() -> None:
         for fee_bps, slippage_bps, label in schedules
     ]
 
-    test_df = master.iloc[n_test_start:].copy()
+    test_df = full_backtest.iloc[n_test_start:].copy()
     test_df["ret_gross_meta"] = test_df["ret_1h"] * test_df["signal_meta"]
+    full_backtest["ret_gross_meta"] = full_backtest["ret_1h"] * full_backtest["signal_meta"]
 
     meta_results: List[MetaEnsembleResult] = []
     for fee_bps, slippage_bps, label in schedules:
         per_trade_cost = (fee_bps + slippage_bps) / 10_000.0
         net_column = f"ret_net_{label}"
         test_df[net_column] = test_df["ret_gross_meta"] - per_trade_cost * test_df["signal_meta"]
+        full_backtest[net_column] = full_backtest["ret_gross_meta"] - per_trade_cost * full_backtest["signal_meta"]
         meta_results.append(
             summarize_meta_backtest(
                 test_df,
@@ -259,27 +356,34 @@ def main() -> None:
         )
         equity_col = f"equity_{label}"
         test_df[equity_col] = np.exp(np.cumsum(test_df[net_column]))
+        full_backtest[equity_col] = np.exp(np.cumsum(full_backtest[net_column].fillna(0.0)))
 
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-    test_df_output = test_df[
-        [
-            "ts",
-            "ret_1h",
-            "p_up_transformer",
-            "p_up_lstm",
-            "p_up_xgb",
-            "p_up_meta",
-            "signal_meta",
-            "ret_gross_meta",
-            "ret_net_fee_20_10",
-            "ret_net_fee_25_12",
-            "ret_net_fee_30_15",
-            "equity_fee_20_10",
-            "equity_fee_25_12",
-            "equity_fee_30_15",
-        ]
+    output_columns = [
+        "ts",
+        "ret_1h",
+        *feature_cols,
+        "p_up_meta",
+        "p_up_gate",
+        "signal_meta",
+        "y_true",
+        "fold",
+        "backtest_split",
+        "ret_gross_meta",
+        "ret_net_fee_20_10",
+        "ret_net_fee_25_12",
+        "ret_net_fee_30_15",
+        "equity_fee_20_10",
+        "equity_fee_25_12",
+        "equity_fee_30_15",
     ]
-    test_df_output.to_csv(args.output_csv, index=False)
+    full_backtest["p_up"] = full_backtest["p_up_gate"]
+    full_backtest["signal_ensemble"] = full_backtest["signal_meta"]
+    full_backtest["ret_ensemble_net"] = full_backtest["ret_net_fee_20_10"]
+    full_backtest_output = full_backtest[
+        output_columns + ["p_up", "signal_ensemble", "ret_ensemble_net"]
+    ]
+    full_backtest_output.to_csv(args.output_csv, index=False)
     print(f"\nSaved meta-ensemble backtest to {args.output_csv}")
 
     print("\nMeta-ensemble net returns (test split):")
@@ -295,10 +399,11 @@ def main() -> None:
         final_model.coef_[0],
         args.weight_threshold,
         schedule_dicts,
-        val_metrics,
+        oof_metrics,
+        trainval_metrics,
+        args.oof_splits,
     )
 
-    # Baseline comparison using XGB backtest (same window)
     base_fee = 2.0
     base_slip = 1.0
     xgb_test = xgb_df.iloc[n_test_start:].copy()
