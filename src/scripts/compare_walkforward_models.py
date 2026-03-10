@@ -141,6 +141,11 @@ def _model_output_path(base_output: Path, model_kind: str, *, rolling: bool) -> 
     return base_output.parent / f"{prefix}_{model_kind}.json"
 
 
+def _detail_output_path(base_output: Path, model_kind: str, *, rolling: bool) -> Path:
+    prefix = f"{base_output.stem}_rolling" if rolling else str(base_output.stem)
+    return base_output.parent / f"{prefix}_{model_kind}_rows.csv"
+
+
 def main() -> None:
     args = parse_args()
     n_rows = _dataset_rows(args.dataset_path)
@@ -174,6 +179,7 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     for model_kind in models:
         model_output = _model_output_path(args.output, model_kind, rolling=False)
+        detail_output = _detail_output_path(args.output, model_kind, rolling=False)
         cmd = [
             sys.executable,
             "-m",
@@ -206,6 +212,8 @@ def main() -> None:
             str(float(args.fee_bps)),
             "--slippage-bps",
             str(float(args.slippage_bps)),
+            "--detailed-output",
+            str(detail_output),
             "--output",
             str(model_output),
         ]
@@ -217,6 +225,7 @@ def main() -> None:
                 "auc_mean": float(payload.get("auc_mean", float("nan"))),
                 "cum_ret_net_total": float(payload.get("cum_ret_net_total", float("nan"))),
                 "trade_count_total": int(payload.get("trade_count_total", 0) or 0),
+                "detail_path": str(payload.get("detailed_output", detail_output)),
                 "path": str(model_output),
             }
         )
@@ -230,6 +239,7 @@ def main() -> None:
     if bool(args.rolling_guard):
         for model_kind in models:
             model_output = _model_output_path(args.output, model_kind, rolling=True)
+            detail_output = _detail_output_path(args.output, model_kind, rolling=True)
             cmd = [
                 sys.executable,
                 "-m",
@@ -262,6 +272,8 @@ def main() -> None:
                 str(float(args.fee_bps)),
                 "--slippage-bps",
                 str(float(args.slippage_bps)),
+                "--detailed-output",
+                str(detail_output),
                 "--output",
                 str(model_output),
             ]
@@ -273,6 +285,7 @@ def main() -> None:
                     "auc_mean": float(payload.get("auc_mean", float("nan"))),
                     "cum_ret_net_total": float(payload.get("cum_ret_net_total", float("nan"))),
                     "trade_count_total": int(payload.get("trade_count_total", 0) or 0),
+                    "detail_path": str(payload.get("detailed_output", detail_output)),
                     "path": str(model_output),
                 }
             )

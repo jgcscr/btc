@@ -323,6 +323,8 @@ python -m src.scripts.analyze_overlap_trust_flip \
   --output artifacts/analysis/overlap_trust_flip_latest.json
 ```
 
+For exact fold-level bar attribution, rerun overlap compare with the standard workflow settings and inspect the emitted `*_rows.csv` files for the selected model. `src.scripts.compare_walkforward_models` now writes per-bar fold exports alongside each model summary JSON.
+
 Supporting comparison/watchlist scripts currently present:
 
 - `src.scripts.build_default_vs_midband_paper_live_longitudinal`

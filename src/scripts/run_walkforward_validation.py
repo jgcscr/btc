@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 from typing import List, Tuple
@@ -29,7 +30,7 @@ def _expected_calibration_error(y_true: np.ndarray, p: np.ndarray, bins: int = 1
     return float(ece)
 
 
-def _load_npz(path: Path, y_key: str) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+def _load_npz(path: Path, y_key: str) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
     data = np.load(path, allow_pickle=True)
     if "X_train" not in data or "X_val" not in data or "X_test" not in data:
         raise KeyError("NPZ missing split arrays")
@@ -46,7 +47,13 @@ def _load_npz(path: Path, y_key: str) -> tuple[np.ndarray, np.ndarray, np.ndarra
     else:
         y = np.concatenate([data[f"{y_key}_train"], data[f"{y_key}_val"], data[f"{y_key}_test"]]).astype(np.float32)
         y_ret = None
-    return X, y, y_ret
+    if {"ts_train", "ts_val", "ts_test"}.issubset(set(data.files)):
+        ts = np.concatenate([data["ts_train"], data["ts_val"], data["ts_test"]])
+    elif "ts_all" in data:
+        ts = np.asarray(data["ts_all"])
+    else:
+        ts = None
+    return X, y, y_ret, ts
 
 
 def _fit_xgb(X_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
@@ -213,9 +220,15 @@ def main() -> None:
     parser.add_argument("--fee-bps", type=float, default=2.0)
     parser.add_argument("--slippage-bps", type=float, default=1.0)
     parser.add_argument("--output", type=Path, default=Path("artifacts/monitoring/walkforward_validation.json"))
+    parser.add_argument(
+        "--detailed-output",
+        type=Path,
+        default=None,
+        help="Optional CSV path to write per-bar fold predictions and net-return contributions.",
+    )
     args = parser.parse_args()
 
-    X, y, y_ret = _load_npz(args.dataset_path, args.y_key)
+    X, y, y_ret, ts = _load_npz(args.dataset_path, args.y_key)
     folds = build_time_series_folds(
         len(y),
         n_splits=args.folds,
@@ -229,12 +242,15 @@ def main() -> None:
     )
 
     rows: List[dict] = []
+    detailed_rows: List[dict] = []
     for i, fold in enumerate(folds, start=1):
         X_train = X[fold.train_slice]
         y_train = y[fold.train_slice].astype(int)
         X_test = X[fold.test_slice]
         y_test = y[fold.test_slice].astype(int)
         y_ret_test = y_ret[fold.test_slice] if y_ret is not None else None
+        ts_test = ts[fold.test_slice] if ts is not None else None
+        test_indices = np.arange(len(y))[fold.test_slice]
 
         p = _predict_fold_probabilities(
             args.model_kind,
@@ -258,6 +274,13 @@ def main() -> None:
             fee_bps=float(args.fee_bps),
             slippage_bps=float(args.slippage_bps),
         )
+        signal = (p >= float(args.signal_threshold)).astype(int)
+        if y_ret_test is None:
+            ret_stream = np.where(y_test > 0, 1.0, -1.0).astype(float)
+        else:
+            ret_stream = y_ret_test.astype(float)
+        per_trade_cost = (float(args.fee_bps) + float(args.slippage_bps)) / 10_000.0
+        ret_net = ret_stream * signal - per_trade_cost * signal
         rows.append(
             {
                 "fold": i,
@@ -272,6 +295,26 @@ def main() -> None:
                 "cum_ret_net": cum_ret_net,
             }
         )
+        for local_index, global_index in enumerate(test_indices):
+            detailed_rows.append(
+                {
+                    "fold": int(i),
+                    "global_index": int(global_index),
+                    "ts": (
+                        np.datetime_as_string(ts_test[local_index], unit="s")
+                        if ts_test is not None
+                        else ""
+                    ),
+                    "y_true": int(y_test[local_index]),
+                    "y_ret": float(ret_stream[local_index]),
+                    "p_up": float(p[local_index]),
+                    "pred_label": int(pred[local_index]),
+                    "signal": int(signal[local_index]),
+                    "ret_net": float(ret_net[local_index]),
+                    "model_kind": str(args.model_kind),
+                    "mode": str(args.mode),
+                }
+            )
 
     def _finite_mean(values: List[float]) -> float:
         arr = np.asarray(values, dtype=float)
@@ -304,9 +347,32 @@ def main() -> None:
         "cum_ret_net_total": float(np.nansum(np.asarray([r["cum_ret_net"] for r in rows], dtype=float))),
         "trade_count_total": int(np.nansum(np.asarray([r["trade_count"] for r in rows], dtype=float))),
     }
+    if args.detailed_output is not None:
+        payload["detailed_output"] = str(args.detailed_output)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if args.detailed_output is not None:
+        args.detailed_output.parent.mkdir(parents=True, exist_ok=True)
+        with args.detailed_output.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "fold",
+                    "global_index",
+                    "ts",
+                    "y_true",
+                    "y_ret",
+                    "p_up",
+                    "pred_label",
+                    "signal",
+                    "ret_net",
+                    "model_kind",
+                    "mode",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(detailed_rows)
     print(json.dumps(payload, indent=2))
 
 

@@ -38,6 +38,15 @@ def _to_records(rows: pd.DataFrame, pos_col: str) -> List[Dict[str, Any]]:
     return records
 
 
+def _load_detail_rows(path: Path | None) -> pd.DataFrame | None:
+    if path is None or not path.exists():
+        return None
+    frame = pd.read_csv(path)
+    if "ts" in frame.columns:
+        frame["ts"] = pd.to_datetime(frame["ts"])
+    return frame
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare a trusted overlap run against a drifting run and isolate which bars flipped overlap trust.",
@@ -55,6 +64,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/analysis/overlap_trust_flip_latest.json"),
         help="Output JSON artifact path.",
+    )
+    parser.add_argument(
+        "--trusted-detail-path",
+        type=Path,
+        default=None,
+        help="Optional per-bar CSV exported from walkforward overlap validation for the trusted run.",
+    )
+    parser.add_argument(
+        "--drift-detail-path",
+        type=Path,
+        default=None,
+        help="Optional per-bar CSV exported from walkforward overlap validation for the drifting run.",
     )
     return parser.parse_args()
 
@@ -135,6 +156,79 @@ def main() -> None:
         f"{worst_fold['fold']}. It moved from {worst_fold['trusted_cum_ret']:.10f} "
         f"to {worst_fold['drift_cum_ret']:.10f}, a delta of {worst_fold['delta']:.10f}."
     )
+
+    trusted_detail = _load_detail_rows(args.trusted_detail_path)
+    drift_detail = _load_detail_rows(args.drift_detail_path)
+    if trusted_detail is not None and drift_detail is not None:
+        trusted_fold_rows = trusted_detail[trusted_detail["fold"] == int(worst_fold["fold"])]
+        drift_fold_rows = drift_detail[drift_detail["fold"] == int(worst_fold["fold"])]
+        trusted_fold_view = trusted_fold_rows[["ts", "signal", "ret_net", "p_up", "global_index"]].rename(
+            columns={
+                "signal": "signal_trusted",
+                "ret_net": "ret_net_trusted",
+                "p_up": "p_up_trusted",
+                "global_index": "global_index_trusted",
+            }
+        )
+        drift_fold_view = drift_fold_rows[["ts", "signal", "ret_net", "p_up", "global_index"]].rename(
+            columns={
+                "signal": "signal_drift",
+                "ret_net": "ret_net_drift",
+                "p_up": "p_up_drift",
+                "global_index": "global_index_drift",
+            }
+        )
+        detailed_merge = trusted_fold_view.merge(drift_fold_view, on="ts", how="outer").sort_values("ts")
+        trusted_only_rows = detailed_merge[detailed_merge["global_index_drift"].isna()].copy()
+        drift_only_rows = detailed_merge[detailed_merge["global_index_trusted"].isna()].copy()
+        common_changed_rows = detailed_merge[
+            detailed_merge["global_index_trusted"].notna()
+            & detailed_merge["global_index_drift"].notna()
+            & (
+                (detailed_merge["signal_trusted"] != detailed_merge["signal_drift"])
+                | ((detailed_merge["ret_net_trusted"] - detailed_merge["ret_net_drift"]).abs() > 1e-12)
+            )
+        ].copy()
+        payload["worst_fold_bar_deltas"] = {
+            "fold": int(worst_fold["fold"]),
+            "trusted_detail_path": str(args.trusted_detail_path),
+            "drift_detail_path": str(args.drift_detail_path),
+            "trusted_only_rows": [
+                {
+                    "timestamp": row["ts"].isoformat(),
+                    "global_index_trusted": int(row["global_index_trusted"]),
+                    "signal_trusted": int(row["signal_trusted"]),
+                    "ret_net_trusted": float(row["ret_net_trusted"]),
+                    "p_up_trusted": float(row["p_up_trusted"]),
+                }
+                for _, row in trusted_only_rows.iterrows()
+            ],
+            "drift_only_rows": [
+                {
+                    "timestamp": row["ts"].isoformat(),
+                    "global_index_drift": int(row["global_index_drift"]),
+                    "signal_drift": int(row["signal_drift"]),
+                    "ret_net_drift": float(row["ret_net_drift"]),
+                    "p_up_drift": float(row["p_up_drift"]),
+                }
+                for _, row in drift_only_rows.iterrows()
+            ],
+            "common_changed_rows": [
+                {
+                    "timestamp": row["ts"].isoformat(),
+                    "global_index_trusted": int(row["global_index_trusted"]),
+                    "global_index_drift": int(row["global_index_drift"]),
+                    "signal_trusted": int(row["signal_trusted"]),
+                    "signal_drift": int(row["signal_drift"]),
+                    "ret_net_trusted": float(row["ret_net_trusted"]),
+                    "ret_net_drift": float(row["ret_net_drift"]),
+                    "ret_net_delta": float(row["ret_net_drift"] - row["ret_net_trusted"]),
+                    "p_up_trusted": float(row["p_up_trusted"]),
+                    "p_up_drift": float(row["p_up_drift"]),
+                }
+                for _, row in common_changed_rows.iterrows()
+            ],
+        }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
