@@ -280,6 +280,18 @@ python -m src.scripts.run_default_midband_matched_cycle \
   --continue-on-promotion-fail
 ```
 
+Replay a prior trusted default snapshot deterministically:
+
+```bash
+python -m src.scripts.run_default_midband_matched_cycle \
+  --default-config configs/reliability_workflow.default.yaml \
+  --midband-config configs/reliability_workflow.midband_paper.yaml \
+  --run-root artifacts/reliability \
+  --default-pinned-snapshot artifacts/reliability/<trusted-run>/summary/btc_features_1h_direction_splits.snapshot.npz \
+  --default-pinned-snapshot-meta artifacts/reliability/<trusted-run>/summary/btc_features_1h_direction_meta.snapshot.json \
+  --continue-on-promotion-fail
+```
+
 Supporting comparison/watchlist scripts currently present:
 
 - `src.scripts.build_default_vs_midband_paper_live_longitudinal`

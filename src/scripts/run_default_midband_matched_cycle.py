@@ -85,6 +85,41 @@ def _run_workflow(
     subprocess.run(cmd, check=True)
 
 
+def _write_default_config_with_pinned_snapshot(
+    *,
+    base_config: Path,
+    pinned_snapshot: Path,
+    pinned_snapshot_meta: Path | None,
+) -> Path:
+    payload = yaml.safe_load(base_config.read_text(encoding="utf-8"))
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected mapping YAML config at {base_config}")
+
+    quality_obj = payload.get("quality")
+    quality = quality_obj if isinstance(quality_obj, dict) else {}
+    canonical_obj = quality.get("canonical_direction_dataset")
+    canonical = canonical_obj if isinstance(canonical_obj, dict) else {}
+    canonical["pinned_dataset_path"] = str(pinned_snapshot)
+    if pinned_snapshot_meta is not None:
+        canonical["pinned_meta_path"] = str(pinned_snapshot_meta)
+    else:
+        canonical.pop("pinned_meta_path", None)
+    quality["canonical_direction_dataset"] = canonical
+    payload["quality"] = quality
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".yaml",
+        prefix="reliability_workflow.default.matched.",
+        delete=False,
+        encoding="utf-8",
+    ) as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False)
+        return Path(handle.name)
+
+
 def _write_midband_config_with_walkforward_dataset(
     *,
     base_config: Path,
@@ -232,6 +267,18 @@ def parse_args() -> argparse.Namespace:
         help="Reliability workflow run root.",
     )
     parser.add_argument(
+        "--default-pinned-snapshot",
+        type=Path,
+        default=None,
+        help="Optional fixed default 1h direction snapshot to replay instead of rebuilding the latest canonical dataset.",
+    )
+    parser.add_argument(
+        "--default-pinned-snapshot-meta",
+        type=Path,
+        default=None,
+        help="Optional metadata JSON paired with --default-pinned-snapshot.",
+    )
+    parser.add_argument(
         "--continue-on-promotion-fail",
         action="store_true",
         help="Pass through continue-on-promotion-fail to each workflow invocation.",
@@ -251,15 +298,31 @@ def main() -> None:
         raise FileNotFoundError(args.default_config)
     if not args.midband_config.exists():
         raise FileNotFoundError(args.midband_config)
+    if args.default_pinned_snapshot is not None and not args.default_pinned_snapshot.exists():
+        raise FileNotFoundError(args.default_pinned_snapshot)
+    if args.default_pinned_snapshot_meta is not None and not args.default_pinned_snapshot_meta.exists():
+        raise FileNotFoundError(args.default_pinned_snapshot_meta)
 
     args.run_root.mkdir(parents=True, exist_ok=True)
 
+    default_config_for_cycle = args.default_config
+    if args.default_pinned_snapshot is not None:
+        default_config_for_cycle = _write_default_config_with_pinned_snapshot(
+            base_config=args.default_config,
+            pinned_snapshot=args.default_pinned_snapshot,
+            pinned_snapshot_meta=args.default_pinned_snapshot_meta,
+        )
+
     before_default = _list_run_dirs(args.run_root)
-    _run_workflow(
-        config=args.default_config,
-        run_root=args.run_root,
-        continue_on_promotion_fail=bool(args.continue_on_promotion_fail),
-    )
+    try:
+        _run_workflow(
+            config=default_config_for_cycle,
+            run_root=args.run_root,
+            continue_on_promotion_fail=bool(args.continue_on_promotion_fail),
+        )
+    finally:
+        if default_config_for_cycle != args.default_config:
+            default_config_for_cycle.unlink(missing_ok=True)
     default_run_id = _find_new_run_id(
         run_root=args.run_root,
         before=before_default,
@@ -361,6 +424,8 @@ def main() -> None:
             "run_root": str(args.run_root),
             "midband_longitudinal": str(longitudinal_path),
             "watchlist": str(watchlist_path),
+            "default_pinned_snapshot": str(args.default_pinned_snapshot) if args.default_pinned_snapshot else None,
+            "default_pinned_snapshot_meta": str(args.default_pinned_snapshot_meta) if args.default_pinned_snapshot_meta else None,
         },
     }
 

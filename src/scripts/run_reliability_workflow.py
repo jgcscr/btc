@@ -625,9 +625,32 @@ def main() -> None:
         if not args.dry_run and not candidate_quality_input.exists():
             candidate_quality_input = quality_input
         candidate_gate_input = candidate_quality_input
+        pinned_canonical_dataset_cfg = canonical_cfg.get("pinned_dataset_path")
+        pinned_canonical_meta_cfg = canonical_cfg.get("pinned_meta_path")
+        pinned_canonical_dataset = (
+            Path(str(pinned_canonical_dataset_cfg))
+            if str(pinned_canonical_dataset_cfg or "").strip()
+            else None
+        )
+        pinned_canonical_meta = (
+            Path(str(pinned_canonical_meta_cfg))
+            if str(pinned_canonical_meta_cfg or "").strip()
+            else None
+        )
+        use_pinned_canonical_dataset = pinned_canonical_dataset is not None
+
+        if use_pinned_canonical_dataset and not args.dry_run:
+            if not pinned_canonical_dataset.exists():
+                raise FileNotFoundError(
+                    f"Pinned canonical direction dataset not found: {pinned_canonical_dataset}"
+                )
+            if pinned_canonical_meta is not None and not pinned_canonical_meta.exists():
+                raise FileNotFoundError(
+                    f"Pinned canonical direction meta not found: {pinned_canonical_meta}"
+                )
 
         # Rebuild canonical hourly and direction datasets so walk-forward and audits use the latest expanded Binance history.
-        if bool(canonical_cfg.get("enabled", True)):
+        if bool(canonical_cfg.get("enabled", True)) and not use_pinned_canonical_dataset:
             label_policy = str(canonical_cfg.get("labeling_scheme", "binary"))
             if bool(canonical_cfg.get("enforce_binary_label_policy", True)) and label_policy != "binary":
                 raise ValueError(
@@ -683,6 +706,11 @@ def main() -> None:
                     args.dry_run,
                 )
             )
+        elif use_pinned_canonical_dataset and not args.dry_run:
+            print(
+                f"Using pinned canonical direction dataset: {pinned_canonical_dataset}",
+                file=sys.stderr,
+            )
 
         if bool(quality_cfg.get("build_labeled_dataset", True)):
             labeled_cmd = [
@@ -730,15 +758,23 @@ def main() -> None:
 
         if bool(canonical_cfg.get("enabled", True)):
             canonical_output_dir = Path(str(canonical_cfg.get("output_dir", "artifacts/datasets")))
-            canonical_dataset = canonical_output_dir / "btc_features_1h_direction_splits.npz"
-            canonical_meta = Path(str(canonical_cfg.get("meta_path", "artifacts/datasets/btc_features_1h_direction_meta.json")))
+            canonical_dataset = (
+                pinned_canonical_dataset
+                if pinned_canonical_dataset is not None
+                else (canonical_output_dir / "btc_features_1h_direction_splits.npz")
+            )
+            canonical_meta = (
+                pinned_canonical_meta
+                if pinned_canonical_dataset is not None
+                else Path(str(canonical_cfg.get("meta_path", "artifacts/datasets/btc_features_1h_direction_meta.json")))
+            )
             snapshot_dataset = summary_dir / "btc_features_1h_direction_splits.snapshot.npz"
             snapshot_meta = summary_dir / "btc_features_1h_direction_meta.snapshot.json"
             walkforward_dataset = snapshot_dataset
 
             if not args.dry_run and canonical_dataset.exists():
                 shutil.copyfile(canonical_dataset, snapshot_dataset)
-            if not args.dry_run and canonical_meta.exists():
+            if not args.dry_run and canonical_meta is not None and canonical_meta.exists():
                 shutil.copyfile(canonical_meta, snapshot_meta)
 
             if (not args.dry_run) and walkforward_dataset.exists() and snapshot_meta.exists():
