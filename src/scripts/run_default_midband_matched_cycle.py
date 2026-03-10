@@ -90,6 +90,8 @@ def _write_default_config_with_pinned_snapshot(
     base_config: Path,
     pinned_snapshot: Path,
     pinned_snapshot_meta: Path | None,
+    pinned_labeled_csv: Path | None,
+    pinned_labeled_meta: Path | None,
 ) -> Path:
     payload = yaml.safe_load(base_config.read_text(encoding="utf-8"))
     if payload is None:
@@ -107,6 +109,14 @@ def _write_default_config_with_pinned_snapshot(
     else:
         canonical.pop("pinned_meta_path", None)
     quality["canonical_direction_dataset"] = canonical
+    if pinned_labeled_csv is not None:
+        quality["pinned_labeled_csv_path"] = str(pinned_labeled_csv)
+    else:
+        quality.pop("pinned_labeled_csv_path", None)
+    if pinned_labeled_meta is not None:
+        quality["pinned_labeled_meta_path"] = str(pinned_labeled_meta)
+    else:
+        quality.pop("pinned_labeled_meta_path", None)
     payload["quality"] = quality
 
     with tempfile.NamedTemporaryFile(
@@ -124,6 +134,8 @@ def _write_midband_config_with_walkforward_dataset(
     *,
     base_config: Path,
     walkforward_dataset: Path,
+    pinned_labeled_csv: Path | None,
+    pinned_labeled_meta: Path | None,
 ) -> Path:
     payload = yaml.safe_load(base_config.read_text(encoding="utf-8"))
     if payload is None:
@@ -134,6 +146,14 @@ def _write_midband_config_with_walkforward_dataset(
     quality_obj = payload.get("quality")
     quality = quality_obj if isinstance(quality_obj, dict) else {}
     quality["walkforward_dataset"] = str(walkforward_dataset)
+    if pinned_labeled_csv is not None:
+        quality["pinned_labeled_csv_path"] = str(pinned_labeled_csv)
+    else:
+        quality.pop("pinned_labeled_csv_path", None)
+    if pinned_labeled_meta is not None:
+        quality["pinned_labeled_meta_path"] = str(pinned_labeled_meta)
+    else:
+        quality.pop("pinned_labeled_meta_path", None)
     payload["quality"] = quality
 
     with tempfile.NamedTemporaryFile(
@@ -163,6 +183,54 @@ def _read_watchlist(watchlist_path: Path) -> Dict[str, Any]:
             or triggers.get("early_actionable_asymmetry_streak_triggered", False)
         ),
     }
+
+
+def _resolve_replay_inputs_from_run_id(run_root: Path, run_id: str) -> Dict[str, Path | None]:
+    summary_dir = run_root / run_id / "summary"
+    if not summary_dir.exists():
+        raise FileNotFoundError(f"Summary directory for pinned run id not found: {summary_dir}")
+
+    snapshot = summary_dir / "btc_features_1h_direction_splits.snapshot.npz"
+    if not snapshot.exists():
+        raise FileNotFoundError(f"Pinned run is missing snapshot dataset: {snapshot}")
+
+    snapshot_meta = summary_dir / "btc_features_1h_direction_meta.snapshot.json"
+    labeled_csv = summary_dir / "labeled_backtest.snapshot.csv"
+    if not labeled_csv.exists():
+        raise FileNotFoundError(
+            "Pinned run is missing run-local labeled backtest snapshot: "
+            f"{labeled_csv}. Recreate the source run with the newer replay-support workflow first."
+        )
+
+    labeled_meta_candidates = [
+        summary_dir / "labeled_backtest_meta.snapshot.json",
+        summary_dir / "labeled_backtest_meta.json",
+    ]
+    labeled_meta = next((path for path in labeled_meta_candidates if path.exists()), None)
+
+    return {
+        "snapshot": snapshot,
+        "snapshot_meta": snapshot_meta if snapshot_meta.exists() else None,
+        "labeled_csv": labeled_csv,
+        "labeled_meta": labeled_meta,
+    }
+
+
+def _resolve_replay_inputs_from_cycle_id(run_root: Path, cycle_id: str) -> Dict[str, Any]:
+    cycle_path = run_root / "cycles" / f"{cycle_id}.json"
+    if not cycle_path.exists():
+        raise FileNotFoundError(f"Pinned cycle artifact not found: {cycle_path}")
+
+    payload = _load_json(cycle_path)
+    default_run_id = str(payload.get("default_run_id", "")).strip()
+    midband_run_id = str(payload.get("midband_run_id", "")).strip()
+    if not default_run_id:
+        raise ValueError(f"Pinned cycle artifact is missing default_run_id: {cycle_path}")
+    resolved_inputs = _resolve_replay_inputs_from_run_id(run_root, default_run_id)
+    resolved_inputs["default_run_id"] = default_run_id
+    resolved_inputs["midband_run_id"] = midband_run_id or None
+    resolved_inputs["cycle_path"] = cycle_path
+    return resolved_inputs
 
 
 def _pair_matched_in_longitudinal(
@@ -279,6 +347,30 @@ def parse_args() -> argparse.Namespace:
         help="Optional metadata JSON paired with --default-pinned-snapshot.",
     )
     parser.add_argument(
+        "--default-pinned-labeled-csv",
+        type=Path,
+        default=None,
+        help="Optional run-local labeled backtest CSV to pin for both default and midband replay runs.",
+    )
+    parser.add_argument(
+        "--default-pinned-labeled-meta",
+        type=Path,
+        default=None,
+        help="Optional metadata JSON paired with --default-pinned-labeled-csv.",
+    )
+    parser.add_argument(
+        "--default-pinned-run-id",
+        type=str,
+        default=None,
+        help="Replay a prior run id by resolving its run-local snapshot and labeled backtest artifacts automatically.",
+    )
+    parser.add_argument(
+        "--default-pinned-cycle-id",
+        type=str,
+        default=None,
+        help="Replay from a prior matched-cycle id by resolving the cycle's default-side run-local snapshot and labeled artifacts automatically.",
+    )
+    parser.add_argument(
         "--continue-on-promotion-fail",
         action="store_true",
         help="Pass through continue-on-promotion-fail to each workflow invocation.",
@@ -298,19 +390,65 @@ def main() -> None:
         raise FileNotFoundError(args.default_config)
     if not args.midband_config.exists():
         raise FileNotFoundError(args.midband_config)
-    if args.default_pinned_snapshot is not None and not args.default_pinned_snapshot.exists():
-        raise FileNotFoundError(args.default_pinned_snapshot)
-    if args.default_pinned_snapshot_meta is not None and not args.default_pinned_snapshot_meta.exists():
-        raise FileNotFoundError(args.default_pinned_snapshot_meta)
+    pinned_resolver_count = sum(
+        1
+        for value in (args.default_pinned_run_id, args.default_pinned_cycle_id)
+        if value is not None
+    )
+    if pinned_resolver_count > 1:
+        raise ValueError("Specify only one of --default-pinned-run-id or --default-pinned-cycle-id.")
+    if pinned_resolver_count and any(
+        value is not None
+        for value in (
+            args.default_pinned_snapshot,
+            args.default_pinned_snapshot_meta,
+            args.default_pinned_labeled_csv,
+            args.default_pinned_labeled_meta,
+        )
+    ):
+        raise ValueError(
+            "Resolver-based replay arguments cannot be combined with manual --default-pinned-* path arguments."
+        )
+
+    resolved_pinned_cycle_id = args.default_pinned_cycle_id
+    resolved_pinned_run_id = args.default_pinned_run_id
+    resolved_pinned_snapshot = args.default_pinned_snapshot
+    resolved_pinned_snapshot_meta = args.default_pinned_snapshot_meta
+    resolved_pinned_labeled_csv = args.default_pinned_labeled_csv
+    resolved_pinned_labeled_meta = args.default_pinned_labeled_meta
+
+    if resolved_pinned_cycle_id:
+        resolved_inputs = _resolve_replay_inputs_from_cycle_id(args.run_root, resolved_pinned_cycle_id)
+        resolved_pinned_run_id = str(resolved_inputs["default_run_id"])
+        resolved_pinned_snapshot = resolved_inputs["snapshot"]
+        resolved_pinned_snapshot_meta = resolved_inputs["snapshot_meta"]
+        resolved_pinned_labeled_csv = resolved_inputs["labeled_csv"]
+        resolved_pinned_labeled_meta = resolved_inputs["labeled_meta"]
+    elif resolved_pinned_run_id:
+        resolved_inputs = _resolve_replay_inputs_from_run_id(args.run_root, resolved_pinned_run_id)
+        resolved_pinned_snapshot = resolved_inputs["snapshot"]
+        resolved_pinned_snapshot_meta = resolved_inputs["snapshot_meta"]
+        resolved_pinned_labeled_csv = resolved_inputs["labeled_csv"]
+        resolved_pinned_labeled_meta = resolved_inputs["labeled_meta"]
+    if resolved_pinned_snapshot is not None and not resolved_pinned_snapshot.exists():
+        raise FileNotFoundError(resolved_pinned_snapshot)
+    if resolved_pinned_snapshot_meta is not None and not resolved_pinned_snapshot_meta.exists():
+        raise FileNotFoundError(resolved_pinned_snapshot_meta)
+    if resolved_pinned_labeled_csv is not None and not resolved_pinned_labeled_csv.exists():
+        raise FileNotFoundError(resolved_pinned_labeled_csv)
+    if resolved_pinned_labeled_meta is not None and not resolved_pinned_labeled_meta.exists():
+        raise FileNotFoundError(resolved_pinned_labeled_meta)
 
     args.run_root.mkdir(parents=True, exist_ok=True)
 
     default_config_for_cycle = args.default_config
-    if args.default_pinned_snapshot is not None:
+    if resolved_pinned_snapshot is not None:
         default_config_for_cycle = _write_default_config_with_pinned_snapshot(
             base_config=args.default_config,
-            pinned_snapshot=args.default_pinned_snapshot,
-            pinned_snapshot_meta=args.default_pinned_snapshot_meta,
+            pinned_snapshot=resolved_pinned_snapshot,
+            pinned_snapshot_meta=resolved_pinned_snapshot_meta,
+            pinned_labeled_csv=resolved_pinned_labeled_csv,
+            pinned_labeled_meta=resolved_pinned_labeled_meta,
         )
 
     before_default = _list_run_dirs(args.run_root)
@@ -340,6 +478,8 @@ def main() -> None:
     midband_config_for_cycle = _write_midband_config_with_walkforward_dataset(
         base_config=args.midband_config,
         walkforward_dataset=default_snapshot_dataset,
+        pinned_labeled_csv=resolved_pinned_labeled_csv,
+        pinned_labeled_meta=resolved_pinned_labeled_meta,
     )
 
     before_midband = _list_run_dirs(args.run_root)
@@ -424,8 +564,12 @@ def main() -> None:
             "run_root": str(args.run_root),
             "midband_longitudinal": str(longitudinal_path),
             "watchlist": str(watchlist_path),
-            "default_pinned_snapshot": str(args.default_pinned_snapshot) if args.default_pinned_snapshot else None,
-            "default_pinned_snapshot_meta": str(args.default_pinned_snapshot_meta) if args.default_pinned_snapshot_meta else None,
+            "default_pinned_cycle_id": resolved_pinned_cycle_id,
+            "default_pinned_run_id": resolved_pinned_run_id,
+            "default_pinned_snapshot": str(resolved_pinned_snapshot) if resolved_pinned_snapshot else None,
+            "default_pinned_snapshot_meta": str(resolved_pinned_snapshot_meta) if resolved_pinned_snapshot_meta else None,
+            "default_pinned_labeled_csv": str(resolved_pinned_labeled_csv) if resolved_pinned_labeled_csv else None,
+            "default_pinned_labeled_meta": str(resolved_pinned_labeled_meta) if resolved_pinned_labeled_meta else None,
         },
     }
 

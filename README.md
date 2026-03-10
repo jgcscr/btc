@@ -289,7 +289,38 @@ python -m src.scripts.run_default_midband_matched_cycle \
   --run-root artifacts/reliability \
   --default-pinned-snapshot artifacts/reliability/<trusted-run>/summary/btc_features_1h_direction_splits.snapshot.npz \
   --default-pinned-snapshot-meta artifacts/reliability/<trusted-run>/summary/btc_features_1h_direction_meta.snapshot.json \
+  --default-pinned-labeled-csv artifacts/reliability/<trusted-run>/summary/labeled_backtest.snapshot.csv \
   --continue-on-promotion-fail
+```
+
+Replay directly from a prior self-contained run id:
+
+```bash
+python -m src.scripts.run_default_midband_matched_cycle \
+  --default-pinned-run-id <trusted-run-id> \
+  --run-root artifacts/reliability \
+  --continue-on-promotion-fail
+```
+
+Replay directly from a prior matched-cycle id:
+
+```bash
+python -m src.scripts.run_default_midband_matched_cycle \
+  --default-pinned-cycle-id <trusted-cycle-id> \
+  --run-root artifacts/reliability \
+  --continue-on-promotion-fail
+```
+
+Runs created by the newer replay-support workflow also preserve a run-local labeled backtest snapshot at `summary/labeled_backtest.snapshot.csv`, so future replays do not depend on the mutable monitoring CSV.
+
+Compare a trusted replay run against a drifting latest run:
+
+```bash
+python -m src.scripts.analyze_overlap_trust_flip \
+  --trusted-run-id <trusted-default-run-id> \
+  --drift-run-id <drifting-default-run-id> \
+  --run-root artifacts/reliability \
+  --output artifacts/analysis/overlap_trust_flip_latest.json
 ```
 
 Supporting comparison/watchlist scripts currently present:

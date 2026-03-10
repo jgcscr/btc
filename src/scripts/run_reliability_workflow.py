@@ -616,6 +616,9 @@ def main() -> None:
 
     if not args.skip_quality_evals and bool(quality_cfg.get("enabled", False)):
         quality_input = Path(quality_cfg.get("quality_input") or (summary_dir / "backtest_signals_meta_ensemble.csv"))
+        labeled_snapshot_csv = summary_dir / "labeled_backtest.snapshot.csv"
+        labeled_meta_output = summary_dir / "labeled_backtest_meta.json"
+        labeled_snapshot_meta = summary_dir / "labeled_backtest_meta.snapshot.json"
         candidate_quality_input_cfg = quality_cfg.get("candidate_quality_input")
         candidate_quality_input = (
             Path(str(candidate_quality_input_cfg))
@@ -625,6 +628,19 @@ def main() -> None:
         if not args.dry_run and not candidate_quality_input.exists():
             candidate_quality_input = quality_input
         candidate_gate_input = candidate_quality_input
+        pinned_labeled_csv_cfg = quality_cfg.get("pinned_labeled_csv_path")
+        pinned_labeled_meta_cfg = quality_cfg.get("pinned_labeled_meta_path")
+        pinned_labeled_csv = (
+            Path(str(pinned_labeled_csv_cfg))
+            if str(pinned_labeled_csv_cfg or "").strip()
+            else None
+        )
+        pinned_labeled_meta = (
+            Path(str(pinned_labeled_meta_cfg))
+            if str(pinned_labeled_meta_cfg or "").strip()
+            else None
+        )
+        use_pinned_labeled_csv = pinned_labeled_csv is not None
         pinned_canonical_dataset_cfg = canonical_cfg.get("pinned_dataset_path")
         pinned_canonical_meta_cfg = canonical_cfg.get("pinned_meta_path")
         pinned_canonical_dataset = (
@@ -648,6 +664,11 @@ def main() -> None:
                 raise FileNotFoundError(
                     f"Pinned canonical direction meta not found: {pinned_canonical_meta}"
                 )
+        if use_pinned_labeled_csv and not args.dry_run:
+            if not pinned_labeled_csv.exists():
+                raise FileNotFoundError(f"Pinned labeled backtest CSV not found: {pinned_labeled_csv}")
+            if pinned_labeled_meta is not None and not pinned_labeled_meta.exists():
+                raise FileNotFoundError(f"Pinned labeled backtest meta not found: {pinned_labeled_meta}")
 
         # Rebuild canonical hourly and direction datasets so walk-forward and audits use the latest expanded Binance history.
         if bool(canonical_cfg.get("enabled", True)) and not use_pinned_canonical_dataset:
@@ -712,7 +733,19 @@ def main() -> None:
                 file=sys.stderr,
             )
 
-        if bool(quality_cfg.get("build_labeled_dataset", True)):
+        if use_pinned_labeled_csv and not args.dry_run:
+            shutil.copyfile(pinned_labeled_csv, labeled_snapshot_csv)
+            if pinned_labeled_meta is not None:
+                shutil.copyfile(pinned_labeled_meta, labeled_meta_output)
+                shutil.copyfile(pinned_labeled_meta, labeled_snapshot_meta)
+            quality_input = labeled_snapshot_csv
+            if not candidate_quality_input_cfg:
+                candidate_quality_input = quality_input
+            elif not candidate_quality_input.exists():
+                candidate_quality_input = quality_input
+            candidate_gate_input = candidate_quality_input
+            print(f"Using pinned labeled backtest CSV: {pinned_labeled_csv}", file=sys.stderr)
+        elif bool(quality_cfg.get("build_labeled_dataset", True)):
             labeled_cmd = [
                 python,
                 "-m",
@@ -720,7 +753,7 @@ def main() -> None:
                 "--output",
                 str(quality_input),
                 "--meta-output",
-                str(summary_dir / "labeled_backtest_meta.json"),
+                str(labeled_meta_output),
                 "--fold-size",
                 str(int(quality_cfg.get("fold_size", 12))),
                 "--lookback-rows",
@@ -745,6 +778,17 @@ def main() -> None:
                     args.dry_run,
                 )
             )
+
+        if not args.dry_run and quality_input.exists() and quality_input != labeled_snapshot_csv:
+            shutil.copyfile(quality_input, labeled_snapshot_csv)
+            quality_input = labeled_snapshot_csv
+            if not candidate_quality_input_cfg:
+                candidate_quality_input = quality_input
+            elif not candidate_quality_input.exists():
+                candidate_quality_input = quality_input
+            candidate_gate_input = candidate_quality_input
+        if not args.dry_run and labeled_meta_output.exists() and labeled_meta_output != labeled_snapshot_meta:
+            shutil.copyfile(labeled_meta_output, labeled_snapshot_meta)
 
         walkforward_horizon = int(quality_cfg.get("walkforward_horizon", 1))
         walkforward_dataset = Path(
