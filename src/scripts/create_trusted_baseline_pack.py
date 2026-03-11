@@ -22,6 +22,53 @@ def _optional_path(path: Path) -> str | None:
     return str(path) if path.exists() else None
 
 
+def _resolve_snapshot_path(summary_dir: Path) -> Path:
+    snapshot = summary_dir / "btc_features_1h_direction_splits.snapshot.npz"
+    if snapshot.exists():
+        return snapshot
+
+    overlap_meta_path = summary_dir / "walkforward_labeled_overlap_meta.json"
+    if overlap_meta_path.exists():
+        overlap_meta = _load_json(overlap_meta_path)
+        source_dataset = overlap_meta.get("source_dataset")
+        if source_dataset:
+            candidate = Path(str(source_dataset))
+            if candidate.exists():
+                return candidate
+
+    raise FileNotFoundError(snapshot)
+
+
+def _snapshot_meta_path(snapshot: Path) -> Path | None:
+    snapshot_name = snapshot.name
+    if snapshot_name.endswith("_splits.snapshot.npz"):
+        candidate_name = snapshot_name.replace("_splits.snapshot.npz", "_meta.snapshot.json")
+        candidate = snapshot.with_name(candidate_name)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _paired_raw_snapshot_path(snapshot: Path, overlap: bool = False) -> Path | None:
+    suffix = "direction_features_raw.labeled_overlap.csv" if overlap else "direction_features_raw.snapshot.csv"
+    candidate = snapshot.parent / suffix
+    if candidate.exists():
+        return candidate
+    return None
+
+
+def _paired_raw_snapshot_meta_path(snapshot: Path, overlap: bool = False) -> Path | None:
+    suffix = (
+        "direction_features_raw.labeled_overlap_meta.json"
+        if overlap
+        else "direction_features_raw.snapshot_meta.json"
+    )
+    candidate = snapshot.parent / suffix
+    if candidate.exists():
+        return candidate
+    return None
+
+
 def _collect_compare_details(compare_summary_path: Path) -> Dict[str, Any] | None:
     if not compare_summary_path.exists():
         return None
@@ -73,28 +120,37 @@ def main() -> None:
     if not summary_dir.exists():
         raise FileNotFoundError(summary_dir)
 
-    snapshot = summary_dir / "btc_features_1h_direction_splits.snapshot.npz"
+    snapshot = _resolve_snapshot_path(summary_dir)
     labeled_csv = summary_dir / "labeled_backtest.snapshot.csv"
     overlap_dataset = summary_dir / "btc_features_1h_direction_splits.labeled_overlap.npz"
     edge_path = summary_dir / "edge_trustworthiness.json"
-    if not snapshot.exists():
-        raise FileNotFoundError(snapshot)
     if not labeled_csv.exists():
         raise FileNotFoundError(labeled_csv)
     if not edge_path.exists():
         raise FileNotFoundError(edge_path)
 
     edge_payload = _load_json(edge_path)
+    snapshot_meta = _snapshot_meta_path(snapshot)
+    raw_feature_snapshot = summary_dir / "direction_features_raw.snapshot.csv"
+    raw_feature_snapshot_meta = summary_dir / "direction_features_raw.snapshot_meta.json"
+    if not raw_feature_snapshot.exists():
+        paired = _paired_raw_snapshot_path(snapshot, overlap=False)
+        if paired is not None:
+            raw_feature_snapshot = paired
+    if not raw_feature_snapshot_meta.exists():
+        paired_meta = _paired_raw_snapshot_meta_path(snapshot, overlap=False)
+        if paired_meta is not None:
+            raw_feature_snapshot_meta = paired_meta
     replay_inputs = {
         "snapshot": str(snapshot),
-        "snapshot_meta": _optional_path(summary_dir / "btc_features_1h_direction_meta.snapshot.json"),
+        "snapshot_meta": str(snapshot_meta) if snapshot_meta is not None else None,
         "labeled_csv": str(labeled_csv),
         "labeled_meta": _optional_path(summary_dir / "labeled_backtest_meta.snapshot.json")
         or _optional_path(summary_dir / "labeled_backtest_meta.json"),
         "overlap_dataset": _optional_path(overlap_dataset),
         "overlap_meta": _optional_path(summary_dir / "walkforward_labeled_overlap_meta.json"),
-        "raw_feature_snapshot": _optional_path(summary_dir / "direction_features_raw.snapshot.csv"),
-        "raw_feature_snapshot_meta": _optional_path(summary_dir / "direction_features_raw.snapshot_meta.json"),
+        "raw_feature_snapshot": str(raw_feature_snapshot) if raw_feature_snapshot.exists() else None,
+        "raw_feature_snapshot_meta": str(raw_feature_snapshot_meta) if raw_feature_snapshot_meta.exists() else None,
         "raw_feature_overlap_snapshot": _optional_path(summary_dir / "direction_features_raw.labeled_overlap.csv"),
         "raw_feature_overlap_snapshot_meta": _optional_path(summary_dir / "direction_features_raw.labeled_overlap_meta.json"),
     }
