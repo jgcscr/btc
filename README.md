@@ -88,6 +88,16 @@ Notes:
 - If `artifacts/models/target_ranges/metadata.json` exists, `run_refresh_and_predict` auto-enables target-range inference for supported horizons.
 - The default config currently requests targets `0.25,1,4,8,12`, so live output includes a 15m horizon in addition to hourly horizons.
 
+Cadence entrypoint:
+
+```bash
+./scripts/run_cadence.sh daily
+./scripts/run_cadence.sh weekly
+./scripts/run_cadence.sh monthly
+```
+
+That wrapper resolves the latest trustworthy reliability run for daily predictions, runs the runtime reliability profile for weekly refreshes, and runs the full default reliability profile for monthly retraining before refreshing predictions.
+
 ## 3. Config Files
 
 Prediction configs:
@@ -209,6 +219,18 @@ python -m src.scripts.run_reliability_workflow \
 ```
 
 With `--continue-on-promotion-fail`, the workflow can keep running and still write downstream summary artifacts even when the promotion gate blocks promotion.
+
+Cadence automation:
+
+- Shell entrypoint: `scripts/run_cadence.sh`
+- GitHub Actions schedule: `.github/workflows/cadence.yml`
+- Operations runbook: `docs/operations_runbook.md`
+
+The GitHub Actions workflow supports manual dispatch plus three UTC cadences:
+
+- daily at `01:15`
+- weekly on Monday at `02:30`
+- monthly on day 1 at `03:45`
 
 Standalone trigger check:
 
@@ -434,5 +456,7 @@ Quick validation checks:
 - `entry_price`, `stop_loss`, and `take_profit` are present for each horizon in `artifacts/predictions/latest.json`.
 - `request.local_feature_overrides.feature_alignment` in `artifacts/monitoring/latest.json` lists any unresolved imputed columns.
 - Reliability trust artifacts show whether the run is overlap-trustworthy before treating new thresholds as deployable.
+
+For unattended cadence execution and the exact daily/weekly/monthly command breakdown, see `docs/operations_runbook.md`.
 
 
