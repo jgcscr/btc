@@ -369,10 +369,9 @@ def _load_local_features() -> pd.DataFrame:
     return _load_hourly_local_features()
 
 
-def build_direction_splits(
-    output_dir: str,
-    threshold: float,
+def prepare_direction_feature_frame(
     *,
+    threshold: float,
     labeling_scheme: str = "binary",
     tb_horizon_steps: int = 1,
     tb_vol_window: int = 24,
@@ -382,10 +381,7 @@ def build_direction_splits(
     no_trade_vol_mult: float = 0.0,
     reliability_json: str | None = None,
     reliability_min_score: float = 0.55,
-    meta_path: str | None = None,
-) -> str:
-    os.makedirs(output_dir, exist_ok=True)
-
+) -> tuple[pd.DataFrame, list[str], list[str]]:
     df = _load_local_features()
 
     if df.empty:
@@ -427,6 +423,39 @@ def build_direction_splits(
 
     if allowed_features:
         df = _enforce_feature_coverage(df, allowed_features)
+
+    return df, allowed_features, sorted(volatility_columns)
+
+
+def build_direction_splits(
+    output_dir: str,
+    threshold: float,
+    *,
+    labeling_scheme: str = "binary",
+    tb_horizon_steps: int = 1,
+    tb_vol_window: int = 24,
+    tb_upper_mult: float = 1.0,
+    tb_lower_mult: float = 1.0,
+    no_trade_abs_ret: float = 0.0,
+    no_trade_vol_mult: float = 0.0,
+    reliability_json: str | None = None,
+    reliability_min_score: float = 0.55,
+    meta_path: str | None = None,
+) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+
+    df, allowed_features, volatility_columns = prepare_direction_feature_frame(
+        threshold=threshold,
+        labeling_scheme=labeling_scheme,
+        tb_horizon_steps=tb_horizon_steps,
+        tb_vol_window=tb_vol_window,
+        tb_upper_mult=tb_upper_mult,
+        tb_lower_mult=tb_lower_mult,
+        no_trade_abs_ret=no_trade_abs_ret,
+        no_trade_vol_mult=no_trade_vol_mult,
+        reliability_json=reliability_json,
+        reliability_min_score=reliability_min_score,
+    )
 
     X, y_ret, ts_series = make_features_and_target(
         df,
@@ -503,6 +532,8 @@ def build_direction_splits(
         ts_all=ts_values,
         feature_names=np.array(splits.feature_names),
         threshold=np.array([threshold], dtype=float),
+        scaler_mean=np.asarray(splits.scaler_mean, dtype=np.float32),
+        scaler_scale=np.asarray(splits.scaler_scale, dtype=np.float32),
         **volatility_arrays,
     )
     print(f"Saved direction dataset splits to {output_path}")
@@ -525,6 +556,7 @@ def build_direction_splits(
         "generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "row_count": int(ts_values.size),
         "feature_count": int(len(splits.feature_names)),
+        "feature_names": list(splits.feature_names),
         "threshold": float(threshold),
         "labeling_scheme": labeling_scheme,
         "triple_barrier": {
@@ -541,6 +573,11 @@ def build_direction_splits(
         "volatility": {
             "columns": sorted(volatility_columns),
             "realized_windows": list(DEFAULT_REALIZED_WINDOWS),
+        },
+        "scaler": {
+            "available": bool(splits.scaler_mean is not None and splits.scaler_scale is not None),
+            "mean_key": "scaler_mean",
+            "scale_key": "scaler_scale",
         },
         "ts_range": _describe(ts_values),
         "splits": {

@@ -1,0 +1,75 @@
+{
+  "generated_at": "2026-03-11T00:15:14.109416Z",
+  "run_id": "20260310T222502Z",
+  "run_root": "artifacts/reliability",
+  "summary_dir": "artifacts/reliability/20260310T222502Z/summary",
+  "edge_trustworthy": true,
+  "profile": {
+    "id": "default_runtime",
+    "name": "default_runtime"
+  },
+  "replay_inputs": {
+    "snapshot": "artifacts/reliability/20260310T222502Z/summary/btc_features_1h_direction_splits.snapshot.npz",
+    "snapshot_meta": "artifacts/reliability/20260310T222502Z/summary/btc_features_1h_direction_meta.snapshot.json",
+    "labeled_csv": "artifacts/reliability/20260310T222502Z/summary/labeled_backtest.snapshot.csv",
+    "labeled_meta": null,
+    "overlap_dataset": "artifacts/reliability/20260310T222502Z/summary/btc_features_1h_direction_splits.labeled_overlap.npz",
+    "overlap_meta": "artifacts/reliability/20260310T222502Z/summary/walkforward_labeled_overlap_meta.json",
+    "raw_feature_snapshot": "artifacts/reliability/20260310T222502Z/summary/direction_features_raw.snapshot.csv",
+    "raw_feature_snapshot_meta": "artifacts/reliability/20260310T222502Z/summary/direction_features_raw.snapshot_meta.json",
+    "raw_feature_overlap_snapshot": "artifacts/reliability/20260310T222502Z/summary/direction_features_raw.labeled_overlap.csv",
+    "raw_feature_overlap_snapshot_meta": "artifacts/reliability/20260310T222502Z/summary/direction_features_raw.labeled_overlap_meta.json"
+  },
+  "compare_artifacts": {
+    "full": {
+      "summary_path": "artifacts/reliability/20260310T222502Z/summary/walkforward_model_compare.json",
+      "selected_model_kind": "meta_stack",
+      "selection_policy": "best_cum_ret",
+      "detail_rows": [
+        {
+          "model_kind": "xgb",
+          "path": "artifacts/reliability/20260310T222502Z/summary/walkforward_model_compare_xgb.json",
+          "detail_path": null
+        },
+        {
+          "model_kind": "meta_stack",
+          "path": "artifacts/reliability/20260310T222502Z/summary/walkforward_model_compare_meta_stack.json",
+          "detail_path": null
+        },
+        {
+          "model_kind": "selector_simple",
+          "path": "artifacts/reliability/20260310T222502Z/summary/walkforward_model_compare_selector_simple.json",
+          "detail_path": null
+        }
+      ]
+    },
+    "overlap": {
+      "summary_path": "artifacts/reliability/20260310T222502Z/summary/walkforward_model_compare_labeled_overlap.json",
+      "selected_model_kind": "meta_stack",
+      "selection_policy": "best_cum_ret",
+      "detail_rows": [
+        {
+          "model_kind": "xgb",
+          "path": "artifacts/reliability/20260310T222502Z/summary/walkforward_model_compare_labeled_overlap_xgb.json",
+          "detail_path": null
+        },
+        {
+          "model_kind": "meta_stack",
+          "path": "artifacts/reliability/20260310T222502Z/summary/walkforward_model_compare_labeled_overlap_meta_stack.json",
+          "detail_path": null
+        },
+        {
+          "model_kind": "selector_simple",
+          "path": "artifacts/reliability/20260310T222502Z/summary/walkforward_model_compare_labeled_overlap_selector_simple.json",
+          "detail_path": null
+        }
+      ]
+    }
+  },
+  "trust_artifacts": {
+    "edge_trustworthiness": "artifacts/reliability/20260310T222502Z/summary/edge_trustworthiness.json",
+    "walkforward_labeled_reconciliation": "artifacts/reliability/20260310T222502Z/summary/walkforward_labeled_reconciliation.json",
+    "overlap_trust_stability": "artifacts/reliability/20260310T222502Z/summary/overlap_trust_stability.json",
+    "canonical_dataset_consistency": "artifacts/reliability/20260310T222502Z/summary/canonical_dataset_consistency.json"
+  }
+}

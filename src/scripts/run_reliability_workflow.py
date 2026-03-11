@@ -295,6 +295,32 @@ def _find_latest_profile_snapshot_run(
     return None
 
 
+def _find_latest_trusted_baseline_pack(
+    *,
+    run_root: Path,
+    current_run_id: str,
+) -> tuple[str, Path] | None:
+    if not run_root.exists():
+        return None
+
+    candidates = sorted((p for p in run_root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True)
+    for run_path in candidates:
+        run_id = run_path.name
+        if run_id == current_run_id:
+            continue
+        pack_path = run_path / "summary" / "trusted_baseline_pack.json"
+        if not pack_path.exists():
+            continue
+        try:
+            payload = _load_json(pack_path)
+        except Exception:
+            continue
+        if not bool(payload.get("edge_trustworthy", False)):
+            continue
+        return run_id, pack_path
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run the full reliability workflow: CV+Optuna, calibration, thresholds, ensemble, monitoring, paper-live.",
@@ -357,6 +383,9 @@ def main() -> None:
     canonical_cfg = quality_cfg.get("canonical_direction_dataset", {}) if isinstance(quality_cfg, dict) else {}
     reconcile_cfg = quality_cfg.get("walkforward_labeled_reconciliation", {}) if isinstance(quality_cfg, dict) else {}
     overlap_pre_tuning_cfg = quality_cfg.get("overlap_pre_tuning", {}) if isinstance(quality_cfg, dict) else {}
+    overlap_drift_guard_cfg = quality_cfg.get("overlap_feature_drift_guard", {}) if isinstance(quality_cfg, dict) else {}
+    raw_snapshot_cfg = quality_cfg.get("raw_direction_feature_snapshot", {}) if isinstance(quality_cfg, dict) else {}
+    trusted_baseline_pack_cfg = quality_cfg.get("trusted_baseline_pack", {}) if isinstance(quality_cfg, dict) else {}
     regime_weakness_cfg = quality_cfg.get("regime_weakness", {}) if isinstance(quality_cfg, dict) else {}
     profile_cfg_obj = config.get("profile", {}) if isinstance(config, dict) else {}
     profile_cfg = profile_cfg_obj if isinstance(profile_cfg_obj, dict) else {}
@@ -390,6 +419,11 @@ def main() -> None:
     overlap_pruning_allows_tuning = True
     overlap_feature_reliability_path = summary_dir / "overlap_feature_reliability.json"
     overlap_model_pruning_path = summary_dir / "overlap_model_pruning.json"
+    overlap_feature_drift_guard_path = summary_dir / "overlap_feature_drift_guard.json"
+    raw_feature_snapshot_path = summary_dir / "direction_features_raw.snapshot.csv"
+    raw_feature_snapshot_meta = summary_dir / "direction_features_raw.snapshot_meta.json"
+    raw_feature_overlap_snapshot_path = summary_dir / "direction_features_raw.labeled_overlap.csv"
+    raw_feature_overlap_snapshot_meta = summary_dir / "direction_features_raw.labeled_overlap_meta.json"
 
     python = sys.executable
 
@@ -846,6 +880,27 @@ def main() -> None:
                 except Exception as exc:
                     print(f"Warning: failed canonical dataset consistency check: {exc}", file=sys.stderr)
 
+            if bool(raw_snapshot_cfg.get("enabled", True)) and (walkforward_dataset.exists() or args.dry_run):
+                raw_snapshot_cmd = [
+                    python,
+                    "-m",
+                    "src.scripts.export_direction_feature_snapshot",
+                    "--dataset",
+                    str(walkforward_dataset),
+                    "--output",
+                    str(raw_feature_snapshot_path),
+                    "--meta-output",
+                    str(raw_feature_snapshot_meta),
+                ]
+                results.append(
+                    _run_step(
+                        "direction_feature_snapshot",
+                        raw_snapshot_cmd,
+                        logs_dir / "direction_feature_snapshot.log",
+                        args.dry_run,
+                    )
+                )
+
         if bool(reconcile_cfg.get("enabled", False)) and (quality_input.exists() or args.dry_run):
             labeled_overlap_dataset = summary_dir / "btc_features_1h_direction_splits.labeled_overlap.npz"
             labeled_overlap_meta = summary_dir / "walkforward_labeled_overlap_meta.json"
@@ -874,6 +929,91 @@ def main() -> None:
                     args.dry_run,
                 )
             )
+
+            if bool(raw_snapshot_cfg.get("enabled", True)) and (labeled_overlap_dataset.exists() or args.dry_run):
+                raw_overlap_cmd = [
+                    python,
+                    "-m",
+                    "src.scripts.export_direction_feature_snapshot",
+                    "--dataset",
+                    str(labeled_overlap_dataset),
+                    "--output",
+                    str(raw_feature_overlap_snapshot_path),
+                    "--meta-output",
+                    str(raw_feature_overlap_snapshot_meta),
+                ]
+                results.append(
+                    _run_step(
+                        "direction_feature_overlap_snapshot",
+                        raw_overlap_cmd,
+                        logs_dir / "direction_feature_overlap_snapshot.log",
+                        args.dry_run,
+                    )
+                )
+
+        if (
+            bool(overlap_drift_guard_cfg.get("enabled", False))
+            and labeled_overlap_dataset is not None
+            and (labeled_overlap_dataset.exists() or args.dry_run)
+        ):
+            baseline_pack_path_cfg = overlap_drift_guard_cfg.get("baseline_pack_path")
+            baseline_pack_path = Path(str(baseline_pack_path_cfg)) if baseline_pack_path_cfg else None
+            if baseline_pack_path is None and bool(overlap_drift_guard_cfg.get("auto_discover_latest", True)):
+                latest_pack = _find_latest_trusted_baseline_pack(
+                    run_root=args.run_root,
+                    current_run_id=timestamp,
+                )
+                if latest_pack is not None:
+                    _, baseline_pack_path = latest_pack
+            if baseline_pack_path is not None and (baseline_pack_path.exists() or args.dry_run):
+                guard_cmd = [
+                    python,
+                    "-m",
+                    "src.scripts.analyze_overlap_feature_drift_guard",
+                    "--baseline-pack",
+                    str(baseline_pack_path),
+                    "--current-overlap-dataset",
+                    str(labeled_overlap_dataset),
+                    "--tail-rows",
+                    str(int(overlap_drift_guard_cfg.get("tail_rows", 24))),
+                    "--warn-abs-train-std-shift",
+                    str(float(overlap_drift_guard_cfg.get("warn_abs_train_std_shift", 1.5))),
+                    "--fail-abs-train-std-shift",
+                    str(float(overlap_drift_guard_cfg.get("fail_abs_train_std_shift", 2.5))),
+                    "--min-failed-features",
+                    str(int(overlap_drift_guard_cfg.get("min_failed_features", 2))),
+                    "--output",
+                    str(overlap_feature_drift_guard_path),
+                ]
+                for prefix in overlap_drift_guard_cfg.get("feature_prefixes", []):
+                    if str(prefix).strip():
+                        guard_cmd.extend(["--feature-prefix", str(prefix)])
+                for feature_name in overlap_drift_guard_cfg.get("feature_names", []):
+                    if str(feature_name).strip():
+                        guard_cmd.extend(["--feature-name", str(feature_name)])
+                results.append(
+                    _run_step(
+                        "overlap_feature_drift_guard",
+                        guard_cmd,
+                        logs_dir / "overlap_feature_drift_guard.log",
+                        args.dry_run,
+                    )
+                )
+                if overlap_feature_drift_guard_path.exists() and not args.dry_run:
+                    guard_payload = _load_json(overlap_feature_drift_guard_path)
+                    if bool(guard_payload.get("guard_failed", False)) and bool(
+                        overlap_drift_guard_cfg.get("enforce_for_paper_live", True)
+                    ):
+                        edge_trustworthy_for_paper_live = False
+                        print(
+                            "Overlap feature drift guard failed; paper-live run will use conservative hold thresholds.",
+                            file=sys.stderr,
+                        )
+            elif not args.dry_run:
+                print(
+                    "Warning: overlap feature drift guard enabled but no trusted baseline pack was resolved; skipping guard.",
+                    file=sys.stderr,
+                )
 
         if (
             bool(overlap_pre_tuning_cfg.get("enabled", True))
@@ -1350,12 +1490,48 @@ def main() -> None:
                             "reconciliation_path": str(summary_dir / "walkforward_labeled_reconciliation.json"),
                             "enforce_for_paper_live": bool(reconcile_cfg.get("enforce_for_paper_live", True)),
                         }
+                        if overlap_feature_drift_guard_path.exists():
+                            try:
+                                drift_guard_payload = _load_json(overlap_feature_drift_guard_path)
+                                edge_trustworthiness_payload["overlap_feature_drift_guard_path"] = str(
+                                    overlap_feature_drift_guard_path
+                                )
+                                edge_trustworthiness_payload["overlap_feature_drift_guard_failed"] = bool(
+                                    drift_guard_payload.get("guard_failed", False)
+                                )
+                            except Exception:
+                                pass
                         (summary_dir / "edge_trustworthiness.json").write_text(
                             json.dumps(edge_trustworthiness_payload, indent=2),
                             encoding="utf-8",
                         )
                         if bool(reconcile_cfg.get("enforce_for_paper_live", True)) and not bool(trustworthy):
                             edge_trustworthy_for_paper_live = False
+
+                        if (
+                            bool(trusted_baseline_pack_cfg.get("enabled", True))
+                            and bool(trustworthy)
+                            and bool(trusted_baseline_pack_cfg.get("write_when_edge_trustworthy", True))
+                        ):
+                            baseline_pack_cmd = [
+                                python,
+                                "-m",
+                                "src.scripts.create_trusted_baseline_pack",
+                                "--run-id",
+                                timestamp,
+                                "--run-root",
+                                str(args.run_root),
+                                "--output",
+                                str(summary_dir / "trusted_baseline_pack.json"),
+                            ]
+                            results.append(
+                                _run_step(
+                                    "trusted_baseline_pack",
+                                    baseline_pack_cmd,
+                                    logs_dir / "trusted_baseline_pack.log",
+                                    args.dry_run,
+                                )
+                            )
 
                         if overlap_as_primary:
                             selected_model_kind = str(overlap_payload.get("selected_model_kind", selected_model_kind))

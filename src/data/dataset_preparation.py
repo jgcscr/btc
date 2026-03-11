@@ -15,6 +15,8 @@ class DatasetSplits:
     X_test: np.ndarray
     y_test: np.ndarray
     feature_names: List[str]
+    scaler_mean: np.ndarray | None = None
+    scaler_scale: np.ndarray | None = None
 
 
 def enforce_unique_hourly_index(
@@ -232,4 +234,6 @@ def time_series_train_val_test_split(
         X_test=X_test_scaled,
         y_test=y_test.to_numpy(),
         feature_names=list(X.columns),
+        scaler_mean=np.asarray(scaler.mean_, dtype=float),
+        scaler_scale=np.asarray(scaler.scale_, dtype=float),
     )

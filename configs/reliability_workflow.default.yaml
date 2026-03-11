@@ -105,6 +105,26 @@ quality:
       require_fallback_auc_non_worse: false
       min_fallback_trades: 10
     enforce_for_paper_live: true
+  overlap_feature_drift_guard:
+    enabled: true
+    auto_discover_latest: true
+    tail_rows: 24
+    feature_prefixes:
+      - intrabar_
+      - taker_buy_
+      - liquidity_
+    feature_names:
+      - volume_delta_1h
+      - cvd_zscore_6h
+    warn_abs_train_std_shift: 1.5
+    fail_abs_train_std_shift: 2.5
+    min_failed_features: 2
+    enforce_for_paper_live: true
+  raw_direction_feature_snapshot:
+    enabled: true
+  trusted_baseline_pack:
+    enabled: true
+    write_when_edge_trustworthy: true
   overlap_pre_tuning:
     enabled: true
     use_overlap_feature_reliability_for_ablation: true

@@ -57,6 +57,36 @@ def _load_overlap_rows(npz_path: Path) -> tuple[Dict[str, Dict[str, Any]], List[
     return rows, feature_names
 
 
+def _load_scaler_stats(npz_path: Path, feature_names: List[str]) -> Dict[str, Dict[str, float]]:
+    with np.load(npz_path, allow_pickle=True) as data:
+        if "scaler_mean" not in data.files or "scaler_scale" not in data.files:
+            return {}
+        means = np.asarray(data["scaler_mean"], dtype=float)
+        scales = np.asarray(data["scaler_scale"], dtype=float)
+    if len(means) != len(feature_names) or len(scales) != len(feature_names):
+        return {}
+    return {
+        feature_names[idx]: {
+            "mean": float(means[idx]),
+            "scale": float(scales[idx]),
+        }
+        for idx in range(len(feature_names))
+    }
+
+
+def _inverse_to_raw(
+    feature_values: Dict[str, float],
+    scaler_stats: Dict[str, Dict[str, float]],
+) -> Dict[str, float]:
+    raw: Dict[str, float] = {}
+    for feature_name, value in feature_values.items():
+        stats = scaler_stats.get(feature_name)
+        if not stats:
+            continue
+        raw[feature_name] = float(value * stats["scale"] + stats["mean"])
+    return raw
+
+
 def _resolved_walkforward_context(compare_summary_path: Path, n_rows: int, fold_number: int) -> Dict[str, Any]:
     summary = _load_json(compare_summary_path)
     resolved = summary.get("resolved_walkforward", {}) if isinstance(summary.get("resolved_walkforward"), dict) else {}
@@ -159,6 +189,46 @@ def _top_feature_deltas(
     return deltas[:limit]
 
 
+def _top_raw_feature_deltas(
+    trusted_features: Dict[str, float],
+    drift_features: Dict[str, float],
+    trusted_scaler: Dict[str, Dict[str, float]],
+    drift_scaler: Dict[str, Dict[str, float]],
+    feature_names: Iterable[str],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    deltas: List[Dict[str, Any]] = []
+    for feature_name in feature_names:
+        trusted_stats = trusted_scaler.get(feature_name)
+        drift_stats = drift_scaler.get(feature_name)
+        if not trusted_stats or not drift_stats:
+            continue
+        trusted_raw = float(trusted_features.get(feature_name, float("nan")) * trusted_stats["scale"] + trusted_stats["mean"])
+        drift_raw = float(drift_features.get(feature_name, float("nan")) * drift_stats["scale"] + drift_stats["mean"])
+        delta = drift_raw - trusted_raw
+        baseline_train_std = float(trusted_stats["scale"])
+        deltas.append(
+            {
+                "feature": feature_name,
+                "trusted_raw": trusted_raw,
+                "drift_raw": drift_raw,
+                "raw_delta": float(delta),
+                "abs_raw_delta": float(abs(delta)),
+                "trusted_train_mean_raw": float(trusted_stats["mean"]),
+                "trusted_train_std_raw": baseline_train_std,
+                "abs_delta_in_trusted_train_std": float(abs(delta) / baseline_train_std) if baseline_train_std > 1e-12 else None,
+            }
+        )
+    deltas.sort(
+        key=lambda item: (
+            item["abs_delta_in_trusted_train_std"] if item["abs_delta_in_trusted_train_std"] is not None else -1.0,
+            item["abs_raw_delta"],
+        ),
+        reverse=True,
+    )
+    return deltas[:limit]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export feature-level diffs for the exact overlap bars that flipped trust between a trusted and drifting run.",
@@ -229,6 +299,8 @@ def main() -> None:
     timestamps = _collect_timestamps(detail_payload)
     trusted_rows, feature_names = _load_overlap_rows(trusted_npz)
     drift_rows, _ = _load_overlap_rows(drift_npz)
+    trusted_scaler = _load_scaler_stats(trusted_npz, feature_names)
+    drift_scaler = _load_scaler_stats(drift_npz, feature_names)
     trusted_detail_rows = _load_csv_rows(trusted_detail_path) if trusted_detail_path.exists() else {}
     drift_detail_rows = _load_csv_rows(drift_detail_path) if drift_detail_path.exists() else {}
     trusted_fold_info = _resolved_walkforward_context(args.trusted_compare_summary, len(trusted_rows), worst_fold_number)
@@ -258,6 +330,14 @@ def main() -> None:
             feature_delta["trusted_train_std"] = trusted_stats.get("std")
             feature_delta["drift_train_mean"] = drift_stats.get("mean")
             feature_delta["drift_train_std"] = drift_stats.get("std")
+        top_raw_feature_deltas = _top_raw_feature_deltas(
+            trusted_row["features"],
+            drift_row["features"],
+            trusted_scaler,
+            drift_scaler,
+            feature_names,
+            limit=int(args.top_features),
+        )
         common_changed_rows.append(
             {
                 "timestamp": timestamp,
@@ -274,6 +354,7 @@ def main() -> None:
                 "trusted_ret_net": float(trusted_detail["ret_net"]) if trusted_detail.get("ret_net") else None,
                 "drift_ret_net": float(drift_detail["ret_net"]) if drift_detail.get("ret_net") else None,
                 "top_feature_deltas": top_feature_deltas,
+                "top_raw_feature_deltas": top_raw_feature_deltas,
             }
         )
 
@@ -289,6 +370,7 @@ def main() -> None:
                 "trusted_y_true": trusted_row["y_true"],
                 "trusted_y_ret": trusted_row["y_ret"],
                 "feature_snapshot": trusted_row["features"],
+                "feature_snapshot_raw": _inverse_to_raw(trusted_row["features"], trusted_scaler),
             }
         )
 
@@ -304,6 +386,7 @@ def main() -> None:
                 "drift_y_true": drift_row["y_true"],
                 "drift_y_ret": drift_row["y_ret"],
                 "feature_snapshot": drift_row["features"],
+                "feature_snapshot_raw": _inverse_to_raw(drift_row["features"], drift_scaler),
             }
         )
 
@@ -317,6 +400,7 @@ def main() -> None:
         "worst_fold": int(worst_fold_number),
         "feature_count": len(feature_names),
         "feature_names": feature_names,
+        "raw_pre_normalization_available": bool(trusted_scaler) and bool(drift_scaler),
         "trusted_train_window": _window_summary(trusted_rows, trusted_fold_info),
         "drift_train_window": _window_summary(drift_rows, drift_fold_info),
         "common_changed_rows": common_changed_rows,

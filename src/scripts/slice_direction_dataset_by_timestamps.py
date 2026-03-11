@@ -93,7 +93,7 @@ def main() -> None:
         out["ts_all"] = np.asarray(ts_all[mask], dtype="datetime64[ns]")
 
         # Keep static metadata arrays when present.
-        for key in ("feature_names", "threshold"):
+        for key in ("feature_names", "threshold", "scaler_mean", "scaler_scale"):
             if key in data.files:
                 out[key] = data[key]
 

@@ -313,6 +313,10 @@ python -m src.scripts.run_default_midband_matched_cycle \
 
 Runs created by the newer replay-support workflow also preserve a run-local labeled backtest snapshot at `summary/labeled_backtest.snapshot.csv`, so future replays do not depend on the mutable monitoring CSV.
 
+Trustworthy runs now also write `summary/trusted_baseline_pack.json`. The baseline pack is a run-local manifest that bundles the snapshot NPZ, labeled backtest snapshot, overlap dataset snapshot, compare summaries, and trust artifacts under that trusted run id so later replay and drift checks can resolve a single manifest instead of manual paths.
+
+Newer runs also snapshot the raw pre-normalization direction feature frame under `summary/direction_features_raw.snapshot.csv` plus a labeled-overlap slice under `summary/direction_features_raw.labeled_overlap.csv`. Those files are intended to preserve the exact raw feature values needed for future overlap trust-flip analysis, instead of relying on reconstructed values from the mutable canonical source.
+
 Compare a trusted replay run against a drifting latest run:
 
 ```bash
@@ -336,7 +340,26 @@ python -m src.scripts.analyze_overlap_feature_drift \
   --output artifacts/analysis/overlap_feature_drift_latest.json
 ```
 
-The feature-drift artifact includes the worst-fold train-window boundaries plus the matched per-bar `p_up`, signal, and `ret_net` values for each changed row when the detailed overlap row exports are available.
+The feature-drift artifact includes the worst-fold train-window boundaries plus the matched per-bar `p_up`, signal, and `ret_net` values for each changed row when the detailed overlap row exports are available. For datasets created after the scaler-stats update, the same artifact now also exports raw pre-normalization feature deltas and raw row snapshots for the exact changed fold rows.
+
+Create or refresh a baseline pack manifest manually for a trusted run when needed:
+
+```bash
+python -m src.scripts.create_trusted_baseline_pack \
+  --run-id <trusted-run-id> \
+  --run-root artifacts/reliability
+```
+
+The default reliability workflow also enables an overlap feature-drift guard. Once a prior trusted baseline pack exists, the workflow auto-discovers the latest trusted pack, compares the current overlap tail against that baseline, and writes `summary/overlap_feature_drift_guard.json`. If the monitored intrabar or order-flow features move too far in trusted-train standard-deviation units, paper-live is forced onto conservative hold thresholds even before the overlap trust check would have silently degraded.
+
+If you need to backfill raw snapshots for an older run that predates this workflow change, you can export them directly from that run's saved direction datasets:
+
+```bash
+python -m src.scripts.export_direction_feature_snapshot \
+  --dataset artifacts/reliability/<run-id>/summary/btc_features_1h_direction_splits.snapshot.npz \
+  --output artifacts/reliability/<run-id>/summary/direction_features_raw.snapshot.csv \
+  --meta-output artifacts/reliability/<run-id>/summary/direction_features_raw.snapshot_meta.json
+```
 
 Supporting comparison/watchlist scripts currently present:
 

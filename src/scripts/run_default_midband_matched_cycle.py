@@ -190,6 +190,30 @@ def _resolve_replay_inputs_from_run_id(run_root: Path, run_id: str) -> Dict[str,
     if not summary_dir.exists():
         raise FileNotFoundError(f"Summary directory for pinned run id not found: {summary_dir}")
 
+    baseline_pack_path = summary_dir / "trusted_baseline_pack.json"
+    if baseline_pack_path.exists():
+        baseline_pack = _load_json(baseline_pack_path)
+        replay_inputs = baseline_pack.get("replay_inputs") if isinstance(baseline_pack.get("replay_inputs"), dict) else {}
+        snapshot = Path(str(replay_inputs.get("snapshot", "")))
+        if snapshot.exists():
+            snapshot_meta_value = replay_inputs.get("snapshot_meta")
+            labeled_csv_value = replay_inputs.get("labeled_csv")
+            labeled_meta_value = replay_inputs.get("labeled_meta")
+            labeled_csv = Path(str(labeled_csv_value)) if labeled_csv_value else None
+            if labeled_csv is None or not labeled_csv.exists():
+                raise FileNotFoundError(
+                    "Pinned run baseline pack is missing a valid run-local labeled backtest snapshot: "
+                    f"{labeled_csv_value}"
+                )
+            snapshot_meta = Path(str(snapshot_meta_value)) if snapshot_meta_value else None
+            labeled_meta = Path(str(labeled_meta_value)) if labeled_meta_value else None
+            return {
+                "snapshot": snapshot,
+                "snapshot_meta": snapshot_meta if snapshot_meta is not None and snapshot_meta.exists() else None,
+                "labeled_csv": labeled_csv,
+                "labeled_meta": labeled_meta if labeled_meta is not None and labeled_meta.exists() else None,
+            }
+
     snapshot = summary_dir / "btc_features_1h_direction_splits.snapshot.npz"
     if not snapshot.exists():
         raise FileNotFoundError(f"Pinned run is missing snapshot dataset: {snapshot}")

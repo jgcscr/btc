@@ -1,0 +1,111 @@
+{
+  "generated_at": "2026-03-11T00:08:17.660175Z",
+  "trusted_run_id": "20260311T000500Z",
+  "drift_run_id": "20260311T000600Z",
+  "summary": {
+    "trusted_overlap_cum_ret_net_total": -0.002179476375185188,
+    "drift_overlap_cum_ret_net_total": -0.002179476375185188,
+    "overlap_delta_total": 0.0,
+    "trusted_edge_trustworthy": false,
+    "drift_edge_trustworthy": false
+  },
+  "overlap_slice": {
+    "trusted_rows": 107,
+    "drift_rows": 107,
+    "only_in_trusted": [
+      "2026-02-20T14:00:00"
+    ],
+    "only_in_drift": [
+      "2026-02-21T22:00:00"
+    ]
+  },
+  "fold_deltas": [
+    {
+      "fold": 1,
+      "trusted_cum_ret": -0.010321943397074939,
+      "drift_cum_ret": -0.010321943397074939,
+      "delta": 0.0,
+      "trusted_trade_count": 7,
+      "drift_trade_count": 7
+    },
+    {
+      "fold": 2,
+      "trusted_cum_ret": 0.018719816026836634,
+      "drift_cum_ret": 0.018719816026836634,
+      "delta": 0.0,
+      "trusted_trade_count": 2,
+      "drift_trade_count": 2
+    },
+    {
+      "fold": 3,
+      "trusted_cum_ret": 0.004176900663273409,
+      "drift_cum_ret": 0.004176900663273409,
+      "delta": 0.0,
+      "trusted_trade_count": 2,
+      "drift_trade_count": 2
+    },
+    {
+      "fold": 4,
+      "trusted_cum_ret": -0.0010719548863533414,
+      "drift_cum_ret": -0.0010719548863533414,
+      "delta": 0.0,
+      "trusted_trade_count": 6,
+      "drift_trade_count": 6
+    },
+    {
+      "fold": 5,
+      "trusted_cum_ret": 0.004735331718623637,
+      "drift_cum_ret": 0.004735331718623637,
+      "delta": 0.0,
+      "trusted_trade_count": 6,
+      "drift_trade_count": 6
+    },
+    {
+      "fold": 6,
+      "trusted_cum_ret": -0.023329154234181623,
+      "drift_cum_ret": -0.023329154234181623,
+      "delta": 0.0,
+      "trusted_trade_count": 8,
+      "drift_trade_count": 8
+    },
+    {
+      "fold": 7,
+      "trusted_cum_ret": 0.004911527733691037,
+      "drift_cum_ret": 0.004911527733691037,
+      "delta": 0.0,
+      "trusted_trade_count": 8,
+      "drift_trade_count": 8
+    },
+    {
+      "fold": 8,
+      "trusted_cum_ret": 0.0,
+      "drift_cum_ret": 0.0,
+      "delta": 0.0,
+      "trusted_trade_count": 0,
+      "drift_trade_count": 0
+    }
+  ],
+  "tail_overlap_positions": {
+    "trusted_only_positions": [
+      {
+        "timestamp": "2026-02-20T14:00:00",
+        "trusted_pos": 101
+      }
+    ],
+    "drift_only_positions": [
+      {
+        "timestamp": "2026-02-21T22:00:00",
+        "drift_pos": 106
+      }
+    ]
+  },
+  "conclusion": "The overlap trust flip is fully explained by fold 1. It moved from -0.0103219434 to -0.0103219434, a delta of 0.0000000000.",
+  "worst_fold_bar_deltas": {
+    "fold": 1,
+    "trusted_detail_path": "artifacts/reliability/20260311T000500Z/summary/walkforward_model_compare_labeled_overlap_meta_stack_rows.csv",
+    "drift_detail_path": "artifacts/reliability/20260311T000600Z/summary/walkforward_model_compare_labeled_overlap_meta_stack_rows.csv",
+    "trusted_only_rows": [],
+    "drift_only_rows": [],
+    "common_changed_rows": []
+  }
+}
