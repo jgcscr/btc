@@ -1,0 +1,76 @@
+name: Cadence Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      cadence:
+        description: Cadence to run
+        required: true
+        default: daily
+        type: choice
+        options:
+          - daily
+          - weekly
+          - monthly
+  schedule:
+    - cron: '15 1 * * *'
+    - cron: '30 2 * * 1'
+    - cron: '45 3 1 * *'
+
+jobs:
+  run-cadence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PYTHONUNBUFFERED: '1'
+      PYTHON_BIN: python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          if [[ -f requirements-tests.txt ]]; then pip install -r requirements-tests.txt; fi
+
+      - name: Resolve cadence
+        id: cadence
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            cadence="${{ github.event.inputs.cadence }}"
+          else
+            case "${{ github.event.schedule }}" in
+              '15 1 * * *') cadence='daily' ;;
+              '30 2 * * 1') cadence='weekly' ;;
+              '45 3 1 * *') cadence='monthly' ;;
+              *)
+                echo "Unknown schedule: ${{ github.event.schedule }}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          echo "cadence=$cadence" >> "$GITHUB_OUTPUT"
+
+      - name: Run cadence
+        run: |
+          chmod +x scripts/run_cadence.sh
+          ./scripts/run_cadence.sh "${{ steps.cadence.outputs.cadence }}"
+
+      - name: Upload prediction artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadence-${{ steps.cadence.outputs.cadence }}-${{ github.run_id }}
+          path: |
+            artifacts/predictions/latest.json
+            artifacts/monitoring/latest.json
+            artifacts/monitoring/trade_ready_summary.json
+            artifacts/reliability/*/summary/edge_trustworthiness.json
+            artifacts/reliability/*/summary/walkforward_labeled_reconciliation.json
+          if-no-files-found: warn
