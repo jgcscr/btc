@@ -10,6 +10,7 @@ __pycache__/
 artifacts/
 # ignore all data; we'll recreate needed inputs dynamically
 data/
+mlruns/
 
 # legacy granular ignores (covered by above rule)
 data/spot_klines/
