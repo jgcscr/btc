@@ -18,9 +18,24 @@ FEATURE_COLUMNS = [
     "ret_pred",
     "expected_value_proxy",
     "abs_ret_pred",
+    "confidence_score",
+    "position_size",
     "volatility_realized_24h",
     "volatility_ewm_24h",
     "volatility_garch_like",
+    "range_expansion_1h",
+    "distance_from_session_high_8h",
+    "distance_from_session_low_8h",
+    "vwap_deviation_8h",
+    "momentum_slope_2h",
+    "momentum_slope_4h",
+    "confluence_support_ratio",
+    "confluence_short_term_ratio",
+    "confluence_mid_term_ratio",
+    "confluence_direction_matches_dominant",
+    "incumbent_signal_reference",
+    "candidate_only_reference",
+    "candidate_incumbent_disagreement",
     "regime_is_trend",
     "regime_is_neutral",
     "regime_is_chop",
@@ -53,6 +68,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=200,
         help="Minimum labeled rows required for reliable deployment of this gate.",
+    )
+    parser.add_argument(
+        "--min-candidate-rows",
+        type=int,
+        default=60,
+        help="Minimum candidate trade rows required before deploying this gate.",
+    )
+    parser.add_argument(
+        "--min-oof-rows",
+        type=int,
+        default=40,
+        help="Minimum OOF probability rows required before deploying this gate.",
+    )
+    parser.add_argument(
+        "--min-positive-oof-bins",
+        type=int,
+        default=2,
+        help="Minimum positive expected-net OOF bins required before deploying this gate.",
     )
     parser.add_argument(
         "--candidate-only",
@@ -94,6 +127,14 @@ def parse_args() -> argparse.Namespace:
         default=4.0,
         help="Sample weight for candidate rows when raw-ev-calibration-source=weighted_hybrid.",
     )
+    parser.add_argument("--midband-focus-enabled", action="store_true")
+    parser.add_argument("--midband-focus-pup-low", type=float, default=0.55)
+    parser.add_argument("--midband-focus-pup-high", type=float, default=0.60)
+    parser.add_argument("--midband-focus-high-inclusive", action="store_true")
+    parser.add_argument("--midband-focus-min-abs-ret-pred", type=float, default=0.0005)
+    parser.add_argument("--midband-focus-max-abs-ret-pred", type=float, default=0.001)
+    parser.add_argument("--midband-focus-negative-weight", type=float, default=1.0)
+    parser.add_argument("--midband-focus-positive-weight", type=float, default=1.0)
     parser.add_argument("--output", type=Path, required=True, help="Output JSON path.")
     return parser.parse_args()
 
@@ -109,9 +150,24 @@ def _extract_features(df: pd.DataFrame) -> pd.DataFrame:
     out["ret_pred"] = _series("ret_pred", 0.0)
     out["expected_value_proxy"] = out["p_up"] * out["ret_pred"]
     out["abs_ret_pred"] = out["ret_pred"].abs()
+    out["confidence_score"] = _series("confidence_score", 0.0)
+    out["position_size"] = _series("position_size", 0.0)
     out["volatility_realized_24h"] = _series("volatility_realized_24h", 0.0)
     out["volatility_ewm_24h"] = _series("volatility_ewm_24h", 0.0)
     out["volatility_garch_like"] = _series("volatility_garch_like", 0.0)
+    out["range_expansion_1h"] = _series("range_expansion_1h", 0.0)
+    out["distance_from_session_high_8h"] = _series("distance_from_session_high_8h", 0.0)
+    out["distance_from_session_low_8h"] = _series("distance_from_session_low_8h", 0.0)
+    out["vwap_deviation_8h"] = _series("vwap_deviation_8h", 0.0)
+    out["momentum_slope_2h"] = _series("momentum_slope_2h", 0.0)
+    out["momentum_slope_4h"] = _series("momentum_slope_4h", 0.0)
+    out["confluence_support_ratio"] = _series("confluence_support_ratio", 0.0)
+    out["confluence_short_term_ratio"] = _series("confluence_short_term_ratio", 0.0)
+    out["confluence_mid_term_ratio"] = _series("confluence_mid_term_ratio", 0.0)
+    out["confluence_direction_matches_dominant"] = _series("confluence_direction_matches_dominant", 0.0)
+    out["incumbent_signal_reference"] = _series("incumbent_signal_reference", 0.0)
+    out["candidate_only_reference"] = _series("candidate_only_reference", 0.0)
+    out["candidate_incumbent_disagreement"] = _series("candidate_incumbent_disagreement", 0.0)
     regime = df.get("regime_state")
     if regime is None:
         regime = pd.Series(["neutral"] * len(df), index=df.index)
@@ -128,7 +184,12 @@ def _safe_auc(y_true: np.ndarray, p: np.ndarray) -> float:
     return float(roc_auc_score(y_true, p))
 
 
-def _build_oof_probabilities(X: pd.DataFrame, y: pd.Series, n_splits: int) -> np.ndarray:
+def _build_oof_probabilities(
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_splits: int,
+    sample_weight: np.ndarray | None = None,
+) -> np.ndarray:
     n_rows = len(X)
     oof = np.full(n_rows, np.nan, dtype=float)
     if n_rows < 24:
@@ -141,9 +202,38 @@ def _build_oof_probabilities(X: pd.DataFrame, y: pd.Series, n_splits: int) -> np
         if int(y_train.nunique()) < 2:
             continue
         model = LogisticRegression(max_iter=2000, solver="lbfgs", class_weight="balanced")
-        model.fit(X.iloc[train_idx], y_train)
+        fit_kwargs = {}
+        if sample_weight is not None:
+            fit_kwargs["sample_weight"] = sample_weight[train_idx]
+        model.fit(X.iloc[train_idx], y_train, **fit_kwargs)
         oof[val_idx] = model.predict_proba(X.iloc[val_idx])[:, 1]
     return np.clip(oof, 1e-6, 1.0 - 1e-6)
+
+
+def _build_midband_focus_weights(df: pd.DataFrame, y: pd.Series, args: argparse.Namespace) -> np.ndarray:
+    weights = np.ones(len(df), dtype=float)
+    if not bool(args.midband_focus_enabled):
+        return weights
+
+    signal = pd.to_numeric(df.get(args.signal_col, 0.0), errors="coerce").fillna(0.0) > 0.0
+    p_up = pd.to_numeric(df.get("p_up", df.get("p_up_meta", np.nan)), errors="coerce")
+    abs_ret_pred = pd.to_numeric(df.get("ret_pred", np.nan), errors="coerce").abs()
+    if bool(args.midband_focus_high_inclusive):
+        in_band = (p_up >= float(args.midband_focus_pup_low)) & (p_up <= float(args.midband_focus_pup_high))
+    else:
+        in_band = (p_up >= float(args.midband_focus_pup_low)) & (p_up < float(args.midband_focus_pup_high))
+    in_band = in_band & (abs_ret_pred >= float(args.midband_focus_min_abs_ret_pred))
+    if args.midband_focus_max_abs_ret_pred is not None:
+        in_band = in_band & (abs_ret_pred < float(args.midband_focus_max_abs_ret_pred))
+    focus_mask = signal & in_band.fillna(False)
+
+    neg_weight = max(1.0, float(args.midband_focus_negative_weight))
+    pos_weight = max(1.0, float(args.midband_focus_positive_weight))
+    y_arr = y.to_numpy(dtype=int)
+    focus_arr = focus_mask.to_numpy(dtype=bool)
+    weights[focus_arr & (y_arr <= 0)] = neg_weight
+    weights[focus_arr & (y_arr > 0)] = pos_weight
+    return weights
 
 
 def _build_expected_net_curve(
@@ -326,6 +416,7 @@ def main() -> None:
     target_net = pd.to_numeric(train_df[args.target_col], errors="coerce").fillna(0.0)
     y = (target_net > 0.0).astype(int)
     X = _extract_features(train_df)
+    sample_weight = _build_midband_focus_weights(train_df, y, args)
 
     if int(y.nunique()) < 2:
         raise RuntimeError("Trade decision training requires both positive and negative classes.")
@@ -348,7 +439,13 @@ def main() -> None:
         target_net_cal = target_net
         calibration_source = "fallback_all"
 
-    oof_prob = _build_oof_probabilities(X_cal, y_cal, n_splits=int(args.oof_splits))
+    sample_weight_cal = sample_weight[calibration_mask.to_numpy(dtype=bool)]
+    oof_prob = _build_oof_probabilities(
+        X_cal,
+        y_cal,
+        n_splits=int(args.oof_splits),
+        sample_weight=sample_weight_cal,
+    )
     valid_oof = np.isfinite(oof_prob)
     oof_curve = _build_expected_net_curve(
         oof_prob,
@@ -398,7 +495,7 @@ def main() -> None:
     raw_iso_mse = float(np.mean((raw_iso_oof[raw_iso_valid] - raw_ret_series[raw_iso_valid]) ** 2.0)) if int(raw_iso_valid.sum()) else float("nan")
 
     model = LogisticRegression(max_iter=2000, solver="lbfgs", class_weight="balanced")
-    model.fit(X, y)
+    model.fit(X, y, sample_weight=sample_weight)
 
     raw_ev_series = target_net.loc[trade_mask.loc[target_net.index]] if int(trade_mask.loc[target_net.index].sum()) > 0 else target_net
     quantiles = [0.5, 0.7, 0.8, 0.9, 0.95]
@@ -410,20 +507,56 @@ def main() -> None:
     prob = np.clip(model.predict_proba(X)[:, 1], 1e-6, 1.0 - 1e-6)
     auc = _safe_auc(y.to_numpy(dtype=int), prob)
     oof_auc = _safe_auc(y_cal.to_numpy(dtype=int)[valid_oof], oof_prob[valid_oof]) if int(valid_oof.sum()) else float("nan")
+    positive_oof_bins = [
+        entry
+        for entry in oof_curve.get("bins", [])
+        if float(entry.get("mean_ret_net", 0.0)) > 0.0
+    ]
+    candidate_rows = int(trade_mask.sum())
+    oof_rows = int(valid_oof.sum())
+    deploy_checks = {
+        "min_rows": int(len(X)) >= int(args.min_rows),
+        "min_candidate_rows": candidate_rows >= int(args.min_candidate_rows),
+        "min_oof_rows": oof_rows >= int(args.min_oof_rows),
+        "min_positive_oof_bins": len(positive_oof_bins) >= int(args.min_positive_oof_bins),
+    }
+    deploy_reasons = [name for name, passed in deploy_checks.items() if not passed]
+
     payload: Dict[str, object] = {
         "feature_columns": FEATURE_COLUMNS,
         "coefficients": [float(v) for v in model.coef_[0]],
         "intercept": float(model.intercept_[0]),
         "threshold": float(args.threshold),
         "min_rows_required": int(args.min_rows),
-        "deploy_ready": bool(int(len(X)) >= int(args.min_rows)),
+        "deploy_ready": not deploy_reasons,
+        "deploy_readiness": {
+            "checks": deploy_checks,
+            "failed_checks": deploy_reasons,
+            "min_candidate_rows_required": int(args.min_candidate_rows),
+            "min_oof_rows_required": int(args.min_oof_rows),
+            "min_positive_oof_bins_required": int(args.min_positive_oof_bins),
+            "positive_oof_bin_count": int(len(positive_oof_bins)),
+        },
+        "midband_focus": {
+            "enabled": bool(args.midband_focus_enabled),
+            "p_up_low": float(args.midband_focus_pup_low),
+            "p_up_high": float(args.midband_focus_pup_high),
+            "high_inclusive": bool(args.midband_focus_high_inclusive),
+            "min_abs_ret_pred": float(args.midband_focus_min_abs_ret_pred),
+            "max_abs_ret_pred": (
+                None if args.midband_focus_max_abs_ret_pred is None else float(args.midband_focus_max_abs_ret_pred)
+            ),
+            "negative_weight": float(args.midband_focus_negative_weight),
+            "positive_weight": float(args.midband_focus_positive_weight),
+            "focused_rows": int((sample_weight > 1.0).sum()),
+        },
         "metrics": {
             "rows": int(len(X)),
             "full_rows": int(len(df)),
-            "candidate_rows": int(trade_mask.sum()),
+            "candidate_rows": candidate_rows,
             "auc": auc,
             "oof_auc": oof_auc,
-            "oof_rows": int(valid_oof.sum()),
+            "oof_rows": oof_rows,
             "brier": float(brier_score_loss(y, prob)),
             "log_loss": float(log_loss(y, prob)),
             "positive_rate": float(y.mean()),

@@ -186,7 +186,7 @@ def _candles_to_tidy(
 
 
 def _write_parquet(frame: pd.DataFrame, output_root: Path, symbol_id: str) -> Path:
-    timestamp = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    timestamp = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
     output_dir = output_root / "entity=spot" / f"symbol={symbol_id}"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"binanceus_spot_{symbol_id}_{timestamp}.parquet"

@@ -359,11 +359,14 @@ def _parse_targets_arg(values: Optional[str]) -> List[float]:
 
 def _resolve_dataset_for_target(
     horizon_hours: float,
+    dataset_15m: str,
     dataset_1h: str,
     dataset_multi: str,
 ) -> tuple[str, Optional[str]]:
     normalized = _normalize_horizon_value(horizon_hours)
-    if normalized <= 1.0:
+    if normalized < 1.0:
+        return dataset_15m, None
+    if normalized == 1.0:
         return dataset_1h, None
 
     if not float(normalized).is_integer():
@@ -759,6 +762,12 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--dataset-15m-path",
+        type=str,
+        default="artifacts/datasets/btc_features_15m_splits.npz",
+        help="Path to the 15m regression npz file with train/val/test splits.",
+    )
+    parser.add_argument(
         "--dataset-path",
         type=str,
         default="artifacts/datasets/btc_features_1h_splits.npz",
@@ -957,6 +966,7 @@ def main() -> None:
             suffix_label = _format_horizon_label(normalized)
             dataset_path, target_key = _resolve_dataset_for_target(
                 normalized,
+                args.dataset_15m_path,
                 args.dataset_path,
                 args.dataset_multi_path,
             )

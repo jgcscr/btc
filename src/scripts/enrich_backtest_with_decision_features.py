@@ -12,10 +12,25 @@ FEATURE_COLUMNS: List[str] = [
     "ret_pred",
     "signal_dir_only",
     "expected_value",
+    "confidence_score",
+    "position_size",
     "regime_state",
     "volatility_realized_24h",
     "volatility_ewm_24h",
     "volatility_garch_like",
+    "range_expansion_1h",
+    "distance_from_session_high_8h",
+    "distance_from_session_low_8h",
+    "vwap_deviation_8h",
+    "momentum_slope_2h",
+    "momentum_slope_4h",
+    "confluence_support_ratio",
+    "confluence_short_term_ratio",
+    "confluence_mid_term_ratio",
+    "confluence_direction_matches_dominant",
+    "incumbent_signal_reference",
+    "candidate_only_reference",
+    "candidate_incumbent_disagreement",
 ]
 
 
@@ -41,6 +56,12 @@ def parse_args() -> argparse.Namespace:
             "Also scan artifacts/reliability/*/summary/backtest_signals_meta_ensemble_enriched.csv "
             "and pick the highest-overlap source with non-null decision features."
         ),
+    )
+    parser.add_argument(
+        "--incumbent-reference-source",
+        type=Path,
+        default=None,
+        help="Optional incumbent backtest CSV used to derive candidate-vs-incumbent disagreement features.",
     )
     return parser.parse_args()
 
@@ -144,6 +165,36 @@ def main() -> None:
             per_source[col] += n
         backfill_by_source[str(src)] = per_source
 
+    incumbent_reference_summary = {
+        "source": None,
+        "rows_with_reference": 0,
+        "candidate_only_rows": 0,
+        "disagreement_rows": 0,
+    }
+    if args.incumbent_reference_source is not None and args.incumbent_reference_source.exists():
+        incumbent_src = pd.read_csv(args.incumbent_reference_source)
+        if "ts" in incumbent_src.columns and "signal_ensemble" in incumbent_src.columns:
+            incumbent_src = incumbent_src.copy()
+            incumbent_src["_ts_norm"] = pd.to_datetime(incumbent_src["ts"], utc=True, errors="coerce").dt.floor("h")
+            incumbent_src = incumbent_src.loc[:, ["_ts_norm", "signal_ensemble"]].dropna(subset=["_ts_norm"]).drop_duplicates(
+                subset=["_ts_norm"], keep="last"
+            )
+            incumbent_map = pd.to_numeric(
+                incumbent_src.set_index("_ts_norm")["signal_ensemble"],
+                errors="coerce",
+            ).fillna(0.0)
+            incumbent_signal = out["_ts_norm"].map(incumbent_map).fillna(0.0)
+            candidate_signal = pd.to_numeric(out.get("signal_ensemble", 0.0), errors="coerce").fillna(0.0)
+            out["incumbent_signal_reference"] = incumbent_signal.astype(float)
+            out["candidate_only_reference"] = ((candidate_signal > 0.0) & (incumbent_signal <= 0.0)).astype(float)
+            out["candidate_incumbent_disagreement"] = ((candidate_signal > 0.0) != (incumbent_signal > 0.0)).astype(float)
+            incumbent_reference_summary = {
+                "source": str(args.incumbent_reference_source),
+                "rows_with_reference": int((incumbent_signal.notna()).sum()),
+                "candidate_only_rows": int(out["candidate_only_reference"].sum()),
+                "disagreement_rows": int(out["candidate_incumbent_disagreement"].sum()),
+            }
+
     missing_after = _missing_counts(out, FEATURE_COLUMNS)
     out = out.drop(columns=["_ts_norm"], errors="ignore")
 
@@ -159,6 +210,7 @@ def main() -> None:
         "missing_after": missing_after,
         "backfill_by_column": backfill_by_col,
         "backfill_by_source": backfill_by_source,
+        "incumbent_reference": incumbent_reference_summary,
     }
     if args.meta_output is not None:
         args.meta_output.parent.mkdir(parents=True, exist_ok=True)

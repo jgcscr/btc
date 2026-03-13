@@ -29,6 +29,7 @@ from src.trading.volatility import (
     split_volatility_arrays,
 )
 from src.scripts.build_training_dataset import _apply_funding_rate_features
+from src.scripts.build_training_dataset import _load_local_features as _load_hourly_local_features
 
 
 DEFAULT_HORIZONS: List[int] = [1, 4, 8, 12]
@@ -67,6 +68,12 @@ CORE_MODEL_FEATURES = [
     "cvd_zscore_6h",
     "liquidity_range_ratio_6h",
     "liquidity_close_position_ratio",
+    "range_expansion_1h",
+    "distance_from_session_high_8h",
+    "distance_from_session_low_8h",
+    "vwap_deviation_8h",
+    "momentum_slope_2h",
+    "momentum_slope_4h",
 ]
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
@@ -317,6 +324,27 @@ def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
     close_position = close_position.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
     result["liquidity_close_position_ratio"] = close_position
 
+    high = result["high"].astype(float)
+    low = result["low"].astype(float)
+    close = result["close"].astype(float)
+    volume = result["volume"].astype(float) if "volume" in result.columns else None
+    atr_24h = true_range.rolling(window=24, min_periods=6).mean().replace(0.0, np.nan)
+    result["range_expansion_1h"] = (true_range / atr_24h).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 10.0)
+    session_high = high.rolling(window=8, min_periods=2).max().replace(0.0, np.nan)
+    session_low = low.rolling(window=8, min_periods=2).min().replace(0.0, np.nan)
+    result["distance_from_session_high_8h"] = ((close / session_high) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+    result["distance_from_session_low_8h"] = ((close / session_low) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+    if volume is not None:
+        typical_price = (high + low + close) / 3.0
+        rolling_notional = (typical_price * volume).rolling(window=8, min_periods=2).sum()
+        rolling_volume = volume.rolling(window=8, min_periods=2).sum().replace(0.0, np.nan)
+        rolling_vwap = (rolling_notional / rolling_volume).replace([np.inf, -np.inf], np.nan)
+        result["vwap_deviation_8h"] = ((close / rolling_vwap) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+    else:
+        result["vwap_deviation_8h"] = 0.0
+    result["momentum_slope_2h"] = _safe_pct(close).rolling(window=2, min_periods=1).mean().fillna(0.0)
+    result["momentum_slope_4h"] = _safe_pct(close).rolling(window=4, min_periods=1).mean().fillna(0.0)
+
     return result
 
 META_PATH = Path("artifacts/datasets/btc_features_multi_horizon_meta.json")
@@ -396,14 +424,16 @@ def build_multi_horizon_dataset(
             raise FileNotFoundError(f"Features CSV not found at {features_path}")
         df = pd.read_csv(features_path, parse_dates=["ts"])
     else:
-        df = load_btc_features_1h(
-            project_id=PROJECT_ID,
-            dataset_id=BQ_DATASET_CURATED,
-            table_id=BQ_TABLE_FEATURES_1H,
-        )
+        df = _load_hourly_local_features()
+        if df.empty:
+            df = load_btc_features_1h(
+                project_id=PROJECT_ID,
+                dataset_id=BQ_DATASET_CURATED,
+                table_id=BQ_TABLE_FEATURES_1H,
+            )
 
     if df.empty:
-        raise RuntimeError("Loaded empty DataFrame from BigQuery; check curated features table content.")
+        raise RuntimeError("Loaded empty DataFrame from local or BigQuery 1h features; check historical inputs.")
 
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
     df = df.dropna(subset=["ts"]).reset_index(drop=True)

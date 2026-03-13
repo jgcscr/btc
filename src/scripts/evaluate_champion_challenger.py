@@ -9,15 +9,48 @@ import numpy as np
 import pandas as pd
 
 
-def _load_returns(path: Path, col: str) -> np.ndarray:
+def _load_frame(path: Path, col: str) -> pd.DataFrame:
     if path.suffix.lower() == ".parquet":
         df = pd.read_parquet(path)
     else:
         df = pd.read_csv(path)
     if col not in df.columns:
         raise KeyError(f"Column '{col}' not found in {path}")
-    vals = pd.to_numeric(df[col], errors="coerce").dropna().to_numpy(dtype=float)
-    return vals
+    out = pd.DataFrame({"ret": pd.to_numeric(df[col], errors="coerce")})
+    if "ts" in df.columns:
+        out["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    return out.dropna(subset=["ret"]).reset_index(drop=True)
+
+
+def _resolve_paired_returns(
+    candidate_df: pd.DataFrame,
+    baseline_df: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    if "ts" in candidate_df.columns and "ts" in baseline_df.columns:
+        candidate_ts = candidate_df.dropna(subset=["ts"]).copy()
+        baseline_ts = baseline_df.dropna(subset=["ts"]).copy()
+        if not candidate_ts.empty and not baseline_ts.empty:
+            merged = candidate_ts.loc[:, ["ts", "ret"]].merge(
+                baseline_ts.loc[:, ["ts", "ret"]],
+                on="ts",
+                how="inner",
+                suffixes=("_candidate", "_baseline"),
+            )
+            if not merged.empty:
+                return (
+                    merged["ret_candidate"].to_numpy(dtype=float),
+                    merged["ret_baseline"].to_numpy(dtype=float),
+                    "timestamp_inner_join",
+                )
+
+    n = int(min(len(candidate_df), len(baseline_df)))
+    if n <= 0:
+        return np.array([], dtype=float), np.array([], dtype=float), "tail_truncate"
+    return (
+        candidate_df["ret"].to_numpy(dtype=float)[-n:],
+        baseline_df["ret"].to_numpy(dtype=float)[-n:],
+        "tail_truncate",
+    )
 
 
 def _bootstrap_mean_diff(candidate: np.ndarray, baseline: np.ndarray, n_boot: int, seed: int) -> Dict[str, float]:
@@ -71,8 +104,9 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("artifacts/monitoring/champion_challenger_gate.json"))
     args = parser.parse_args()
 
-    baseline = _load_returns(args.baseline, args.baseline_col)
-    candidate = _load_returns(args.candidate, args.candidate_col)
+    baseline_df = _load_frame(args.baseline, args.baseline_col)
+    candidate_df = _load_frame(args.candidate, args.candidate_col)
+    candidate, baseline, alignment = _resolve_paired_returns(candidate_df, baseline_df)
     stats = _bootstrap_mean_diff(candidate, baseline, int(args.n_boot), int(args.seed))
 
     promote = bool(
@@ -89,6 +123,7 @@ def main() -> None:
         "candidate_col": args.candidate_col,
         "alpha": float(args.alpha),
         "n_boot": int(args.n_boot),
+        "alignment": alignment,
         "stats": stats,
         "promote": promote,
     }

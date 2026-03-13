@@ -125,7 +125,7 @@ from src.data.dataset_preparation import (
 from src.data.targets_multi_horizon import add_multi_horizon_targets
 from src.scripts.build_training_dataset import (
     PROCESSED_PATHS as REG_PROCESSED_PATHS,
-    _fill_cryptoquant_features as drop_non_binance_breakout_features,
+    _drop_non_binance_breakout_features,
     _merge_processed_features as merge_curated_features,
 )
 from src.training.cnn_bilstm import CNNBiLSTMDirectionClassifier

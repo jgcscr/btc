@@ -60,10 +60,26 @@ CORE_MODEL_FEATURES_15M = [
     "volatility_ewm_24h",
     "volatility_ewm_72h",
     "volatility_garch_like",
+    "range_expansion_1h",
+    "distance_from_session_high_8h",
+    "distance_from_session_low_8h",
+    "vwap_deviation_8h",
+    "momentum_slope_2h",
+    "momentum_slope_4h",
 ]
 
 ZERO_VARIANCE_CANDIDATES = hourly_builder.ZERO_VARIANCE_CANDIDATES
 EXCLUDED_FEATURES = hourly_builder.EXCLUDED_FEATURES
+
+
+def _load_local_features_15m() -> pd.DataFrame:
+    df = hourly_builder._load_spot_ohlcv_from_raw("15m")
+    if not df.empty:
+        print(
+            "Local 15m source coverage: "
+            f"rows={len(df)}, ts_min={df['ts'].min()}, ts_max={df['ts'].max()}"
+        )
+    return df
 
 
 def _merge_processed_features_15m(df: pd.DataFrame, paths: Sequence[Path]) -> pd.DataFrame:
@@ -155,6 +171,38 @@ def _augment_price_features_15m(df: pd.DataFrame) -> pd.DataFrame:
         )
         result["fut_close_zscore_7h"] = ((result["fut_close"] - rolling_mean) / rolling_std).fillna(0.0)
 
+    if {"high", "low", "close", "volume"}.issubset(result.columns):
+        high = pd.to_numeric(result["high"], errors="coerce")
+        low = pd.to_numeric(result["low"], errors="coerce")
+        close = pd.to_numeric(result["close"], errors="coerce")
+        volume = pd.to_numeric(result["volume"], errors="coerce")
+        prev_close = close.shift(1)
+        true_range = pd.concat(
+            [
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1, skipna=True)
+        atr_1h = true_range.rolling(window=PERIODS_PER_HOUR, min_periods=2).mean().replace(0.0, np.nan)
+        result["range_expansion_1h"] = (true_range / atr_1h).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 10.0)
+
+        session_window = 8 * PERIODS_PER_HOUR
+        session_high = high.rolling(window=session_window, min_periods=4).max().replace(0.0, np.nan)
+        session_low = low.rolling(window=session_window, min_periods=4).min().replace(0.0, np.nan)
+        result["distance_from_session_high_8h"] = ((close / session_high) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        result["distance_from_session_low_8h"] = ((close / session_low) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+
+        typical_price = (high + low + close) / 3.0
+        rolling_notional = (typical_price * volume).rolling(window=session_window, min_periods=4).sum()
+        rolling_volume = volume.rolling(window=session_window, min_periods=4).sum().replace(0.0, np.nan)
+        rolling_vwap = (rolling_notional / rolling_volume).replace([np.inf, -np.inf], np.nan)
+        result["vwap_deviation_8h"] = ((close / rolling_vwap) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+
+        result["momentum_slope_2h"] = close.pct_change(periods=2 * PERIODS_PER_HOUR).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        result["momentum_slope_4h"] = close.pct_change(periods=4 * PERIODS_PER_HOUR).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
     return result
 
 
@@ -175,14 +223,16 @@ def _recompute_return_targets_15m(df: pd.DataFrame) -> pd.DataFrame:
 def main(output_dir: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
-    df = load_btc_features_15m(
-        project_id=PROJECT_ID,
-        dataset_id=BQ_DATASET_CURATED,
-        table_id=BQ_TABLE_FEATURES_15M,
-    )
+    df = _load_local_features_15m()
+    if df.empty:
+        df = load_btc_features_15m(
+            project_id=PROJECT_ID,
+            dataset_id=BQ_DATASET_CURATED,
+            table_id=BQ_TABLE_FEATURES_15M,
+        )
 
     if df.empty:
-        raise RuntimeError("Loaded empty DataFrame from BigQuery; check that the 15m curated table has data.")
+        raise RuntimeError("Loaded empty 15m DataFrame from local or BigQuery sources; check historical inputs.")
 
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
     df = df.dropna(subset=["ts"]).reset_index(drop=True)
@@ -332,7 +382,7 @@ def main(output_dir: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build BTCUSDT 15m training dataset from BigQuery curated features.")
+    parser = argparse.ArgumentParser(description="Build BTCUSDT 15m training dataset from local Binance history or BigQuery curated features.")
     parser.add_argument(
         "--output-dir",
         type=str,

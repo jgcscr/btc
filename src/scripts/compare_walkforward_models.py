@@ -109,12 +109,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--selection-policy",
-        choices=("incumbent_guarded", "best_cum_ret"),
+        choices=("incumbent_guarded", "best_cum_ret", "quality_guarded"),
         default="incumbent_guarded",
         help=(
             "Model selection behavior: incumbent_guarded keeps XGB as incumbent unless meta_stack clears guards; "
-            "best_cum_ret selects model with highest cumulative net return."
+            "best_cum_ret selects model with highest cumulative net return; quality_guarded first filters models by "
+            "minimum predictive quality, then selects highest cumulative net return among survivors."
         ),
+    )
+    parser.add_argument(
+        "--min-auc",
+        type=float,
+        default=0.5,
+        help="Minimum walk-forward AUC required for quality_guarded selection.",
     )
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -134,6 +141,14 @@ def _find_row(rows: List[Dict[str, object]], model_kind: str) -> Dict[str, objec
         if str(row.get("model_kind")) == model_kind:
             return row
     return None
+
+
+def _quality_eligible_rows(rows: List[Dict[str, object]], *, min_auc: float) -> List[Dict[str, object]]:
+    return [
+        row
+        for row in rows
+        if float(row.get("auc_mean", float("nan"))) >= float(min_auc)
+    ]
 
 
 def _model_output_path(base_output: Path, model_kind: str, *, rolling: bool) -> Path:
@@ -231,9 +246,13 @@ def main() -> None:
         )
 
     best = _best(rows)
-    selected_model_kind = str(best.get("model_kind")) if str(args.selection_policy) == "best_cum_ret" else (
-        "xgb" if _find_row(rows, "xgb") is not None else str(best.get("model_kind"))
-    )
+    if str(args.selection_policy) == "best_cum_ret":
+        selected_model_kind = str(best.get("model_kind"))
+    elif str(args.selection_policy) == "quality_guarded":
+        eligible_rows = _quality_eligible_rows(rows, min_auc=float(args.min_auc))
+        selected_model_kind = str(_best(eligible_rows or rows).get("model_kind"))
+    else:
+        selected_model_kind = "xgb" if _find_row(rows, "xgb") is not None else str(best.get("model_kind"))
 
     rolling_summary: Dict[str, object] | None = None
     if bool(args.rolling_guard):
@@ -345,6 +364,10 @@ def main() -> None:
         "selected_model_kind": selected_model_kind,
         "selection_metric": "cum_ret_net_total",
         "selection_policy": str(args.selection_policy),
+        "quality_guard": {
+            "min_auc": float(args.min_auc),
+            "eligible_model_kinds": [str(row.get("model_kind")) for row in _quality_eligible_rows(rows, min_auc=float(args.min_auc))],
+        },
         "resolved_walkforward": {
             "dataset_rows": int(n_rows),
             "folds": int(folds_eff),

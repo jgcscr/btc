@@ -21,6 +21,7 @@ from src.scripts.build_training_dataset_15m import (
     EXPECTED_FREQ,
     PERIODS_PER_HOUR,
     _augment_price_features_15m,
+    _load_local_features_15m,
     _merge_processed_features_15m,
     _recompute_return_targets_15m,
 )
@@ -92,14 +93,16 @@ def build_direction_dataset(
 ) -> str:
     os.makedirs(output_dir, exist_ok=True)
 
-    df = load_btc_features_15m(
-        project_id=PROJECT_ID,
-        dataset_id=BQ_DATASET_CURATED,
-        table_id=BQ_TABLE_FEATURES_15M,
-    )
+    df = _load_local_features_15m()
+    if df.empty:
+        df = load_btc_features_15m(
+            project_id=PROJECT_ID,
+            dataset_id=BQ_DATASET_CURATED,
+            table_id=BQ_TABLE_FEATURES_15M,
+        )
 
     if df.empty:
-        raise RuntimeError("Loaded empty DataFrame from BigQuery; check 15m curated table content.")
+        raise RuntimeError("Loaded empty 15m DataFrame from local or BigQuery sources; check historical inputs.")
 
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
     df = df.dropna(subset=["ts"]).reset_index(drop=True)

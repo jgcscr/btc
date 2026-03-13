@@ -12,29 +12,45 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 
-
-def _resolve_xgb_dir_model_path(model_root: str, horizon: int) -> str:
-    suffix = f"{horizon}h"
-    for version in ("v2", "v1"):
-        model_dir = os.path.join(model_root, f"xgb_dir{suffix}_{version}")
-        model_path = os.path.join(model_dir, f"xgb_dir{suffix}_model.json")
-        if os.path.exists(model_path):
-            return model_path
-    raise FileNotFoundError(f"xgb_dir model not found for {horizon}h under {model_root}")
+from src.utils.model_artifact_selection import resolve_best_versioned_model_file
 
 
-def _load_dataset(dataset_path: str, horizon: int) -> Dict[str, Any]:
+def _format_horizon_label(horizon: float) -> str:
+    if float(horizon).is_integer() and horizon >= 1.0:
+        return f"{int(round(horizon))}h"
+    if horizon < 1.0:
+        return f"{int(round(horizon * 60))}m"
+    return f"{horizon:g}h"
+
+
+def _resolve_xgb_dir_model_path(model_root: str, horizon: float) -> str:
+    suffix = _format_horizon_label(horizon)
+    model_dir = Path(model_root) / f"xgb_dir{suffix}_v1"
+    model_path = resolve_best_versioned_model_file(
+        model_dir,
+        expected_filename=f"xgb_dir{suffix}_model.json",
+        version_priority=("v2", "v1"),
+    )
+    if model_path.exists():
+        return str(model_path)
+    raise FileNotFoundError(f"xgb_dir model not found for {suffix} under {model_root}")
+
+
+def _load_dataset(dataset_path: str, horizon: float) -> Dict[str, Any]:
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Dataset not found: {dataset_path}")
     data = np.load(dataset_path, allow_pickle=True)
-    if horizon == 1 and {"X_val", "y_val"}.issubset(data.files):
+    if horizon <= 1 and {"X_val", "y_val"}.issubset(data.files):
         feature_names = [str(name) for name in data.get("feature_names", [])]
         return {
             "X_val": data["X_val"],
             "y_val": data["y_val"],
             "feature_names": feature_names,
         }
-    key = f"y_dir{horizon}h_val"
+    label = _format_horizon_label(horizon)
+    key = f"y_dir{label}_val"
+    if key not in data.files:
+        key = f"y_ret{label}_val"
     if key not in data.files:
         raise KeyError(f"Dataset missing {key}")
     feature_names = [str(name) for name in data.get("feature_names", [])]
@@ -172,6 +188,12 @@ def main() -> None:
         help="Direction dataset path for 1h horizon.",
     )
     parser.add_argument(
+        "--dataset-15m",
+        type=str,
+        default="artifacts/datasets/btc_features_15m_direction_splits.npz",
+        help="Direction dataset path for 15m horizon.",
+    )
+    parser.add_argument(
         "--dataset-multi",
         type=str,
         default="artifacts/datasets/btc_features_multi_horizon_splits.npz",
@@ -179,9 +201,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--horizons",
-        type=int,
+        type=float,
         nargs="+",
-        default=[1, 4, 8, 12],
+        default=[0.25, 1, 4, 8, 12],
         help="Horizons to calibrate (default: 1 4 8 12).",
     )
     parser.add_argument(
@@ -222,12 +244,21 @@ def main() -> None:
 
     output: Dict[str, Dict[str, Any]] = {}
     for horizon in args.horizons:
-        dataset_path = args.dataset_1h if horizon == 1 else args.dataset_multi
+        if horizon < 1:
+            dataset_path = args.dataset_15m
+        elif horizon == 1:
+            dataset_path = args.dataset_1h
+        else:
+            dataset_path = args.dataset_multi
         model_path = _resolve_xgb_dir_model_path(args.model_root, horizon)
 
         dataset = _load_dataset(dataset_path, horizon)
         X_val = dataset["X_val"]
         y_val = dataset["y_val"]
+        y_val = np.asarray(y_val, dtype=float)
+        unique_y = np.unique(y_val[~np.isnan(y_val)]) if y_val.size else np.asarray([])
+        if unique_y.size > 0 and not np.all(np.isin(unique_y, [0.0, 1.0])):
+            y_val = (y_val > 0.0).astype(int)
         dataset_feature_names = [str(name) for name in dataset.get("feature_names", [])]
 
         model = XGBClassifier()
@@ -241,16 +272,17 @@ def main() -> None:
 
         p_val = model.predict_proba(X_val)[:, 1]
         params = _fit_calibrator(p_val, y_val, args.method)
-        output[f"{horizon}h"] = params
+        label = _format_horizon_label(horizon)
+        output[label] = params
         if args.method == "platt":
-            print(f"Calibrated {horizon}h (platt): a={params['a']:.4f} b={params['b']:.4f}")
+            print(f"Calibrated {label} (platt): a={params['a']:.4f} b={params['b']:.4f}")
         elif args.method == "beta":
             print(
                 "Calibrated "
-                f"{horizon}h (beta): a={params['a']:.4f} b={params['b']:.4f} c={params['c']:.4f}"
+                f"{label} (beta): a={params['a']:.4f} b={params['b']:.4f} c={params['c']:.4f}"
             )
         else:
-            print(f"Calibrated {horizon}h (isotonic): {len(params.get('x', []))} knots")
+            print(f"Calibrated {label} (isotonic): {len(params.get('x', []))} knots")
 
     if args.labeled_input:
         extra = _fit_regime_calibration_from_labeled_csv(

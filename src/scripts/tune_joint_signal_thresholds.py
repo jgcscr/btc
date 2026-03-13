@@ -47,14 +47,33 @@ def _max_drawdown_from_log_returns(strategy_ret: np.ndarray) -> float:
 
 
 def _normalize_timestamp_series(values: pd.Series) -> pd.Series:
-    ts = pd.to_datetime(values, utc=True, errors="coerce")
-    return ts.dt.strftime("%Y-%m-%d %H:%M:%S%z")
+    ts = pd.to_datetime(values, utc=True, errors="coerce").dt.floor("h")
+    out = pd.Series(pd.NA, index=ts.index, dtype="Int64")
+    valid = ts.notna()
+    if valid.any():
+        out.loc[valid] = ts.loc[valid].astype("int64")
+    return out
 
 
-def _load_overlap_timestamps(npz_path: Path) -> set[str]:
+def _timestamp_membership_mask(ts_norm: pd.Series, overlap_ts: set[int]) -> pd.Series:
+    mask = pd.Series(False, index=ts_norm.index, dtype=bool)
+    if ts_norm.empty or not overlap_ts:
+        return mask
+
+    valid = ts_norm.notna()
+    if not valid.any():
+        return mask
+
+    overlap_arr = np.fromiter(overlap_ts, dtype=np.int64)
+    ts_arr = ts_norm.loc[valid].astype("int64").to_numpy(dtype=np.int64, copy=False)
+    mask.loc[valid] = np.isin(ts_arr, overlap_arr)
+    return mask
+
+
+def _load_overlap_timestamps(npz_path: Path) -> set[int]:
     with np.load(npz_path, allow_pickle=True) as data:
         keys = ["ts_all", "ts_train", "ts_val", "ts_test"]
-        rows: List[str] = []
+        rows: List[int] = []
         for key in keys:
             if key not in data.files:
                 continue
@@ -63,7 +82,7 @@ def _load_overlap_timestamps(npz_path: Path) -> set[str]:
                 continue
             ser = pd.Series(arr.astype(str), dtype="string")
             norm = _normalize_timestamp_series(ser).dropna()
-            rows.extend(str(v) for v in norm.tolist())
+            rows.extend(int(v) for v in norm.tolist())
     if not rows:
         raise RuntimeError(f"No overlap timestamps found in dataset: {npz_path}")
     return set(rows)
@@ -213,7 +232,7 @@ def main() -> None:
         overlap_ts = _load_overlap_timestamps(args.overlap_dataset)
         overlap_rows_before = int(len(df))
         ts_norm = _normalize_timestamp_series(df[args.ts_col])
-        mask = ts_norm.isin(overlap_ts)
+        mask = _timestamp_membership_mask(ts_norm, overlap_ts)
         df = df.loc[mask].copy()
         overlap_rows_after = int(len(df))
         if overlap_rows_after < int(args.min_overlap_rows):

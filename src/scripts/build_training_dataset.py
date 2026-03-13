@@ -60,61 +60,8 @@ def _load_local_features() -> pd.DataFrame:
         out = out.dropna(subset=["ts"]).sort_values("ts").drop_duplicates(subset="ts", keep="last")
         return out.reset_index(drop=True)
 
-    def _load_hourly_from_raw_tidy() -> pd.DataFrame:
-        if not RAW_SPOT_METRICS_DIR.exists():
-            return pd.DataFrame()
-        paths = sorted(p for p in RAW_SPOT_METRICS_DIR.glob("*.parquet") if p.is_file())
-        if not paths:
-            return pd.DataFrame()
-        rows: list[pd.DataFrame] = []
-        needed = {"ts", "metric", "value"}
-        for path in paths:
-            frame = pd.read_parquet(path)
-            if not needed.issubset(set(frame.columns)):
-                continue
-            slim = frame.loc[:, ["ts", "metric", "value"]].copy()
-            slim["ts"] = pd.to_datetime(slim["ts"], utc=True, errors="coerce").dt.floor("h")
-            slim = slim.dropna(subset=["ts", "metric"])
-            if not slim.empty:
-                rows.append(slim)
-        if not rows:
-            return pd.DataFrame()
-        tidy = pd.concat(rows, ignore_index=True)
-        tidy = tidy.sort_values("ts").drop_duplicates(subset=["ts", "metric"], keep="last")
-        wide = tidy.pivot(index="ts", columns="metric", values="value").reset_index()
-        rename_map = {
-            "spot_open": "open",
-            "spot_high": "high",
-            "spot_low": "low",
-            "spot_close": "close",
-            "spot_volume": "volume",
-            "spot_quote_volume": "quote_volume",
-            "spot_num_trades": "num_trades",
-            "spot_taker_buy_base_volume": "taker_buy_base_volume",
-            "spot_taker_buy_quote_volume": "taker_buy_quote_volume",
-        }
-        wide = wide.rename(columns=rename_map)
-        required_cols = {
-            "ts",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "quote_volume",
-            "num_trades",
-            "taker_buy_base_volume",
-            "taker_buy_quote_volume",
-        }
-        if not required_cols.issubset(set(wide.columns)):
-            return pd.DataFrame()
-        wide = wide.loc[:, sorted(required_cols)].copy()
-        wide["ts"] = pd.to_datetime(wide["ts"], utc=True, errors="coerce").dt.floor("h")
-        wide = wide.dropna(subset=["ts"]).sort_values("ts").drop_duplicates(subset="ts", keep="last")
-        return wide.reset_index(drop=True)
-
     spot_df = _load_hourly_from_spot_klines()
-    raw_df = _load_hourly_from_raw_tidy()
+    raw_df = _load_spot_ohlcv_from_raw("1h")
     if spot_df.empty and raw_df.empty:
         raise FileNotFoundError(
             f"No local Binance hourly source found in {SPOT_KLINES_DIR} or {RAW_SPOT_METRICS_DIR}",
@@ -134,6 +81,112 @@ def _load_local_features() -> pd.DataFrame:
         )
 
     return _merge_processed_features(source_df, PROCESSED_PATHS)
+
+
+def _interval_to_timedelta(interval: str) -> pd.Timedelta:
+    suffix = interval[-1]
+    amount = int(interval[:-1])
+    if suffix == "m":
+        return pd.Timedelta(minutes=amount)
+    if suffix == "h":
+        return pd.Timedelta(hours=amount)
+    if suffix == "d":
+        return pd.Timedelta(days=amount)
+    raise ValueError(f"Unsupported interval: {interval}")
+
+
+def _infer_raw_tidy_interval(frame: pd.DataFrame) -> Optional[pd.Timedelta]:
+    ts = pd.to_datetime(frame.get("ts"), utc=True, errors="coerce")
+    ts = pd.Series(ts).dropna().drop_duplicates().sort_values()
+    if ts.size < 2:
+        return None
+    deltas = ts.diff().dropna()
+    deltas = deltas[deltas > pd.Timedelta(0)]
+    if deltas.empty:
+        return None
+    return deltas.mode().iloc[0]
+
+
+def _pivot_raw_spot_tidy_to_ohlcv(tidy: pd.DataFrame) -> pd.DataFrame:
+    tidy = tidy.sort_values("ts").drop_duplicates(subset=["ts", "metric"], keep="last")
+    wide = tidy.pivot(index="ts", columns="metric", values="value").reset_index()
+    rename_map = {
+        "spot_open": "open",
+        "spot_high": "high",
+        "spot_low": "low",
+        "spot_close": "close",
+        "spot_volume": "volume",
+        "spot_quote_volume": "quote_volume",
+        "spot_num_trades": "num_trades",
+        "spot_taker_buy_base_volume": "taker_buy_base_volume",
+        "spot_taker_buy_quote_volume": "taker_buy_quote_volume",
+    }
+    wide = wide.rename(columns=rename_map)
+    required_cols = {
+        "ts",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_volume",
+        "num_trades",
+        "taker_buy_base_volume",
+        "taker_buy_quote_volume",
+    }
+    if not required_cols.issubset(set(wide.columns)):
+        return pd.DataFrame()
+    wide = wide.loc[:, sorted(required_cols)].copy()
+    wide["ts"] = pd.to_datetime(wide["ts"], utc=True, errors="coerce")
+    wide = wide.dropna(subset=["ts"]).sort_values("ts").drop_duplicates(subset="ts", keep="last")
+    return wide.reset_index(drop=True)
+
+
+def _load_spot_ohlcv_from_raw(interval: str, raw_dir: Path | None = None) -> pd.DataFrame:
+    raw_dir = raw_dir or RAW_SPOT_METRICS_DIR
+    if not raw_dir.exists():
+        return pd.DataFrame()
+
+    target_delta = _interval_to_timedelta(interval)
+    paths = sorted(p for p in raw_dir.glob("*.parquet") if p.is_file())
+    if not paths:
+        return pd.DataFrame()
+
+    rows: list[pd.DataFrame] = []
+    needed = {"ts", "metric", "value"}
+    matched_paths = 0
+    for path in paths:
+        try:
+            frame = pd.read_parquet(path, columns=["ts", "metric", "value"])
+        except Exception as exc:
+            print(f"Warning: failed to load raw spot parquet {path}: {exc}; skipping.")
+            continue
+        if not needed.issubset(set(frame.columns)):
+            continue
+        inferred = _infer_raw_tidy_interval(frame)
+        if inferred is None or inferred != target_delta:
+            continue
+        slim = frame.loc[:, ["ts", "metric", "value"]].copy()
+        slim["ts"] = pd.to_datetime(slim["ts"], utc=True, errors="coerce")
+        slim = slim.dropna(subset=["ts", "metric"])
+        if slim.empty:
+            continue
+        rows.append(slim)
+        matched_paths += 1
+
+    if not rows:
+        return pd.DataFrame()
+
+    tidy = pd.concat(rows, ignore_index=True)
+    wide = _pivot_raw_spot_tidy_to_ohlcv(tidy)
+    if wide.empty:
+        return wide
+
+    print(
+        f"Loaded raw Binance spot {interval} history from {matched_paths} parquet files; "
+        f"coverage spans {wide['ts'].min()} -> {wide['ts'].max()}."
+    )
+    return wide
 
 
 PROCESSED_PATHS = [
@@ -182,6 +235,12 @@ CORE_MODEL_FEATURES = [
     "cvd_zscore_6h",
     "liquidity_range_ratio_6h",
     "liquidity_close_position_ratio",
+    "range_expansion_1h",
+    "distance_from_session_high_8h",
+    "distance_from_session_low_8h",
+    "vwap_deviation_8h",
+    "momentum_slope_2h",
+    "momentum_slope_4h",
 ]
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
@@ -382,7 +441,7 @@ def _reconcile_funding_rate_features(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _fill_cryptoquant_features(df: pd.DataFrame) -> pd.DataFrame:
+def _drop_non_binance_breakout_features(df: pd.DataFrame) -> pd.DataFrame:
     """Strip non-Binance breakout feeds before downstream feature engineering."""
 
     drop_candidates = [
@@ -521,6 +580,27 @@ def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
     close_position = ((result["close"].astype(float) - mid_price) / half_range)
     close_position = close_position.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
     result["liquidity_close_position_ratio"] = close_position
+
+    high = result["high"].astype(float)
+    low = result["low"].astype(float)
+    close = result["close"].astype(float)
+    volume = result["volume"].astype(float) if "volume" in result.columns else None
+    atr_24h = true_range.rolling(window=24, min_periods=6).mean().replace(0.0, np.nan)
+    result["range_expansion_1h"] = (true_range / atr_24h).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 10.0)
+    session_high = high.rolling(window=8, min_periods=2).max().replace(0.0, np.nan)
+    session_low = low.rolling(window=8, min_periods=2).min().replace(0.0, np.nan)
+    result["distance_from_session_high_8h"] = ((close / session_high) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+    result["distance_from_session_low_8h"] = ((close / session_low) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+    if volume is not None:
+        typical_price = (high + low + close) / 3.0
+        rolling_notional = (typical_price * volume).rolling(window=8, min_periods=2).sum()
+        rolling_volume = volume.rolling(window=8, min_periods=2).sum().replace(0.0, np.nan)
+        rolling_vwap = (rolling_notional / rolling_volume).replace([np.inf, -np.inf], np.nan)
+        result["vwap_deviation_8h"] = ((close / rolling_vwap) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+    else:
+        result["vwap_deviation_8h"] = 0.0
+    result["momentum_slope_2h"] = _safe_pct(close).rolling(window=2, min_periods=1).mean().fillna(0.0)
+    result["momentum_slope_4h"] = _safe_pct(close).rolling(window=4, min_periods=1).mean().fillna(0.0)
 
     return result
 
