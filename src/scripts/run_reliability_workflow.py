@@ -52,8 +52,29 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     return payload
 
 
-def _join_horizons(horizons: List[int]) -> str:
+def _join_horizons(horizons: Sequence[float | int]) -> str:
     return ",".join(str(v) for v in horizons)
+
+
+def _load_prediction_targets(config_path: Path | None) -> List[float]:
+    if config_path is None or not config_path.exists():
+        return []
+    try:
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    targets = payload.get("targets")
+    if not isinstance(targets, list):
+        return []
+    resolved: List[float] = []
+    for item in targets:
+        try:
+            resolved.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return resolved
 
 
 def _count_npz_rows(npz_path: Path) -> int:
@@ -393,6 +414,9 @@ def main() -> None:
     run_profile_name = str(profile_cfg.get("name", run_profile_id)).strip() or run_profile_id
 
     horizons = [int(v) for v in search_cfg.get("horizons", [1, 4, 8, 12])]
+    paper_live_config_path = Path(str(search_cfg.get("paper_live_config", "configs/run_refresh_and_predict.default.yaml")))
+    paper_live_targets = _load_prediction_targets(paper_live_config_path)
+    calibration_horizons = sorted({float(v) for v in [*horizons, *paper_live_targets] if float(v) > 0})
     n_trials = int(search_cfg.get("n_trials", 25))
     timeout = search_cfg.get("timeout")
 
@@ -566,7 +590,7 @@ def main() -> None:
             "-m",
             "src.scripts.train_platt_calibration",
             "--horizons",
-            *[str(h) for h in horizons],
+            *[str(h) for h in calibration_horizons],
             "--output-path",
             str(summary_dir / "platt_calibration.json"),
             "--method",
@@ -596,7 +620,7 @@ def main() -> None:
             "-m",
             "src.scripts.search_ensemble_thresholds",
             "--targets",
-            _join_horizons(horizons),
+            _join_horizons(calibration_horizons),
             "--objective",
             threshold_objective,
             "--max-dd",
@@ -662,6 +686,23 @@ def main() -> None:
         if not args.dry_run and not candidate_quality_input.exists():
             candidate_quality_input = quality_input
         candidate_gate_input = candidate_quality_input
+        tuning_quality_input = candidate_quality_input
+        quality_backtest_csv_raw = quality_cfg.get("backtest_csv")
+        quality_backtest_csv: Path | None = None
+        if quality_backtest_csv_raw is not None and str(quality_backtest_csv_raw).strip():
+            quality_backtest_csv = Path(str(quality_backtest_csv_raw))
+        default_latest_backtest = Path("artifacts/backtests/latest/backtest_signals.csv")
+        quality_backtest_csv_is_auto = quality_backtest_csv_raw is None or str(quality_backtest_csv_raw).strip().lower() in {"", "auto"}
+        quality_backtest_csv_points_to_missing_default = bool(
+            quality_backtest_csv is not None
+            and quality_backtest_csv == default_latest_backtest
+            and not quality_backtest_csv.exists()
+        )
+        resolved_quality_backtest_csv = quality_backtest_csv
+        if candidate_quality_input is not None and (
+            quality_backtest_csv_is_auto or quality_backtest_csv_points_to_missing_default
+        ):
+            resolved_quality_backtest_csv = candidate_quality_input
         pinned_labeled_csv_cfg = quality_cfg.get("pinned_labeled_csv_path")
         pinned_labeled_meta_cfg = quality_cfg.get("pinned_labeled_meta_path")
         pinned_labeled_csv = (
@@ -797,9 +838,8 @@ def main() -> None:
                 "--min-rows",
                 str(int(quality_cfg.get("min_labeled_rows", 200))),
             ]
-            backtest_csv = quality_cfg.get("backtest_csv")
-            if backtest_csv:
-                labeled_cmd.extend(["--backtest-csv", str(backtest_csv)])
+            if resolved_quality_backtest_csv is not None:
+                labeled_cmd.extend(["--backtest-csv", str(resolved_quality_backtest_csv)])
             if bool(quality_cfg.get("prefer_backtest", True)):
                 labeled_cmd.append("--prefer-backtest")
             else:
@@ -812,6 +852,20 @@ def main() -> None:
                     args.dry_run,
                 )
             )
+            if not args.dry_run:
+                (summary_dir / "quality_backtest_resolution.json").write_text(
+                    json.dumps(
+                        {
+                            "configured_backtest_csv": str(quality_backtest_csv_raw) if quality_backtest_csv_raw is not None else None,
+                            "candidate_quality_input": str(candidate_quality_input),
+                            "resolved_backtest_csv": str(resolved_quality_backtest_csv) if resolved_quality_backtest_csv is not None else None,
+                            "resolved_from_auto": bool(quality_backtest_csv_is_auto),
+                            "resolved_from_missing_default_latest": bool(quality_backtest_csv_points_to_missing_default),
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
 
         if not args.dry_run and quality_input.exists() and quality_input != labeled_snapshot_csv:
             shutil.copyfile(quality_input, labeled_snapshot_csv)
@@ -1097,6 +1151,8 @@ def main() -> None:
                     str(int(compare_cfg.get("meta_min_rolling_trades", 0))),
                     "--selection-policy",
                     str(compare_cfg.get("selection_policy", "incumbent_guarded")),
+                    "--min-auc",
+                    str(float(compare_cfg.get("min_auc", 0.5))),
                     "--output",
                     str(compare_output),
                 ]
@@ -1184,6 +1240,8 @@ def main() -> None:
                         str(int(compare_cfg.get("meta_min_rolling_trades", 0))),
                         "--selection-policy",
                         str(overlap_compare_cfg.get("selection_policy", "best_cum_ret")),
+                        "--min-auc",
+                        str(float(overlap_compare_cfg.get("min_auc", compare_cfg.get("min_auc", 0.5)))),
                         "--output",
                         str(overlap_compare_output),
                     ]
@@ -1764,6 +1822,7 @@ def main() -> None:
                 incumbent_backtest_for_features = quality_cfg.get("incumbent_backtest_csv")
                 if incumbent_backtest_for_features:
                     enrich_candidate_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
+                    enrich_candidate_cmd.extend(["--incumbent-reference-source", str(incumbent_backtest_for_features)])
                 results.append(
                     _run_step(
                         "enrich_candidate_decision_features",
@@ -1773,6 +1832,7 @@ def main() -> None:
                     )
                 )
                 decision_model_input = decision_feature_input if (decision_feature_input.exists() or args.dry_run) else candidate_quality_input
+                tuning_quality_input = decision_model_input
 
                 decision_cmd = [
                     python,
@@ -1788,6 +1848,12 @@ def main() -> None:
                     str(float(trade_decision_cfg.get("threshold", 0.55))),
                     "--min-rows",
                     str(int(trade_decision_cfg.get("min_rows", 200))),
+                    "--min-candidate-rows",
+                    str(int(trade_decision_cfg.get("min_candidate_rows", 60))),
+                    "--min-oof-rows",
+                    str(int(trade_decision_cfg.get("min_oof_rows", 40))),
+                    "--min-positive-oof-bins",
+                    str(int(trade_decision_cfg.get("min_positive_oof_bins", 2))),
                     "--ev-calibration-source",
                     str(trade_decision_cfg.get("ev_calibration_source", "hybrid")),
                     "--ev-min-candidate-rows",
@@ -1803,6 +1869,29 @@ def main() -> None:
                     "--output",
                     str(trade_decision_model_path),
                 ]
+                midband_focus_cfg_obj = trade_decision_cfg.get("midband_focus", {})
+                midband_focus_cfg = midband_focus_cfg_obj if isinstance(midband_focus_cfg_obj, dict) else {}
+                if bool(midband_focus_cfg.get("enabled", False)):
+                    decision_cmd.extend(
+                        [
+                            "--midband-focus-enabled",
+                            "--midband-focus-pup-low",
+                            str(float(midband_focus_cfg.get("p_up_low", 0.55))),
+                            "--midband-focus-pup-high",
+                            str(float(midband_focus_cfg.get("p_up_high", 0.60))),
+                            "--midband-focus-min-abs-ret-pred",
+                            str(float(midband_focus_cfg.get("min_abs_ret_pred", 0.0005))),
+                            "--midband-focus-negative-weight",
+                            str(float(midband_focus_cfg.get("negative_weight", 1.0))),
+                            "--midband-focus-positive-weight",
+                            str(float(midband_focus_cfg.get("positive_weight", 1.0))),
+                        ]
+                    )
+                    if bool(midband_focus_cfg.get("high_inclusive", False)):
+                        decision_cmd.append("--midband-focus-high-inclusive")
+                    max_abs_ret_pred = midband_focus_cfg.get("max_abs_ret_pred")
+                    if max_abs_ret_pred is not None:
+                        decision_cmd.extend(["--midband-focus-max-abs-ret-pred", str(float(max_abs_ret_pred))])
                 if bool(trade_decision_cfg.get("candidate_only", False)):
                     decision_cmd.append("--candidate-only")
                 results.append(
@@ -1840,6 +1929,20 @@ def main() -> None:
                     weak_veto_official_mode = str(weak_veto_cfg.get("official_mode", "weak_band")).strip().lower()
                     if weak_veto_official_mode not in {"weak_band", "midband"}:
                         weak_veto_official_mode = "weak_band"
+                    official_shadow_variant = str(weak_veto_cfg.get("official_shadow_variant", "none")).strip().lower()
+                    if official_shadow_variant not in {
+                        "none",
+                        "weak_band",
+                        "refined",
+                        "midband",
+                        "raw_ev_sign",
+                        "direction_alignment",
+                        "joint_direction_midband",
+                        "regime_state",
+                        "chop_high_volatility",
+                        "volatility_only",
+                    }:
+                        official_shadow_variant = "none"
                     weak_veto_low = float(weak_veto_cfg.get("p_up_low", 0.55))
                     weak_veto_high = float(weak_veto_cfg.get("p_up_high", 0.60))
                     weak_veto_high_inclusive = bool(weak_veto_cfg.get("high_inclusive", False))
@@ -1859,6 +1962,25 @@ def main() -> None:
                     midband_veto_min_abs_ret_pred = float(midband_veto_cfg.get("min_abs_ret_pred", 0.0005))
                     midband_veto_max_abs_ret_pred = float(midband_veto_cfg.get("max_abs_ret_pred", 0.001))
                     midband_veto_reference_path_cfg = midband_veto_cfg.get("incumbent_reference_path")
+                    direct_midband_policy_cfg_obj = trade_policy_cfg.get("midband_veto", {})
+                    direct_midband_policy_cfg = (
+                        direct_midband_policy_cfg_obj if isinstance(direct_midband_policy_cfg_obj, dict) else {}
+                    )
+                    direct_midband_policy_enabled = bool(direct_midband_policy_cfg.get("enabled", False))
+                    direct_midband_policy_low = float(direct_midband_policy_cfg.get("p_up_low", 0.55))
+                    direct_midband_policy_high = float(direct_midband_policy_cfg.get("p_up_high", 0.60))
+                    direct_midband_policy_high_inclusive = bool(direct_midband_policy_cfg.get("high_inclusive", False))
+                    direct_midband_policy_min_abs_ret_pred = direct_midband_policy_cfg.get("min_abs_ret_pred")
+                    direct_midband_policy_max_abs_ret_pred = direct_midband_policy_cfg.get("max_abs_ret_pred")
+                    direct_midband_policy_regime_states = [
+                        str(value).strip().lower()
+                        for value in (
+                            direct_midband_policy_cfg.get("regime_states", [])
+                            if isinstance(direct_midband_policy_cfg.get("regime_states", []), list)
+                            else []
+                        )
+                        if str(value).strip()
+                    ]
                     raw_ev_veto_cfg_obj = weak_veto_cfg.get("raw_ev_sign", {})
                     raw_ev_veto_cfg = raw_ev_veto_cfg_obj if isinstance(raw_ev_veto_cfg_obj, dict) else {}
                     raw_ev_veto_low = float(raw_ev_veto_cfg.get("p_up_low", weak_veto_low))
@@ -2001,6 +2123,8 @@ def main() -> None:
                         str(trade_policy_cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")),
                         "--enforce-positive-oof-envelope",
                         "1" if bool(trade_policy_cfg.get("enforce_positive_oof_envelope", False)) else "0",
+                        "--positive-oof-envelope-mode",
+                        str(trade_policy_cfg.get("positive_oof_envelope_mode", "strict_positive_bin")),
                         "--block-when-no-positive-oof-bin",
                         "1" if bool(trade_policy_cfg.get("block_when_no_positive_oof_bin", True)) else "0",
                         "--positive-oof-min-samples",
@@ -2015,7 +2139,27 @@ def main() -> None:
                         str(float(trade_policy_cfg.get("min_expected_net", 0.0))),
                         "--min-edge-over-fee",
                         str(float(trade_policy_cfg.get("min_edge_over_fee", 0.0))),
+                        "--policy-midband-veto",
+                        "1" if direct_midband_policy_enabled else "0",
+                        "--policy-midband-pup-low",
+                        str(direct_midband_policy_low),
+                        "--policy-midband-pup-high",
+                        str(direct_midband_policy_high),
+                        "--policy-midband-high-inclusive",
+                        "1" if direct_midband_policy_high_inclusive else "0",
                     ]
+                    if direct_midband_policy_min_abs_ret_pred is not None:
+                        common_align_args.extend(
+                            ["--policy-midband-min-abs-ret-pred", str(float(direct_midband_policy_min_abs_ret_pred))]
+                        )
+                    if direct_midband_policy_max_abs_ret_pred is not None:
+                        common_align_args.extend(
+                            ["--policy-midband-max-abs-ret-pred", str(float(direct_midband_policy_max_abs_ret_pred))]
+                        )
+                    if direct_midband_policy_regime_states:
+                        common_align_args.extend(
+                            ["--policy-midband-regime-states", ",".join(direct_midband_policy_regime_states)]
+                        )
 
                     align_cmd = [
                         python,
@@ -2216,12 +2360,13 @@ def main() -> None:
                     min_overlap_rows: int,
                     strict_accept: bool,
                 ) -> List[str]:
+                    tuning_input = tuning_quality_input if tuning_quality_input.exists() else quality_input
                     cmd = [
                         python,
                         "-m",
                         "src.scripts.tune_joint_signal_thresholds",
                         "--input",
-                        str(quality_input),
+                        str(tuning_input),
                         f"--p-up-grid={p_up_grid}",
                         f"--ret-min-grid={ret_min_grid}",
                         f"--direction-threshold-grid={direction_threshold_grid}",
@@ -2397,6 +2542,8 @@ def main() -> None:
                             ]
                             min_trades_sweep = int(sweep_cfg.get("min_trades", tuning_cfg.get("min_trades", 10)))
                             min_cum_ret_sweep = float(sweep_cfg.get("min_cum_ret", tuning_cfg.get("min_cum_ret", 0.0)))
+                            full_min_trades_sweep = int(sweep_cfg.get("full_min_trades", min_trades_sweep))
+                            full_min_cum_ret_sweep = float(sweep_cfg.get("full_min_cum_ret", min_cum_ret_sweep))
                             folds_sweep = int(resolved_walkforward.get("folds", reconcile_cfg.get("overlap_compare", {}).get("folds", cv_folds)))
                             train_sweep = int(resolved_walkforward.get("train_size", reconcile_cfg.get("overlap_compare", {}).get("train_size", cv_train_size)))
                             val_sweep = int(resolved_walkforward.get("val_size", reconcile_cfg.get("overlap_compare", {}).get("val_size", cv_val_size)))
@@ -2410,6 +2557,7 @@ def main() -> None:
                             for threshold in threshold_grid:
                                 sweep_name = str(threshold).replace(".", "p")
                                 sweep_output = summary_dir / f"overlap_threshold_sweep_{sweep_name}.json"
+                                full_sweep_output = summary_dir / f"full_threshold_sweep_{sweep_name}.json"
                                 sweep_cmd = [
                                     python,
                                     "-m",
@@ -2445,6 +2593,41 @@ def main() -> None:
                                     "--output",
                                     str(sweep_output),
                                 ]
+                                full_sweep_cmd = [
+                                    python,
+                                    "-m",
+                                    "src.scripts.run_walkforward_validation",
+                                    "--dataset-path",
+                                    str(walkforward_dataset),
+                                    "--y-key",
+                                    str(walkforward_target),
+                                    "--folds",
+                                    str(int(compare_cfg.get("folds", cv_folds))),
+                                    "--train-size",
+                                    str(int(compare_cfg.get("train_size", cv_train_size))),
+                                    "--val-size",
+                                    str(int(compare_cfg.get("val_size", cv_val_size))),
+                                    "--test-size",
+                                    str(int(compare_cfg.get("test_size", cv_test_size))),
+                                    "--gap",
+                                    str(int(compare_cfg.get("gap", cv_gap))),
+                                    "--purge-size",
+                                    str(int(compare_cfg.get("purge_size", cv_purge_size))),
+                                    "--embargo-size",
+                                    str(int(compare_cfg.get("embargo_size", cv_embargo_size))),
+                                    "--mode",
+                                    str(compare_cfg.get("mode", cv_mode)),
+                                    "--model-kind",
+                                    str(overlap_selected_model),
+                                    "--signal-threshold",
+                                    str(float(threshold)),
+                                    "--fee-bps",
+                                    str(float(compare_cfg.get("fee_bps", quality_cfg.get("walkforward_fee_bps", 2.0)))),
+                                    "--slippage-bps",
+                                    str(float(compare_cfg.get("slippage_bps", quality_cfg.get("walkforward_slippage_bps", 1.0)))),
+                                    "--output",
+                                    str(full_sweep_output),
+                                ]
                                 results.append(
                                     _run_step(
                                         f"overlap_threshold_sweep_{sweep_name}",
@@ -2453,15 +2636,28 @@ def main() -> None:
                                         args.dry_run,
                                     )
                                 )
+                                results.append(
+                                    _run_step(
+                                        f"full_threshold_sweep_{sweep_name}",
+                                        full_sweep_cmd,
+                                        logs_dir / f"full_threshold_sweep_{sweep_name}.log",
+                                        args.dry_run,
+                                    )
+                                )
                                 if sweep_output.exists():
                                     sweep_payload = _load_json(sweep_output)
+                                    full_sweep_payload = _load_json(full_sweep_output) if full_sweep_output.exists() else {}
                                     sweep_rows.append(
                                         {
                                             "signal_threshold": float(threshold),
                                             "cum_ret_net_total": float(sweep_payload.get("cum_ret_net_total", float("nan"))),
                                             "trade_count_total": int(sweep_payload.get("trade_count_total", 0) or 0),
                                             "auc_mean": float(sweep_payload.get("auc_mean", float("nan"))),
+                                            "full_cum_ret_net_total": float(full_sweep_payload.get("cum_ret_net_total", float("nan"))),
+                                            "full_trade_count_total": int(full_sweep_payload.get("trade_count_total", 0) or 0),
+                                            "full_auc_mean": float(full_sweep_payload.get("auc_mean", float("nan"))),
                                             "path": str(sweep_output),
+                                            "full_path": str(full_sweep_output),
                                         }
                                     )
 
@@ -2470,11 +2666,14 @@ def main() -> None:
                                 for row in sweep_rows
                                 if int(row.get("trade_count_total", 0) or 0) >= int(min_trades_sweep)
                                 and float(row.get("cum_ret_net_total", float("-inf"))) >= float(min_cum_ret_sweep)
+                                and int(row.get("full_trade_count_total", 0) or 0) >= int(full_min_trades_sweep)
+                                and float(row.get("full_cum_ret_net_total", float("-inf"))) >= float(full_min_cum_ret_sweep)
                             ]
                             if deployable_rows:
                                 best_sweep = max(
                                     deployable_rows,
                                     key=lambda r: (
+                                        float(r.get("full_cum_ret_net_total", float("-inf"))),
                                         float(r.get("cum_ret_net_total", float("-inf"))),
                                         int(r.get("trade_count_total", 0) or 0),
                                     ),
@@ -2496,6 +2695,8 @@ def main() -> None:
                                         "optimize_on_labeled_overlap": True,
                                         "min_trades": int(min_trades_sweep),
                                         "min_cum_ret": float(min_cum_ret_sweep),
+                                        "full_min_trades": int(full_min_trades_sweep),
+                                        "full_min_cum_ret": float(full_min_cum_ret_sweep),
                                         "source": "overlap_threshold_sweep_fallback",
                                     },
                                     "accepted": True,
@@ -2505,11 +2706,14 @@ def main() -> None:
                                         "direction_threshold": 0.5,
                                         "n_trades": int(best_sweep.get("trade_count_total", 0) or 0),
                                         "cum_ret": float(best_sweep.get("cum_ret_net_total", 0.0) or 0.0),
-                                        "full_cum_ret": float(best_sweep.get("cum_ret_net_total", 0.0) or 0.0),
-                                        "stability_gap": 0.0,
+                                        "full_cum_ret": float(best_sweep.get("full_cum_ret_net_total", 0.0) or 0.0),
+                                        "stability_gap": abs(
+                                            float(best_sweep.get("full_cum_ret_net_total", 0.0) or 0.0)
+                                            - float(best_sweep.get("cum_ret_net_total", 0.0) or 0.0)
+                                        ),
                                         "max_drawdown": float("nan"),
-                                        "economics_score": float(best_sweep.get("cum_ret_net_total", 0.0) or 0.0),
-                                        "selection_value": float(best_sweep.get("cum_ret_net_total", 0.0) or 0.0),
+                                        "economics_score": float(best_sweep.get("full_cum_ret_net_total", 0.0) or 0.0),
+                                        "selection_value": float(best_sweep.get("full_cum_ret_net_total", 0.0) or 0.0),
                                     },
                                     "n_candidates": int(len(sweep_rows)),
                                     "n_feasible": int(len(deployable_rows)),
@@ -2517,12 +2721,13 @@ def main() -> None:
                                     "fallback_tuning_used": True,
                                     "fallback_tuning_source": "overlap_threshold_sweep_fallback",
                                     "overlap_selected_model": str(overlap_selected_model),
+                                    "full_selected_model": str(overlap_selected_model),
                                     "sweep_rows": sweep_rows,
                                 }
                                 joint_tuning_output_path.write_text(json.dumps(joint_tuning_payload, indent=2), encoding="utf-8")
                                 joint_tuning_accepted = True
                                 print(
-                                    "Joint threshold tuning fallback produced deployable overlap candidate via threshold sweep.",
+                                    "Joint threshold tuning fallback produced a candidate that remained deployable on both overlap and full walk-forward slices.",
                                     file=sys.stderr,
                                 )
 
@@ -2604,7 +2809,7 @@ def main() -> None:
                         "-m",
                         "src.scripts.train_platt_calibration",
                         "--horizons",
-                        *[str(h) for h in horizons],
+                        *[str(h) for h in calibration_horizons],
                         "--output-path",
                         str(summary_dir / "platt_calibration.json"),
                         "--method",
@@ -2686,8 +2891,8 @@ def main() -> None:
 
         incumbent_quality_path = quality_cfg.get("incumbent_quality_path")
         incumbent_backtest_csv = quality_cfg.get("incumbent_backtest_csv")
+        incumbent_labeled = summary_dir / "labeled_backtest_incumbent_1h.csv"
         if incumbent_quality_path and incumbent_backtest_csv:
-            incumbent_labeled = summary_dir / "labeled_backtest_incumbent_1h.csv"
             incumbent_labeled_cmd = [
                 python,
                 "-m",
@@ -2740,10 +2945,23 @@ def main() -> None:
         if bool(champ_cfg.get("enabled", False)):
             baseline_raw = champ_cfg.get("baseline_input")
             candidate_raw = champ_cfg.get("candidate_input")
+            resolved_incumbent_labeled = (
+                str(incumbent_labeled)
+                if incumbent_quality_path and incumbent_backtest_csv and incumbent_labeled.exists()
+                else None
+            )
+            baseline_raw_normalized = str(baseline_raw).strip() if baseline_raw is not None else ""
+            baseline_points_to_incumbent_raw = bool(
+                baseline_raw_normalized
+                and incumbent_backtest_csv
+                and Path(baseline_raw_normalized).resolve() == Path(str(incumbent_backtest_csv)).resolve()
+            )
 
             baseline_input = (
-                incumbent_backtest_csv
-                if baseline_raw is None or str(baseline_raw).strip().lower() in {"", "auto"}
+                resolved_incumbent_labeled or incumbent_backtest_csv
+                if baseline_raw is None
+                or baseline_raw_normalized.lower() in {"", "auto"}
+                or baseline_points_to_incumbent_raw
                 else str(baseline_raw)
             )
             candidate_input = (
@@ -2755,6 +2973,7 @@ def main() -> None:
             baseline_resolution = {
                 "champion_baseline_config": baseline_raw,
                 "incumbent_backtest_csv": incumbent_backtest_csv,
+                "incumbent_labeled_csv": resolved_incumbent_labeled,
                 "resolved_baseline_input": baseline_input,
                 "resolved_candidate_input": candidate_input,
                 "baseline_exists": bool(Path(str(baseline_input)).exists()) if baseline_input else False,
@@ -2762,6 +2981,10 @@ def main() -> None:
                 "baseline_matches_incumbent_backtest_csv": bool(
                     baseline_input and incumbent_backtest_csv and Path(str(baseline_input)).resolve() == Path(str(incumbent_backtest_csv)).resolve()
                 ),
+                "baseline_matches_incumbent_labeled_csv": bool(
+                    baseline_input and resolved_incumbent_labeled and Path(str(baseline_input)).resolve() == Path(str(resolved_incumbent_labeled)).resolve()
+                ),
+                "baseline_config_points_to_incumbent_raw": baseline_points_to_incumbent_raw,
             }
             (summary_dir / "champion_baseline_resolution.json").write_text(
                 json.dumps(baseline_resolution, indent=2),
@@ -2815,6 +3038,8 @@ def main() -> None:
                         str(trade_policy_cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")),
                         "--enforce-positive-oof-envelope",
                         "1" if bool(trade_policy_cfg.get("enforce_positive_oof_envelope", False)) else "0",
+                        "--positive-oof-envelope-mode",
+                        str(trade_policy_cfg.get("positive_oof_envelope_mode", "strict_positive_bin")),
                         "--block-when-no-positive-oof-bin",
                         "1" if bool(trade_policy_cfg.get("block_when_no_positive_oof_bin", True)) else "0",
                         "--positive-oof-min-samples",
@@ -2829,7 +3054,27 @@ def main() -> None:
                         str(float(trade_policy_cfg.get("min_expected_net", 0.0))),
                         "--min-edge-over-fee",
                         str(float(trade_policy_cfg.get("min_edge_over_fee", 0.0))),
+                        "--policy-midband-veto",
+                        "1" if direct_midband_policy_enabled else "0",
+                        "--policy-midband-pup-low",
+                        str(direct_midband_policy_low),
+                        "--policy-midband-pup-high",
+                        str(direct_midband_policy_high),
+                        "--policy-midband-high-inclusive",
+                        "1" if direct_midband_policy_high_inclusive else "0",
                     ]
+                    if direct_midband_policy_min_abs_ret_pred is not None:
+                        baseline_diag_cmd.extend(
+                            ["--policy-midband-min-abs-ret-pred", str(float(direct_midband_policy_min_abs_ret_pred))]
+                        )
+                    if direct_midband_policy_max_abs_ret_pred is not None:
+                        baseline_diag_cmd.extend(
+                            ["--policy-midband-max-abs-ret-pred", str(float(direct_midband_policy_max_abs_ret_pred))]
+                        )
+                    if direct_midband_policy_regime_states:
+                        baseline_diag_cmd.extend(
+                            ["--policy-midband-regime-states", ",".join(direct_midband_policy_regime_states)]
+                        )
                     if quality_input.exists() or args.dry_run:
                         baseline_diag_cmd.extend(["--feature-source", str(quality_input)])
                     if incumbent_backtest_csv:
@@ -2875,6 +3120,8 @@ def main() -> None:
                         str(trade_policy_cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")),
                         "--enforce-positive-oof-envelope",
                         "1" if bool(trade_policy_cfg.get("enforce_positive_oof_envelope", False)) else "0",
+                        "--positive-oof-envelope-mode",
+                        str(trade_policy_cfg.get("positive_oof_envelope_mode", "strict_positive_bin")),
                         "--block-when-no-positive-oof-bin",
                         "1" if bool(trade_policy_cfg.get("block_when_no_positive_oof_bin", True)) else "0",
                         "--positive-oof-min-samples",
@@ -2889,7 +3136,27 @@ def main() -> None:
                         str(float(trade_policy_cfg.get("min_expected_net", 0.0))),
                         "--min-edge-over-fee",
                         str(float(trade_policy_cfg.get("min_edge_over_fee", 0.0))),
+                        "--policy-midband-veto",
+                        "1" if direct_midband_policy_enabled else "0",
+                        "--policy-midband-pup-low",
+                        str(direct_midband_policy_low),
+                        "--policy-midband-pup-high",
+                        str(direct_midband_policy_high),
+                        "--policy-midband-high-inclusive",
+                        "1" if direct_midband_policy_high_inclusive else "0",
                     ]
+                    if direct_midband_policy_min_abs_ret_pred is not None:
+                        incumbent_aligned_cmd.extend(
+                            ["--policy-midband-min-abs-ret-pred", str(float(direct_midband_policy_min_abs_ret_pred))]
+                        )
+                    if direct_midband_policy_max_abs_ret_pred is not None:
+                        incumbent_aligned_cmd.extend(
+                            ["--policy-midband-max-abs-ret-pred", str(float(direct_midband_policy_max_abs_ret_pred))]
+                        )
+                    if direct_midband_policy_regime_states:
+                        incumbent_aligned_cmd.extend(
+                            ["--policy-midband-regime-states", ",".join(direct_midband_policy_regime_states)]
+                        )
                     if quality_input.exists() or args.dry_run:
                         incumbent_aligned_cmd.extend(["--feature-source", str(quality_input)])
                     if incumbent_backtest_csv:
@@ -4174,6 +4441,164 @@ def main() -> None:
                             )
                         )
 
+                official_shadow_candidates = {
+                    "weak_band": (
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_veto.csv",
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_veto_meta.json",
+                    ),
+                    "refined": (
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_refined_veto.csv",
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_refined_veto_meta.json",
+                    ),
+                    "midband": (
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_midband_veto.csv",
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_midband_veto_meta.json",
+                    ),
+                    "raw_ev_sign": (
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_raw_ev_veto.csv",
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_raw_ev_veto_meta.json",
+                    ),
+                    "direction_alignment": (
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_direction_align_veto.csv",
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_direction_align_veto_meta.json",
+                    ),
+                    "joint_direction_midband": (
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_joint_direction_midband_veto.csv",
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_joint_direction_midband_veto_meta.json",
+                    ),
+                    "regime_state": (
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_regime_state_veto.csv",
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_regime_state_veto_meta.json",
+                    ),
+                    "chop_high_volatility": (
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_chop_high_vol_veto.csv",
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_chop_high_vol_veto_meta.json",
+                    ),
+                    "volatility_only": (
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_volatility_only_veto.csv",
+                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_volatility_only_veto_meta.json",
+                    ),
+                }
+                selected_shadow_path, selected_shadow_meta_path = official_shadow_candidates.get(
+                    official_shadow_variant,
+                    (None, None),
+                )
+                if selected_shadow_path is not None and (selected_shadow_path.exists() or args.dry_run):
+                    candidate_input = str(selected_shadow_path)
+                    candidate_gate_input = selected_shadow_path
+
+                    official_quality_cmd = [
+                        python,
+                        "-m",
+                        "src.scripts.evaluate_model_quality",
+                        "--input",
+                        str(selected_shadow_path),
+                        "--output",
+                        str(candidate_quality_path),
+                    ]
+                    results.append(
+                        _run_step(
+                            "model_quality_eval_official_shadow",
+                            official_quality_cmd,
+                            logs_dir / "model_quality_eval_official_shadow.log",
+                            args.dry_run,
+                        )
+                    )
+
+                    companion_cmd = [
+                        python,
+                        "-m",
+                        "src.scripts.evaluate_champion_challenger",
+                        "--baseline",
+                        str(companion_baseline_input),
+                        "--candidate",
+                        str(selected_shadow_path),
+                        "--baseline-col",
+                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        "--candidate-col",
+                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        "--n-boot",
+                        str(int(champ_cfg.get("n_boot", 2000))),
+                        "--alpha",
+                        str(float(champ_cfg.get("alpha", 0.05))),
+                        "--seed",
+                        str(int(champ_cfg.get("seed", 42))),
+                        "--output",
+                        str(summary_dir / "champion_challenger_policy_aligned_companion.json"),
+                    ]
+                    results.append(
+                        _run_step(
+                            "champion_challenger_policy_aligned_companion_official_shadow",
+                            companion_cmd,
+                            logs_dir / "champion_challenger_policy_aligned_companion_official_shadow.log",
+                            args.dry_run,
+                        )
+                    )
+
+                    official_profile_summary_cmd = [
+                        python,
+                        "-m",
+                        "src.scripts.summarize_policy_aligned_profile_metrics",
+                        "--candidate",
+                        str(selected_shadow_path),
+                        "--incumbent",
+                        str(companion_baseline_input),
+                        "--candidate-col",
+                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        "--incumbent-col",
+                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        "--signal-col",
+                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        "--candidate-meta",
+                        str(selected_shadow_meta_path),
+                        "--profile-id",
+                        str(run_profile_id),
+                        "--profile-name",
+                        str(run_profile_name),
+                        "--run-id",
+                        str(run_dir.name),
+                        "--n-boot",
+                        str(int(champ_cfg.get("n_boot", 2000))),
+                        "--seed",
+                        str(int(champ_cfg.get("seed", 42))),
+                        "--output",
+                        str(official_profile_summary_path),
+                    ]
+                    results.append(
+                        _run_step(
+                            "official_profile_policy_metrics_official_shadow",
+                            official_profile_summary_cmd,
+                            logs_dir / "official_profile_policy_metrics_official_shadow.log",
+                            args.dry_run,
+                        )
+                    )
+
+                    paired_overlap_cmd = [
+                        python,
+                        "-m",
+                        "src.scripts.analyze_paired_trigger_overlap",
+                        "--candidate",
+                        str(selected_shadow_path),
+                        "--incumbent",
+                        str(companion_baseline_input),
+                        "--candidate-col",
+                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        "--incumbent-col",
+                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        "--signal-col",
+                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        "--output",
+                        str(summary_dir / "paired_trigger_overlap_policy_aligned.json"),
+                    ]
+                    results.append(
+                        _run_step(
+                            "paired_trigger_overlap_policy_aligned_official_shadow",
+                            paired_overlap_cmd,
+                            logs_dir / "paired_trigger_overlap_policy_aligned_official_shadow.log",
+                            args.dry_run,
+                        )
+                    )
+
                 champ_cmd = [
                     python,
                     "-m",
@@ -4314,7 +4739,7 @@ def main() -> None:
                     "-m",
                     "src.scripts.search_ensemble_thresholds",
                     "--targets",
-                    _join_horizons(horizons),
+                    _join_horizons(calibration_horizons),
                     "--objective",
                     str(no_trade_cfg.get("objective", "cumret_with_dd_constraint")),
                     "--max-dd",
@@ -4372,7 +4797,7 @@ def main() -> None:
             "--config",
             paper_live_config,
             "--targets",
-            _join_horizons(horizons),
+            _join_horizons(calibration_horizons),
             "--thresholds-json",
             str(thresholds_path),
             "--platt-calibration",
@@ -4391,6 +4816,7 @@ def main() -> None:
             if trade_decision_cfg.get("threshold") is not None:
                 paper_cmd.extend(["--trade-decision-threshold", str(float(trade_decision_cfg.get("threshold")))])
         elif bool(trade_decision_cfg.get("enabled", True)) and not args.dry_run:
+            paper_cmd.append("--trade-decision-disabled")
             print(
                 "Skipping trade-decision gate in paper-live because trained sample size is below configured minimum.",
                 file=sys.stderr,

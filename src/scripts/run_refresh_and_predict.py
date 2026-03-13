@@ -63,6 +63,7 @@ from src.trading.thresholds import load_calibrated_thresholds
 from src.trading.volatility import DEFAULT_REALIZED_WINDOWS, add_volatility_columns, latest_volatility_snapshot
 from src.trading.data_quality import DataQualityError, DataQualityPolicy, evaluate_ohlcv_quality
 from src.config_trading import DEFAULT_DIR_MODEL_DIR_1H
+from src.utils.model_artifact_selection import resolve_best_versioned_model_file
 
 DEFAULT_HOURS = 360
 DEFAULT_TARGETS = (0.25, 1, 4, 8, 12)
@@ -107,14 +108,12 @@ REGIME_CHOP = "chop"
 LOCAL_FEATURE_OPTIONAL_PATHS: tuple[tuple[str, str], ...] = (
     ("macro_path", "macro"),
     ("onchain_path", "onchain"),
-    ("cryptoquant_path", "cryptoquant"),
     ("funding_path", "funding"),
     ("intrabar_path", "intrabar"),
 )
 
 LOCAL_FEATURE_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "macro": tuple(),
-    "cryptoquant": tuple(),
     "funding": ("funding_rate", "funding_rate_annualized"),
     "onchain": ("onchain_large_transfer_count", "onchain_whale_transfer_count"),
 }
@@ -135,7 +134,6 @@ CONFIG_ALLOWED_KEYS = {
     "features_path",
     "macro_path",
     "onchain_path",
-    "cryptoquant_path",
     "funding_path",
     "intrabar_path",
     "write_artifacts",
@@ -164,6 +162,8 @@ CONFIG_ALLOWED_KEYS = {
     "regime_model_weights",
     "regime_model_dirs",
     "intrabar_aggregation",
+    "feature_coverage_policy",
+    "confluence_policy",
 }
 # boolean config keys; converted with _bool_env
 CONFIG_BOOL_FIELDS = {
@@ -187,7 +187,6 @@ CONFIG_PATH_FIELDS = {
     "features_path",
     "macro_path",
     "onchain_path",
-    "cryptoquant_path",
     "funding_path",
     "intrabar_path",
     "dir_lstm_path",
@@ -462,8 +461,43 @@ def _normalize_trade_decision_policy_block(value: Mapping[str, Any]) -> Dict[str
             normalized[key] = float(raw_value) if raw_value is not None else None
         elif key == "oof_expected_value_mode":
             normalized[key] = str(raw_value).lower() if raw_value is not None else None
+        elif key == "positive_oof_envelope_mode":
+            normalized[key] = str(raw_value).lower() if raw_value is not None else None
         elif key == "model_path":
             normalized[key] = str(raw_value) if raw_value is not None else None
+        elif key == "midband_veto":
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("trade_decision_policy.midband_veto must be a mapping.")
+            normalized[key] = {
+                "enabled": bool(raw_value.get("enabled", False)),
+                "p_up_low": float(raw_value.get("p_up_low", 0.55)),
+                "p_up_high": float(raw_value.get("p_up_high", 0.60)),
+                "high_inclusive": bool(raw_value.get("high_inclusive", False)),
+                "min_abs_ret_pred": (
+                    float(raw_value.get("min_abs_ret_pred"))
+                    if raw_value.get("min_abs_ret_pred") is not None
+                    else None
+                ),
+                "max_abs_ret_pred": (
+                    float(raw_value.get("max_abs_ret_pred"))
+                    if raw_value.get("max_abs_ret_pred") is not None
+                    else None
+                ),
+                "regime_states": [
+                    str(item).strip().lower()
+                    for item in raw_value.get("regime_states", [])
+                    if str(item).strip()
+                ],
+            }
+        elif key == "weak_band_veto":
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("trade_decision_policy.weak_band_veto must be a mapping.")
+            normalized[key] = {
+                "enabled": bool(raw_value.get("enabled", False)),
+                "p_up_low": float(raw_value.get("p_up_low", 0.55)),
+                "p_up_high": float(raw_value.get("p_up_high", 0.60)),
+                "high_inclusive": bool(raw_value.get("high_inclusive", False)),
+            }
         else:
             print(
                 f"Warning: Unknown trade_decision_policy config key '{raw_key}' ignored.",
@@ -514,6 +548,64 @@ def _normalize_intrabar_aggregation_block(value: Mapping[str, Any]) -> Dict[str,
         else:
             print(
                 f"Warning: Unknown intrabar_aggregation config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
+    return normalized
+
+
+def _normalize_feature_coverage_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("feature_coverage_policy config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key in {"enabled", "block_on_violation"}:
+            normalized[key] = bool(raw_value)
+        elif key in {"max_imputed_zero_columns", "max_imputed_zero_ratio", "max_source_lag_hours"}:
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key == "ignored_columns":
+            if raw_value is None:
+                normalized[key] = []
+            elif isinstance(raw_value, str):
+                normalized[key] = [item.strip() for item in raw_value.split(",") if item.strip()]
+            elif isinstance(raw_value, Sequence):
+                normalized[key] = [str(item).strip() for item in raw_value if str(item).strip()]
+            else:
+                raise ValueError("ignored_columns in feature_coverage_policy must be a list/sequence")
+        else:
+            print(
+                f"Warning: Unknown feature_coverage_policy config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
+    return normalized
+
+
+def _normalize_confluence_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("confluence_policy config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key in {"enabled", "require_mid_term_alignment", "require_short_term_alignment"}:
+            normalized[key] = bool(raw_value)
+        elif key in {"min_support_ratio", "min_mid_term_ratio", "min_short_term_ratio", "dominant_ratio_floor"}:
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key == "min_aligned_horizons":
+            normalized[key] = int(raw_value) if raw_value is not None else None
+        elif key in {"short_horizons", "mid_horizons"}:
+            if raw_value is None:
+                normalized[key] = None
+            elif isinstance(raw_value, str):
+                normalized[key] = parse_targets(raw_value)
+            elif isinstance(raw_value, Sequence):
+                normalized[key] = [_normalize_horizon_value(entry) for entry in raw_value]
+            else:
+                raise ValueError(f"{key} in confluence_policy must be a list/sequence")
+        else:
+            print(
+                f"Warning: Unknown confluence_policy config key '{raw_key}' ignored.",
                 file=sys.stderr,
             )
     return normalized
@@ -580,6 +672,10 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_regime_model_dirs_block(value)
         if name == "intrabar_aggregation" and value is not None:
             return _normalize_intrabar_aggregation_block(value)
+        if name == "feature_coverage_policy" and value is not None:
+            return _normalize_feature_coverage_policy_block(value)
+        if name == "confluence_policy" and value is not None:
+            return _normalize_confluence_policy_block(value)
         return value
     raise ValueError(f"Unsupported config key: {name}")
 
@@ -1069,6 +1165,198 @@ def _resolve_target_range_policy(config: Mapping[str, Any] | None) -> Optional[D
     return policy
 
 
+def _resolve_feature_coverage_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    cfg = config or {}
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "max_imputed_zero_columns": max(float(cfg.get("max_imputed_zero_columns") or 1e9), 0.0),
+        "max_imputed_zero_ratio": max(float(cfg.get("max_imputed_zero_ratio") or 1.0), 0.0),
+        "max_source_lag_hours": max(float(cfg.get("max_source_lag_hours") or 1e9), 0.0),
+        "block_on_violation": bool(cfg.get("block_on_violation", True)),
+        "ignored_columns": sorted({str(column).strip() for column in (cfg.get("ignored_columns") or []) if str(column).strip()}),
+    }
+
+
+def _resolve_confluence_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    cfg = config or {}
+    short_horizons = cfg.get("short_horizons") or [0.25, 1.0]
+    mid_horizons = cfg.get("mid_horizons") or [4.0, 8.0, 12.0]
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "short_horizons": sorted({_normalize_horizon_value(v) for v in short_horizons}),
+        "mid_horizons": sorted({_normalize_horizon_value(v) for v in mid_horizons}),
+        "min_support_ratio": max(min(float(cfg.get("min_support_ratio") or 0.6), 1.0), 0.0),
+        "min_mid_term_ratio": max(min(float(cfg.get("min_mid_term_ratio") or 0.5), 1.0), 0.0),
+        "min_short_term_ratio": max(min(float(cfg.get("min_short_term_ratio") or 0.5), 1.0), 0.0),
+        "dominant_ratio_floor": max(min(float(cfg.get("dominant_ratio_floor") or 0.55), 1.0), 0.0),
+        "min_aligned_horizons": max(int(cfg.get("min_aligned_horizons") or 2), 1),
+        "require_mid_term_alignment": bool(cfg.get("require_mid_term_alignment", True)),
+        "require_short_term_alignment": bool(cfg.get("require_short_term_alignment", False)),
+    }
+
+
+def _evaluate_feature_coverage(metadata: Mapping[str, Any], policy: Mapping[str, Any]) -> Dict[str, Any]:
+    feature_alignment = metadata.get("feature_alignment", {}) if isinstance(metadata, Mapping) else {}
+    source_freshness = metadata.get("source_freshness", {}) if isinstance(metadata, Mapping) else {}
+    imputed_zero_columns = feature_alignment.get("imputed_zero_columns", []) if isinstance(feature_alignment, Mapping) else []
+    required_columns = int(feature_alignment.get("required_columns", 0) or 0) if isinstance(feature_alignment, Mapping) else 0
+    ignored_columns = set(policy.get("ignored_columns", [])) if isinstance(policy, Mapping) else set()
+    ignored_imputed_zero_columns = []
+    effective_imputed_zero_columns = []
+    if isinstance(imputed_zero_columns, list):
+        ignored_imputed_zero_columns = [column for column in imputed_zero_columns if column in ignored_columns]
+        effective_imputed_zero_columns = [column for column in imputed_zero_columns if column not in ignored_columns]
+    effective_required_columns = max(required_columns - len(ignored_imputed_zero_columns), 0)
+    imputed_zero_count = len(effective_imputed_zero_columns)
+    imputed_zero_ratio = (imputed_zero_count / effective_required_columns) if effective_required_columns > 0 else 0.0
+    max_lag_hours = 0.0
+    stale_sources: List[str] = []
+    if isinstance(source_freshness, Mapping):
+        for source_name, payload in source_freshness.items():
+            if not isinstance(payload, Mapping):
+                continue
+            lag_hours = float(payload.get("lag_hours") or 0.0)
+            max_lag_hours = max(max_lag_hours, lag_hours)
+            if lag_hours > float(policy.get("max_source_lag_hours", 1e9)):
+                stale_sources.append(str(source_name))
+
+    failed_checks: List[str] = []
+    if imputed_zero_count > float(policy.get("max_imputed_zero_columns", 1e9)):
+        failed_checks.append("imputed_zero_columns")
+    if imputed_zero_ratio > float(policy.get("max_imputed_zero_ratio", 1.0)):
+        failed_checks.append("imputed_zero_ratio")
+    if stale_sources:
+        failed_checks.append("stale_sources")
+
+    return {
+        "enabled": bool(policy.get("enabled", False)),
+        "ok": not failed_checks,
+        "imputed_zero_count": int(imputed_zero_count),
+        "imputed_zero_ratio": float(imputed_zero_ratio),
+        "effective_required_columns": int(effective_required_columns),
+        "ignored_columns": sorted(ignored_columns),
+        "ignored_imputed_zero_columns": ignored_imputed_zero_columns,
+        "effective_imputed_zero_columns": effective_imputed_zero_columns,
+        "max_source_lag_hours": float(max_lag_hours),
+        "stale_sources": stale_sources,
+        "failed_checks": failed_checks,
+        "block_on_violation": bool(policy.get("block_on_violation", True)),
+    }
+
+
+def _coerce_result_horizon(value: Any) -> float | None:
+    try:
+        return _normalize_horizon_value(value)
+    except ValueError:
+        return None
+
+
+def _direction_vote(entry: Mapping[str, Any]) -> str:
+    return "up" if str(entry.get("direction_next", "down")).lower() == "up" else "down"
+
+
+def _apply_confluence_policy(
+    summary: Dict[str, Dict[str, Any]],
+    policy: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    if not summary:
+        return summary
+
+    labeled_entries: List[tuple[str, Dict[str, Any], float]] = []
+    for label, entry in summary.items():
+        horizon = _coerce_result_horizon(entry.get("horizon_hours"))
+        if horizon is None:
+            continue
+        labeled_entries.append((label, entry, horizon))
+
+    if not labeled_entries:
+        return summary
+
+    short_horizons = set(policy.get("short_horizons", []))
+    mid_horizons = set(policy.get("mid_horizons", []))
+    up_count = sum(1 for _label, entry, _h in labeled_entries if _direction_vote(entry) == "up")
+    down_count = len(labeled_entries) - up_count
+    dominant_direction = "neutral"
+    dominant_ratio = 0.5
+    if up_count > down_count:
+        dominant_direction = "up"
+        dominant_ratio = up_count / len(labeled_entries)
+    elif down_count > up_count:
+        dominant_direction = "down"
+        dominant_ratio = down_count / len(labeled_entries)
+
+    for label, entry, horizon in labeled_entries:
+        current_direction = _direction_vote(entry)
+        aligned = [(other_label, other_entry, other_h) for other_label, other_entry, other_h in labeled_entries if _direction_vote(other_entry) == current_direction]
+        aligned_count = len(aligned)
+        support_ratio = aligned_count / len(labeled_entries)
+
+        short_entries = [item for item in labeled_entries if item[2] in short_horizons]
+        mid_entries = [item for item in labeled_entries if item[2] in mid_horizons]
+        short_ratio = (
+            sum(1 for _other_label, other_entry, _other_h in short_entries if _direction_vote(other_entry) == current_direction) / len(short_entries)
+            if short_entries else None
+        )
+        mid_ratio = (
+            sum(1 for _other_label, other_entry, _other_h in mid_entries if _direction_vote(other_entry) == current_direction) / len(mid_entries)
+            if mid_entries else None
+        )
+
+        confluence_triggered = False
+        reasons: List[str] = []
+        if str(entry.get("trade_action", "hold")) != "hold":
+            if aligned_count < int(policy.get("min_aligned_horizons", 2)):
+                confluence_triggered = True
+                reasons.append("aligned_horizons_below_min")
+            if support_ratio < float(policy.get("min_support_ratio", 0.6)):
+                confluence_triggered = True
+                reasons.append("support_ratio_below_min")
+            if (
+                bool(policy.get("require_mid_term_alignment", True))
+                and mid_ratio is not None
+                and mid_ratio < float(policy.get("min_mid_term_ratio", 0.5))
+            ):
+                confluence_triggered = True
+                reasons.append("mid_term_ratio_below_min")
+            if (
+                bool(policy.get("require_short_term_alignment", False))
+                and short_ratio is not None
+                and short_ratio < float(policy.get("min_short_term_ratio", 0.5))
+            ):
+                confluence_triggered = True
+                reasons.append("short_term_ratio_below_min")
+            if dominant_direction != "neutral" and dominant_direction != current_direction and dominant_ratio >= float(policy.get("dominant_ratio_floor", 0.55)):
+                confluence_triggered = True
+                reasons.append("dominant_direction_conflict")
+
+        entry["confluence"] = {
+            "enabled": bool(policy.get("enabled", False)),
+            "dominant_direction": dominant_direction,
+            "dominant_ratio": float(dominant_ratio),
+            "aligned_horizons": int(aligned_count),
+            "total_horizons": int(len(labeled_entries)),
+            "support_ratio": float(support_ratio),
+            "short_term_ratio": None if short_ratio is None else float(short_ratio),
+            "mid_term_ratio": None if mid_ratio is None else float(mid_ratio),
+            "triggered": bool(confluence_triggered),
+            "reasons": reasons,
+        }
+        entry["confluence_support_ratio"] = float(support_ratio)
+        entry["confluence_short_term_ratio"] = None if short_ratio is None else float(short_ratio)
+        entry["confluence_mid_term_ratio"] = None if mid_ratio is None else float(mid_ratio)
+        entry["confluence_direction_matches_dominant"] = (
+            0.0 if dominant_direction == "neutral" else float(dominant_direction == current_direction)
+        )
+        if confluence_triggered:
+            entry["trade_action"] = "hold"
+            entry["signal_ensemble"] = 0
+            trade_decision = entry.get("trade_decision")
+            if isinstance(trade_decision, dict):
+                trade_decision["confluence_gate_triggered"] = True
+                trade_decision["confluence_gate_reasons"] = reasons
+    return summary
+
+
 def _resolve_data_quality_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
     cfg = config or {}
     return {
@@ -1143,6 +1431,8 @@ def _resolve_trade_decision_policy(config: Mapping[str, Any] | None) -> Dict[str
         else:
             print(f"Warning: trade decision model not found at {path}; policy disabled.", file=sys.stderr)
     enabled = bool(cfg.get("enabled", False) and model_payload is not None)
+    midband_veto_cfg = cfg.get("midband_veto") if isinstance(cfg.get("midband_veto"), Mapping) else {}
+    weak_band_veto_cfg = cfg.get("weak_band_veto") if isinstance(cfg.get("weak_band_veto"), Mapping) else {}
     return {
         "enabled": enabled,
         "replace_threshold_rule": bool(cfg.get("replace_threshold_rule", True)),
@@ -1150,6 +1440,7 @@ def _resolve_trade_decision_policy(config: Mapping[str, Any] | None) -> Dict[str
         "use_oof_expected_value": bool(cfg.get("use_oof_expected_value", True)),
         "oof_expected_value_mode": str(cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")).lower(),
         "enforce_positive_oof_envelope": bool(cfg.get("enforce_positive_oof_envelope", False)),
+        "positive_oof_envelope_mode": str(cfg.get("positive_oof_envelope_mode", "strict_positive_bin")).lower(),
         "block_when_no_positive_oof_bin": bool(cfg.get("block_when_no_positive_oof_bin", True)),
         "positive_oof_min_samples": int(float(cfg.get("positive_oof_min_samples", 4))),
         "allow_raw_ev_fallback_when_no_positive_oof_bin": bool(cfg.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False)),
@@ -1158,6 +1449,33 @@ def _resolve_trade_decision_policy(config: Mapping[str, Any] | None) -> Dict[str
         "threshold": float(cfg.get("threshold") if cfg.get("threshold") is not None else (model_payload or {}).get("threshold", 0.55)),
         "min_expected_net": float(cfg.get("min_expected_net", 0.0)),
         "min_edge_over_fee": float(cfg.get("min_edge_over_fee", 0.0)),
+        "midband_veto": {
+            "enabled": bool(midband_veto_cfg.get("enabled", False)),
+            "p_up_low": float(midband_veto_cfg.get("p_up_low", 0.55)),
+            "p_up_high": float(midband_veto_cfg.get("p_up_high", 0.60)),
+            "high_inclusive": bool(midband_veto_cfg.get("high_inclusive", False)),
+            "min_abs_ret_pred": (
+                float(midband_veto_cfg.get("min_abs_ret_pred"))
+                if midband_veto_cfg.get("min_abs_ret_pred") is not None
+                else None
+            ),
+            "max_abs_ret_pred": (
+                float(midband_veto_cfg.get("max_abs_ret_pred"))
+                if midband_veto_cfg.get("max_abs_ret_pred") is not None
+                else None
+            ),
+            "regime_states": [
+                str(value).strip().lower()
+                for value in (midband_veto_cfg.get("regime_states", []) if isinstance(midband_veto_cfg.get("regime_states", []), list) else [])
+                if str(value).strip()
+            ],
+        },
+        "weak_band_veto": {
+            "enabled": bool(weak_band_veto_cfg.get("enabled", False)),
+            "p_up_low": float(weak_band_veto_cfg.get("p_up_low", 0.55)),
+            "p_up_high": float(weak_band_veto_cfg.get("p_up_high", 0.60)),
+            "high_inclusive": bool(weak_band_veto_cfg.get("high_inclusive", False)),
+        },
         "model": model_payload,
     }
 
@@ -1167,6 +1485,19 @@ def _sigmoid(value: float) -> float:
     return float(1.0 / (1.0 + math.exp(-clipped)))
 
 
+def _finite_float_or_none(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _finite_float(value: Any, default: float = 0.0) -> float:
+    out = _finite_float_or_none(value)
+    return float(default) if out is None else float(out)
+
+
 def _lookup_oof_expected_net(model: Mapping[str, Any], prob: float) -> float | None:
     oof_payload = model.get("oof_expected_value") if isinstance(model, Mapping) else None
     if not isinstance(oof_payload, Mapping):
@@ -1174,20 +1505,26 @@ def _lookup_oof_expected_net(model: Mapping[str, Any], prob: float) -> float | N
     bins = oof_payload.get("bins")
     if not isinstance(bins, list):
         return None
-    p = float(max(0.0, min(1.0, prob)))
+    prob_value = _finite_float_or_none(prob)
+    if prob_value is None:
+        return None
+    p = float(max(0.0, min(1.0, prob_value)))
     for idx, bucket in enumerate(bins):
         if not isinstance(bucket, Mapping):
             continue
-        lo = float(bucket.get("p_min", 0.0))
-        hi = float(bucket.get("p_max", 1.0))
+        lo = _finite_float(bucket.get("p_min", 0.0), 0.0)
+        hi = _finite_float(bucket.get("p_max", 1.0), 1.0)
         in_range = (p >= lo and p < hi) if idx < len(bins) - 1 else (p >= lo and p <= hi)
         if in_range:
-            return float(bucket.get("mean_ret_net", 0.0))
+            return _finite_float_or_none(bucket.get("mean_ret_net", 0.0))
     default_value = oof_payload.get("default_expected_net")
-    return float(default_value) if default_value is not None else None
+    return _finite_float_or_none(default_value)
 
 
 def _lookup_raw_ev_expected_net(model: Mapping[str, Any], raw_ev: float) -> float | None:
+    raw_ev_value = _finite_float_or_none(raw_ev)
+    if raw_ev_value is None:
+        return None
     iso_payload = model.get("raw_ev_isotonic") if isinstance(model, Mapping) else None
     if isinstance(iso_payload, Mapping):
         x_vals = iso_payload.get("x_thresholds")
@@ -1196,7 +1533,8 @@ def _lookup_raw_ev_expected_net(model: Mapping[str, Any], raw_ev: float) -> floa
             try:
                 x = np.asarray([float(v) for v in x_vals], dtype=float)
                 y = np.asarray([float(v) for v in y_vals], dtype=float)
-                return float(np.interp(float(raw_ev), x, y, left=y[0], right=y[-1]))
+                interpolated = float(np.interp(float(raw_ev_value), x, y, left=y[0], right=y[-1]))
+                return _finite_float_or_none(interpolated)
             except Exception:
                 pass
 
@@ -1206,17 +1544,17 @@ def _lookup_raw_ev_expected_net(model: Mapping[str, Any], raw_ev: float) -> floa
     bins = payload.get("bins")
     if not isinstance(bins, list):
         return None
-    x = float(raw_ev)
+    x = float(raw_ev_value)
     for idx, bucket in enumerate(bins):
         if not isinstance(bucket, Mapping):
             continue
-        lo = float(bucket.get("x_min", float("-inf")))
-        hi = float(bucket.get("x_max", float("inf")))
+        lo = _finite_float(bucket.get("x_min", float("-inf")), float("-inf"))
+        hi = _finite_float(bucket.get("x_max", float("inf")), float("inf"))
         in_range = (x >= lo and x < hi) if idx < len(bins) - 1 else (x >= lo and x <= hi)
         if in_range:
-            return float(bucket.get("mean_ret_net", 0.0))
+            return _finite_float_or_none(bucket.get("mean_ret_net", 0.0))
     default_value = payload.get("default_expected_net")
-    return float(default_value) if default_value is not None else None
+    return _finite_float_or_none(default_value)
 
 
 def _oof_positive_envelope_status(model: Mapping[str, Any], prob: float, min_samples: int) -> Dict[str, Any]:
@@ -1240,25 +1578,42 @@ def _oof_positive_envelope_status(model: Mapping[str, Any], prob: float, min_sam
 
     p = float(max(0.0, min(1.0, prob)))
     positive_ranges: List[tuple[float, float]] = []
+    populated_bin_count = 0
+    matched_populated_bin = False
+    matched_positive_bin = False
+    matched_bin_mean_ret_net: float | None = None
+    matched_bin_samples = 0
     best_positive_mean = float("-inf")
-    for bucket in bins:
+    for idx, bucket in enumerate(bins):
         if not isinstance(bucket, Mapping):
             continue
         count = int(bucket.get("samples", 0) or 0)
         mean_ret_net = float(bucket.get("mean_ret_net", 0.0))
-        if count < int(min_samples) or mean_ret_net <= 0.0:
-            continue
         lo = float(bucket.get("p_min", 0.0))
         hi = float(bucket.get("p_max", 1.0))
-        positive_ranges.append((lo, hi))
-        best_positive_mean = max(best_positive_mean, mean_ret_net)
+        in_range = (p >= lo and p < hi) if idx < len(bins) - 1 else (p >= lo and p <= hi)
+        if count >= int(min_samples):
+            populated_bin_count += 1
+            if in_range:
+                matched_populated_bin = True
+                matched_positive_bin = mean_ret_net > 0.0
+                matched_bin_mean_ret_net = float(mean_ret_net)
+                matched_bin_samples = count
+            if mean_ret_net > 0.0:
+                positive_ranges.append((lo, hi))
+                best_positive_mean = max(best_positive_mean, mean_ret_net)
 
     in_positive = any((p >= lo and p <= hi) for lo, hi in positive_ranges)
     return {
         "available": True,
         "positive_bin_count": int(len(positive_ranges)),
+        "populated_bin_count": int(populated_bin_count),
         "has_positive_bin": bool(len(positive_ranges) > 0),
         "in_positive_bin": bool(in_positive),
+        "matched_populated_bin": bool(matched_populated_bin),
+        "matched_positive_bin": bool(matched_positive_bin),
+        "matched_bin_mean_ret_net": matched_bin_mean_ret_net,
+        "matched_bin_samples": int(matched_bin_samples),
         "best_positive_mean_ret_net": (None if best_positive_mean == float("-inf") else float(best_positive_mean)),
     }
 
@@ -1275,7 +1630,7 @@ def _lookup_raw_ev_fallback_threshold(model: Mapping[str, Any], quantile: float)
     key = f"q{int(round(q * 100))}"
     direct = quantiles.get(key)
     if direct is not None:
-        return float(direct)
+        return _finite_float_or_none(direct)
 
     # Fallback to nearest available quantile key if exact one is missing.
     best_dist = float("inf")
@@ -1288,7 +1643,7 @@ def _lookup_raw_ev_fallback_threshold(model: Mapping[str, Any], quantile: float)
             dist = abs(kq - q)
             if dist < best_dist:
                 best_dist = dist
-                best_value = float(v)
+                best_value = _finite_float_or_none(v)
         except Exception:
             continue
     return best_value
@@ -1328,9 +1683,24 @@ def _apply_trade_decision_model(
         "ret_pred": float(result.get("ret_pred", 0.0)),
         "expected_value_proxy": float(result.get("p_up", 0.0)) * float(result.get("ret_pred", 0.0)),
         "abs_ret_pred": abs(float(result.get("ret_pred", 0.0))),
+        "confidence_score": float(result.get("confidence_score", 0.0)),
+        "position_size": float(result.get("position_size", 0.0)),
         "volatility_realized_24h": float(vol_snapshot.get("volatility_realized_24h", 0.0) or 0.0),
         "volatility_ewm_24h": float(vol_snapshot.get("volatility_ewm_24h", 0.0) or 0.0),
         "volatility_garch_like": float(vol_snapshot.get("volatility_garch_like", 0.0) or 0.0),
+        "range_expansion_1h": float(result.get("range_expansion_1h", 0.0) or 0.0),
+        "distance_from_session_high_8h": float(result.get("distance_from_session_high_8h", 0.0) or 0.0),
+        "distance_from_session_low_8h": float(result.get("distance_from_session_low_8h", 0.0) or 0.0),
+        "vwap_deviation_8h": float(result.get("vwap_deviation_8h", 0.0) or 0.0),
+        "momentum_slope_2h": float(result.get("momentum_slope_2h", 0.0) or 0.0),
+        "momentum_slope_4h": float(result.get("momentum_slope_4h", 0.0) or 0.0),
+        "confluence_support_ratio": float(result.get("confluence_support_ratio", 0.0) or 0.0),
+        "confluence_short_term_ratio": float(result.get("confluence_short_term_ratio", 0.0) or 0.0),
+        "confluence_mid_term_ratio": float(result.get("confluence_mid_term_ratio", 0.0) or 0.0),
+        "confluence_direction_matches_dominant": float(result.get("confluence_direction_matches_dominant", 0.0) or 0.0),
+        "incumbent_signal_reference": float(result.get("incumbent_signal_reference", 0.0) or 0.0),
+        "candidate_only_reference": float(result.get("candidate_only_reference", 0.0) or 0.0),
+        "candidate_incumbent_disagreement": float(result.get("candidate_incumbent_disagreement", 0.0) or 0.0),
         "regime_is_trend": 1.0 if regime_state == REGIME_TREND else 0.0,
         "regime_is_neutral": 1.0 if regime_state == REGIME_NEUTRAL else 0.0,
         "regime_is_chop": 1.0 if regime_state == REGIME_CHOP else 0.0,
@@ -1342,7 +1712,7 @@ def _apply_trade_decision_model(
     trade_prob = _sigmoid(logit)
 
     threshold = max(0.0, min(1.0, float(policy.get("threshold", 0.55))))
-    expected_net_raw = float(result.get("expected_value", 0.0))
+    expected_net_raw = _finite_float(result.get("expected_value", 0.0), 0.0)
     expected_net_oof = _lookup_oof_expected_net(model, trade_prob)
     expected_net_raw_calibrated = _lookup_raw_ev_expected_net(model, expected_net_raw)
     use_oof_expected_value = bool(policy.get("use_oof_expected_value", True))
@@ -1359,14 +1729,18 @@ def _apply_trade_decision_model(
             candidates.append(float(expected_net_oof))
         if expected_net_raw_calibrated is not None:
             candidates.append(float(expected_net_raw_calibrated))
-        expected_net = max(candidates)
+        finite_candidates = [value for value in candidates if math.isfinite(value)]
+        expected_net = max(finite_candidates) if finite_candidates else float("nan")
+    expected_net_valid = math.isfinite(expected_net)
     fee_cost = (float(fee_bps) + float(slippage_bps)) / 10_000.0
-    edge_over_fee = expected_net - fee_cost
-    ret_pred = float(result.get("ret_pred", 0.0))
+    edge_over_fee = (expected_net - fee_cost) if expected_net_valid else float("-inf")
+    ret_pred = _finite_float(result.get("ret_pred", 0.0), 0.0)
     signal_dir_only = int(result.get("signal_dir_only", 0))
     aligned = ((signal_dir_only == 1 and ret_pred > 0.0) or (signal_dir_only == 0 and ret_pred < 0.0))
 
     trade_ok = trade_prob >= threshold
+    if not expected_net_valid:
+        trade_ok = False
     if expected_net < float(policy.get("min_expected_net", 0.0)):
         trade_ok = False
     if edge_over_fee < float(policy.get("min_edge_over_fee", 0.0)):
@@ -1379,12 +1753,18 @@ def _apply_trade_decision_model(
         trade_prob,
         min_samples=int(policy.get("positive_oof_min_samples", 4)),
     )
+    envelope_mode = str(policy.get("positive_oof_envelope_mode", "strict_positive_bin")).lower()
     if bool(policy.get("enforce_positive_oof_envelope", False)) and envelope.get("available", False):
         has_positive = bool(envelope.get("has_positive_bin", False))
         in_positive = bool(envelope.get("in_positive_bin", False))
+        matched_populated_bin = bool(envelope.get("matched_populated_bin", False))
+        matched_positive_bin = bool(envelope.get("matched_positive_bin", False))
         raw_ev_fallback_threshold: float | None = None
         raw_ev_fallback_pass = False
-        if has_positive and not in_positive:
+        if envelope_mode == "populated_bin_sign":
+            if matched_populated_bin and not matched_positive_bin:
+                trade_ok = False
+        elif has_positive and not in_positive:
             trade_ok = False
         if (not has_positive) and bool(policy.get("block_when_no_positive_oof_bin", True)):
             allow_raw_fallback = bool(policy.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False))
@@ -1410,26 +1790,76 @@ def _apply_trade_decision_model(
         raw_ev_fallback_threshold = None
         raw_ev_fallback_pass = False
 
+    weak_band_veto_cfg = policy.get("weak_band_veto") if isinstance(policy.get("weak_band_veto"), Mapping) else {}
+    weak_band_veto_triggered = False
+    weak_band_veto_reason = "disabled"
+    if bool(weak_band_veto_cfg.get("enabled", False)) and trade_ok:
+        p_up_low = float(weak_band_veto_cfg.get("p_up_low", 0.55))
+        p_up_high = float(weak_band_veto_cfg.get("p_up_high", 0.60))
+        high_inclusive = bool(weak_band_veto_cfg.get("high_inclusive", False))
+        in_band = (feature_values["p_up"] >= p_up_low) and (
+            feature_values["p_up"] <= p_up_high if high_inclusive else feature_values["p_up"] < p_up_high
+        )
+        if in_band:
+            trade_ok = False
+            weak_band_veto_triggered = True
+            weak_band_veto_reason = "weak_band_veto"
+
     if bool(policy.get("replace_threshold_rule", True)):
+        midband_veto_cfg = policy.get("midband_veto") if isinstance(policy.get("midband_veto"), Mapping) else {}
+        midband_veto_triggered = False
+        midband_veto_reason = "disabled"
+        if bool(midband_veto_cfg.get("enabled", False)) and trade_ok:
+            p_up_low = float(midband_veto_cfg.get("p_up_low", 0.55))
+            p_up_high = float(midband_veto_cfg.get("p_up_high", 0.60))
+            high_inclusive = bool(midband_veto_cfg.get("high_inclusive", False))
+            regime_filters = [
+                str(value).strip().lower()
+                for value in (midband_veto_cfg.get("regime_states", []) if isinstance(midband_veto_cfg.get("regime_states", []), list) else [])
+                if str(value).strip()
+            ]
+            abs_ret_pred = abs(ret_pred)
+            in_band = (feature_values["p_up"] >= p_up_low) and (
+                feature_values["p_up"] <= p_up_high if high_inclusive else feature_values["p_up"] < p_up_high
+            )
+            if regime_filters and regime_state not in regime_filters:
+                in_band = False
+            if in_band:
+                min_abs_ret_pred = midband_veto_cfg.get("min_abs_ret_pred")
+                max_abs_ret_pred = midband_veto_cfg.get("max_abs_ret_pred")
+                if min_abs_ret_pred is not None and abs_ret_pred < float(min_abs_ret_pred):
+                    in_band = False
+                if max_abs_ret_pred is not None and abs_ret_pred >= float(max_abs_ret_pred):
+                    in_band = False
+            if in_band:
+                trade_ok = False
+                midband_veto_triggered = True
+                midband_veto_reason = "midband_veto"
+
         result["signal_ensemble"] = int(trade_ok)
         result["trade_action"] = (
             "long" if int(trade_ok) == 1 and signal_dir_only == 1 else
             "short" if int(trade_ok) == 1 and signal_dir_only == 0 else
             "hold"
         )
+    else:
+        midband_veto_triggered = False
+        midband_veto_reason = "replace_threshold_rule_disabled"
 
     return {
         "enabled": True,
         "triggered": bool(trade_ok),
         "trade_probability": float(trade_prob),
         "threshold": float(threshold),
-        "expected_net": float(expected_net),
+        "expected_net": (float(expected_net) if expected_net_valid else None),
+        "expected_net_valid": bool(expected_net_valid),
         "expected_net_raw": float(expected_net_raw),
         "expected_net_raw_calibrated": None if expected_net_raw_calibrated is None else float(expected_net_raw_calibrated),
         "expected_net_oof": None if expected_net_oof is None else float(expected_net_oof),
         "oof_expected_value_mode": oof_mode,
         "use_oof_expected_value": use_oof_expected_value,
         "positive_oof_envelope": envelope,
+        "positive_oof_envelope_mode": envelope_mode,
         "enforce_positive_oof_envelope": bool(policy.get("enforce_positive_oof_envelope", False)),
         "allow_raw_ev_fallback_when_no_positive_oof_bin": bool(
             policy.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False)
@@ -1437,9 +1867,19 @@ def _apply_trade_decision_model(
         "raw_ev_fallback_quantile": float(policy.get("raw_ev_fallback_quantile", 0.9)),
         "raw_ev_fallback_threshold": raw_ev_fallback_threshold,
         "raw_ev_fallback_pass": bool(raw_ev_fallback_pass),
-        "edge_over_fee": float(edge_over_fee),
+        "edge_over_fee": (float(edge_over_fee) if math.isfinite(edge_over_fee) else None),
         "direction_ret_aligned": bool(aligned),
         "replace_threshold_rule": bool(policy.get("replace_threshold_rule", True)),
+        "weak_band_veto": {
+            "enabled": bool((policy.get("weak_band_veto") or {}).get("enabled", False)) if isinstance(policy, Mapping) else False,
+            "triggered": bool(weak_band_veto_triggered),
+            "reason": weak_band_veto_reason,
+        },
+        "midband_veto": {
+            "enabled": bool((policy.get("midband_veto") or {}).get("enabled", False)) if isinstance(policy, Mapping) else False,
+            "triggered": bool(midband_veto_triggered),
+            "reason": midband_veto_reason,
+        },
     }
 
 
@@ -1472,10 +1912,11 @@ def _resolve_regime_specific_dir_path(
     if not override:
         return default_path
     override_path = Path(str(override)).expanduser()
-    if override_path.is_dir():
-        model_file = override_path / f"xgb_dir{horizon_label}_model.json"
-        if model_file.exists():
-            override_path = model_file
+    override_path = resolve_best_versioned_model_file(
+        override_path,
+        expected_filename=f"xgb_dir{horizon_label}_model.json",
+        version_priority=MODEL_VERSION_PRIORITY,
+    )
     if not override_path.exists():
         print(
             f"Warning: regime model dir override not found for {horizon_label}@{regime_state}: {override_path}",
@@ -2023,7 +2464,7 @@ def _evaluate_data_quality(
 def run_feature_builders(price_source: Path | None = None) -> Dict[str, str]:
     results: Dict[str, str] = {}
     print("Recomputing technical indicator features...")
-    technical_path = process_technical_features(price_source=price_source)
+    technical_path = process_technical_features(price_source=price_source, include_history=True)
     results["technical"] = str(technical_path)
     return results
 
@@ -2291,6 +2732,33 @@ def _enrich_local_features_for_model(
         close_position = ((close_for_liquidity - mid_price) / half_range).replace([np.inf, -np.inf], np.nan)
         _add_numeric_column("liquidity_close_position_ratio", close_position.clip(lower=-1.0, upper=1.0))
 
+        atr_24h = true_range.rolling(window=24, min_periods=6).mean().replace(0.0, np.nan)
+        _add_numeric_column("range_expansion_1h", (true_range / atr_24h).replace([np.inf, -np.inf], np.nan).clip(lower=0.0, upper=10.0))
+
+        session_high = high.rolling(window=8, min_periods=2).max().replace(0.0, np.nan)
+        session_low = low.rolling(window=8, min_periods=2).min().replace(0.0, np.nan)
+        _add_numeric_column(
+            "distance_from_session_high_8h",
+            ((close_for_liquidity / session_high) - 1.0).replace([np.inf, -np.inf], np.nan).clip(lower=-1.0, upper=1.0),
+        )
+        _add_numeric_column(
+            "distance_from_session_low_8h",
+            ((close_for_liquidity / session_low) - 1.0).replace([np.inf, -np.inf], np.nan).clip(lower=-1.0, upper=1.0),
+        )
+
+        if volume is not None:
+            typical_price = (high + low + close_for_liquidity) / 3.0
+            rolling_notional = (typical_price * volume).rolling(window=8, min_periods=2).sum()
+            rolling_volume = volume.rolling(window=8, min_periods=2).sum().replace(0.0, np.nan)
+            rolling_vwap = (rolling_notional / rolling_volume).replace([np.inf, -np.inf], np.nan)
+            _add_numeric_column(
+                "vwap_deviation_8h",
+                ((close_for_liquidity / rolling_vwap) - 1.0).replace([np.inf, -np.inf], np.nan).clip(lower=-1.0, upper=1.0),
+            )
+
+        _add_numeric_column("momentum_slope_2h", close_for_liquidity.pct_change(periods=2))
+        _add_numeric_column("momentum_slope_4h", close_for_liquidity.pct_change(periods=4))
+
     return enriched, added
 
 
@@ -2327,6 +2795,27 @@ def _prepare_local_feature_bundle(
                     )
             metadata[label] = summary
 
+    feature_ts_end = None
+    if not base_df.empty and "ts" in base_df.columns:
+        feature_ts_end = pd.to_datetime(base_df["ts"], utc=True, errors="coerce").max()
+    source_freshness: Dict[str, Any] = {}
+    if feature_ts_end is not None:
+        for label, payload in metadata.items():
+            if not isinstance(payload, Mapping):
+                continue
+            ts_end_raw = payload.get("ts_end")
+            if not isinstance(ts_end_raw, str) or not ts_end_raw.strip():
+                continue
+            try:
+                source_ts_end = pd.to_datetime(ts_end_raw, utc=True)
+            except Exception:
+                continue
+            lag_hours = max((feature_ts_end - source_ts_end).total_seconds() / 3600.0, 0.0)
+            source_freshness[str(label)] = {
+                "ts_end": source_ts_end.isoformat(),
+                "lag_hours": float(lag_hours),
+            }
+
     if hours > 0 and len(base_df) > hours:
         base_df = base_df.iloc[-hours:].reset_index(drop=True)
 
@@ -2339,11 +2828,12 @@ def _prepare_local_feature_bundle(
             "cvd_zscore_6h",
             "funding_rate_zscore_24h",
             "trend_ignition_6h",
-            "cq_daily_delta_exchange_netflow",
-            "cq_daily_delta_exchange_reserve",
-            "cq_daily_delta_miner_flow",
-            "cq_daily_delta_stablecoin_reserve",
-            "cq_daily_delta_whale_count",
+            "range_expansion_1h",
+            "distance_from_session_high_8h",
+            "distance_from_session_low_8h",
+            "vwap_deviation_8h",
+            "momentum_slope_2h",
+            "momentum_slope_4h",
         ]
         for column in supplemental_feature_names:
             if column not in feature_names:
@@ -2384,6 +2874,8 @@ def _prepare_local_feature_bundle(
         }
     else:
         feature_names = [col for col in base_df.columns if col != "ts"]
+
+    metadata["source_freshness"] = source_freshness
 
     prepared = prepare_data_for_signals_from_ohlcv(
         base_df,
@@ -2432,40 +2924,29 @@ def _model_paths_for_horizon(horizon: float) -> tuple[Path, Path]:
     suffixes = _model_suffix_candidates(horizon)
     label = _format_horizon_label(horizon)
     fallback: tuple[Path, Path] | None = None
-    base_suffix = suffixes[0]
-    base_reg_version = MODEL_VERSION_PRIORITY[0]
-    base_dir_version = DIR_VERSION_OVERRIDES.get(base_suffix, MODEL_VERSION_PRIORITY)[0]
 
     for suffix_idx, suffix in enumerate(suffixes):
-        dir_versions = DIR_VERSION_OVERRIDES.get(suffix, MODEL_VERSION_PRIORITY)
-        for reg_version_idx, reg_version in enumerate(MODEL_VERSION_PRIORITY):
-            for dir_version_idx, dir_version in enumerate(dir_versions):
-                reg_dir = MODEL_ROOT / f"xgb_ret{suffix}_{reg_version}"
-                dir_dir = MODEL_ROOT / f"xgb_dir{suffix}_{dir_version}"
-                reg_path = reg_dir / f"xgb_ret{suffix}_model.json"
-                dir_path = dir_dir / f"xgb_dir{suffix}_model.json"
+        reg_path = resolve_best_versioned_model_file(
+            MODEL_ROOT / f"xgb_ret{suffix}_v1",
+            expected_filename=f"xgb_ret{suffix}_model.json",
+            version_priority=MODEL_VERSION_PRIORITY,
+        )
+        dir_path = resolve_best_versioned_model_file(
+            MODEL_ROOT / f"xgb_dir{suffix}_v1",
+            expected_filename=f"xgb_dir{suffix}_model.json",
+            version_priority=DIR_VERSION_OVERRIDES.get(suffix, MODEL_VERSION_PRIORITY),
+        )
 
-                if fallback is None:
-                    fallback = (reg_path, dir_path)
+        if fallback is None:
+            fallback = (reg_path, dir_path)
 
-                if reg_path.exists() and dir_path.exists():
-                    dir_changed = dir_version != base_dir_version
-                    reg_changed = reg_version != base_reg_version
-                    if suffix_idx > 0 or reg_changed or dir_changed:
-                        print(
-                            "Info: using %s (reg=%s, dir=%s) model artifacts for %s horizon (fallback from %s (reg=%s, dir=%s))."
-                            % (
-                                suffix,
-                                reg_version,
-                                dir_version,
-                                label,
-                                base_suffix,
-                                base_reg_version,
-                                base_dir_version,
-                            ),
-                            file=sys.stderr,
-                        )
-                    return reg_path, dir_path
+        if reg_path.exists() and dir_path.exists():
+            if suffix_idx > 0:
+                print(
+                    f"Info: using {suffix} model artifacts for {label} horizon fallback.",
+                    file=sys.stderr,
+                )
+            return reg_path, dir_path
 
     if fallback is not None and len(suffixes) > 1:
         print(
@@ -2765,6 +3246,7 @@ def run_predictions(
     trade_decision_policy: Mapping[str, Any] | None = None,
     regime_model_weights: Mapping[str, Any] | None = None,
     regime_model_dirs: Mapping[str, Any] | None = None,
+    confluence_policy: Mapping[str, Any] | None = None,
     latest_close: float | None = None,
     confidence_min: float = CONFIDENCE_MIN_DEFAULT,
     position_size_floor: float = POSITION_SIZE_FLOOR_DEFAULT,
@@ -2783,6 +3265,7 @@ def run_predictions(
     trade_decision_policy_resolved = _resolve_trade_decision_policy(trade_decision_policy)
     regime_weight_policy = _resolve_regime_model_weights_policy(regime_model_weights)
     regime_model_dirs_policy = _resolve_regime_model_dirs_policy(regime_model_dirs)
+    confluence_policy_resolved = _resolve_confluence_policy(confluence_policy)
     confidence_min = max(0.0, min(1.0, float(confidence_min)))
     position_size_floor = max(0.0, float(position_size_floor))
     position_size_cap = max(position_size_floor, float(position_size_cap))
@@ -3120,6 +3603,17 @@ def run_predictions(
             }),
             "volatility_flag": bool(signal.get("volatility_flag")),
         }
+        for field in (
+            "range_expansion_1h",
+            "distance_from_session_high_8h",
+            "distance_from_session_low_8h",
+            "vwap_deviation_8h",
+            "momentum_slope_2h",
+            "momentum_slope_4h",
+        ):
+            if field in row_features.index:
+                value = pd.to_numeric(pd.Series([row_features.get(field)]), errors="coerce").iloc[0]
+                result[field] = None if pd.isna(value) else float(value)
         if regime_score is not None:
             result["regime_score"] = regime_score
         result["thresholds"]["p_up_min_effective"] = horizon_p_up
@@ -3210,6 +3704,9 @@ def run_predictions(
         _write_trend_ignition_state(pending_trend_ts)
     if direction_fallback_policy and pending_direction_fallback_ts:
         _write_direction_fallback_state(pending_direction_fallback_ts)
+
+    if confluence_policy_resolved.get("enabled"):
+        summary = _apply_confluence_policy(summary, confluence_policy_resolved)
 
     if not summary:
         if offline:
@@ -3495,12 +3992,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional on-chain parquet/CSV used only for metadata when --use-local-features is enabled.",
     )
     parser.add_argument(
-        "--cryptoquant-path",
-        type=str,
-        default=None,
-        help="Optional CryptoQuant parquet/CSV used only for metadata when --use-local-features is enabled.",
-    )
-    parser.add_argument(
         "--funding-path",
         type=str,
         default=None,
@@ -3539,6 +4030,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--trade-decision-enabled",
         action="store_true",
         help="Enable trade decision model override for final trade/no-trade action.",
+    )
+    parser.add_argument(
+        "--trade-decision-disabled",
+        action="store_true",
+        help="Disable trade decision model policy even if enabled in config.",
     )
     parser.add_argument(
         "--trade-decision-model",
@@ -3653,6 +4149,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.trade_decision_policy = None
     if not hasattr(args, "intrabar_aggregation"):
         args.intrabar_aggregation = None
+    if not hasattr(args, "feature_coverage_policy"):
+        args.feature_coverage_policy = None
+    if not hasattr(args, "confluence_policy"):
+        args.confluence_policy = None
     if args.data_quality is None:
         args.data_quality = {}
     if args.data_quality_enabled:
@@ -3675,6 +4175,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     intrabar_enabled = bool(intrabar_cfg.get("enabled", False))
 
     trade_decision_cfg = dict(getattr(args, "trade_decision_policy", {}) or {})
+    if args.trade_decision_disabled:
+        trade_decision_cfg["enabled"] = False
     if args.trade_decision_enabled:
         trade_decision_cfg["enabled"] = True
     if args.trade_decision_model:
@@ -3714,6 +4216,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.local_feature_metadata = metadata
         labels = ", ".join(sorted(metadata.keys()))
         print(f"Loaded local feature overrides: {labels}")
+        coverage_policy = _resolve_feature_coverage_policy(getattr(args, "feature_coverage_policy", None))
+        coverage_payload = _evaluate_feature_coverage(metadata, coverage_policy)
+        args.local_feature_metadata["feature_coverage"] = coverage_payload
+        if coverage_policy.get("enabled") and not coverage_payload.get("ok", False) and coverage_payload.get("block_on_violation", True):
+            print(
+                "Feature coverage gate blocked prediction run: "
+                f"{', '.join(coverage_payload.get('failed_checks', []))}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         quality_policy = _resolve_data_quality_policy(getattr(args, "data_quality", None))
         if quality_policy.get("enabled"):
             try:
@@ -3801,7 +4313,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         feature_build_results: Dict[str, str] = {}
         try:
-            feature_build_results = run_feature_builders()
+            feature_build_results = run_feature_builders(price_source=output_path)
         except Exception as exc:  # pragma: no cover - runtime safety
             print(f"Feature rebuild failed: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -3831,11 +4343,26 @@ def main(argv: Sequence[str] | None = None) -> None:
                     or None,
                 )
                 args.local_feature_metadata = metadata
+                coverage_policy = _resolve_feature_coverage_policy(getattr(args, "feature_coverage_policy", None))
+                coverage_payload = _evaluate_feature_coverage(metadata, coverage_policy)
+                args.local_feature_metadata["feature_coverage"] = coverage_payload
+                if coverage_policy.get("enabled") and not coverage_payload.get("ok", False) and coverage_payload.get("block_on_violation", True):
+                    raise RuntimeError(
+                        "feature coverage gate failed: " + ", ".join(coverage_payload.get("failed_checks", []))
+                    )
                 print(
                     "Using freshly rebuilt local feature bundle for live inference "
                     f"({latest_spot_features_path}).",
                 )
             except Exception as exc:
+                coverage_policy = _resolve_feature_coverage_policy(getattr(args, "feature_coverage_policy", None))
+                if coverage_policy.get("enabled") and coverage_policy.get("block_on_violation", True):
+                    print(
+                        "Fresh local inference bundle preparation failed and coverage blocking is enabled: "
+                        f"{exc}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
                 print(
                     "Warning: failed to prepare fresh local inference bundle; "
                     f"falling back to dataset-based inference ({exc}).",
@@ -3921,6 +4448,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             trade_decision_policy=getattr(args, "trade_decision_policy", None),
             regime_model_weights=getattr(args, "regime_model_weights", None),
             regime_model_dirs=getattr(args, "regime_model_dirs", None),
+            confluence_policy=getattr(args, "confluence_policy", None),
             latest_close=latest_close,
             confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
             position_size_floor=float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),

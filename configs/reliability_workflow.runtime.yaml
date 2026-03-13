@@ -38,10 +38,10 @@ cadence:
 quality:
   enabled: true
   build_labeled_dataset: true
-  backtest_csv: artifacts/backtests/latest/backtest_signals.csv
+  backtest_csv: auto
   prefer_backtest: true
-  lookback_rows: 12000
-  lookback_hours: 2160
+  lookback_rows: 50000
+  lookback_hours: 8760
   min_labeled_rows: 300
   fold_size: 12
   walkforward_horizon: 1
@@ -53,7 +53,8 @@ quality:
   walkforward_slippage_bps: 1.0
   walkforward_model_compare:
     enabled: true
-    selection_policy: best_cum_ret
+    selection_policy: quality_guarded
+    min_auc: 0.5
     folds: 5
     train_size: 36
     val_size: 12
@@ -93,7 +94,8 @@ quality:
       min_train_size: 16
       min_val_size: 8
       min_test_size: 8
-      selection_policy: best_cum_ret
+      selection_policy: quality_guarded
+      min_auc: 0.5
     overlap_model_selection:
       enabled: true
       primary_model: xgb
@@ -128,6 +130,8 @@ quality:
         selection_metric: economics_score
         economics_turnover_penalty: 0.002
         economics_downside_penalty: 2.0
+        full_min_trades: 10
+        full_min_cum_ret: 0.0
         stability_gap_penalty: 1.5
         max_stability_gap: 0.03
         min_overlap_rows: 80
@@ -226,7 +230,7 @@ quality:
   champion_challenger:
     enabled: true
     enforce: true
-    baseline_input: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+    baseline_input: auto
     candidate_input: auto
     baseline_col: ret_ensemble_net
     candidate_col: ret_ensemble_net
@@ -257,7 +261,11 @@ quality:
     target_col: ret_ensemble_net
     signal_col: signal_ensemble
     threshold: 0.58
+    positive_oof_envelope_mode: populated_bin_sign
     min_rows: 300
+    min_candidate_rows: 60
+    min_oof_rows: 40
+    min_positive_oof_bins: 2
     candidate_only: false
     ev_calibration_source: hybrid
     ev_min_candidate_rows: 20
@@ -265,12 +273,23 @@ quality:
     min_bin_samples: 4
     raw_ev_calibration_source: weighted_hybrid
     raw_ev_candidate_weight: 4.0
-    weak_band_candidate_only_veto:
-      enabled: false
+    midband_focus:
+      enabled: true
       p_up_low: 0.55
       p_up_high: 0.60
       high_inclusive: false
-      incumbent_reference_path: null
+      min_abs_ret_pred: 0.0005
+      max_abs_ret_pred: 0.001
+      negative_weight: 3.0
+      positive_weight: 1.0
+    weak_band_candidate_only_veto:
+      enabled: true
+      official_mode: midband
+      official_shadow_variant: none
+      p_up_low: 0.55
+      p_up_high: 0.60
+      high_inclusive: false
+      incumbent_reference_path: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
       refined:
         enabled: false
         p_up_low: 0.55
@@ -279,13 +298,13 @@ quality:
         min_abs_ret_pred: 0.001
         incumbent_reference_path: null
       midband:
-        enabled: false
+        enabled: true
         p_up_low: 0.55
         p_up_high: 0.60
         high_inclusive: false
         min_abs_ret_pred: 0.0005
         max_abs_ret_pred: 0.001
-        incumbent_reference_path: null
+        incumbent_reference_path: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
       raw_ev_sign:
         enabled: false
         p_up_low: 0.55

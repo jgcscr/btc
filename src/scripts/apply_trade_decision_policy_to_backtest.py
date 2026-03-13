@@ -63,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-oof-expected-value", type=int, default=1)
     parser.add_argument("--oof-expected-value-mode", type=str, default="max_with_raw_calibrated")
     parser.add_argument("--enforce-positive-oof-envelope", type=int, default=1)
+    parser.add_argument("--positive-oof-envelope-mode", type=str, default="strict_positive_bin")
     parser.add_argument("--block-when-no-positive-oof-bin", type=int, default=1)
     parser.add_argument("--positive-oof-min-samples", type=int, default=4)
     parser.add_argument("--allow-raw-ev-fallback-when-no-positive-oof-bin", type=int, default=1)
@@ -70,6 +71,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-ev-fallback-min-edge-over-fee", type=float, default=0.0)
     parser.add_argument("--min-expected-net", type=float, default=0.0)
     parser.add_argument("--min-edge-over-fee", type=float, default=0.0)
+    parser.add_argument("--policy-midband-veto", type=int, default=0)
+    parser.add_argument("--policy-midband-pup-low", type=float, default=0.55)
+    parser.add_argument("--policy-midband-pup-high", type=float, default=0.60)
+    parser.add_argument("--policy-midband-high-inclusive", type=int, default=0)
+    parser.add_argument("--policy-midband-min-abs-ret-pred", type=float, default=None)
+    parser.add_argument("--policy-midband-max-abs-ret-pred", type=float, default=None)
+    parser.add_argument("--policy-midband-regime-states", type=str, default="")
     parser.add_argument("--weak-band-candidate-only-veto", type=int, default=0)
     parser.add_argument("--weak-band-pup-low", type=float, default=0.55)
     parser.add_argument("--weak-band-pup-high", type=float, default=0.60)
@@ -178,6 +186,9 @@ def main() -> None:
         "volatility_ewm_24h",
         "volatility_garch_like",
         "expected_value",
+        "incumbent_signal_reference",
+        "candidate_only_reference",
+        "candidate_incumbent_disagreement",
     ]
     missing_before = {
         col: int(pd.to_numeric(df[col], errors="coerce").isna().sum()) if col in df.columns else int(len(df))
@@ -232,6 +243,7 @@ def main() -> None:
         "use_oof_expected_value": bool(int(args.use_oof_expected_value)),
         "oof_expected_value_mode": str(args.oof_expected_value_mode),
         "enforce_positive_oof_envelope": bool(int(args.enforce_positive_oof_envelope)),
+        "positive_oof_envelope_mode": str(args.positive_oof_envelope_mode).lower(),
         "block_when_no_positive_oof_bin": bool(int(args.block_when_no_positive_oof_bin)),
         "positive_oof_min_samples": int(args.positive_oof_min_samples),
         "allow_raw_ev_fallback_when_no_positive_oof_bin": bool(
@@ -241,6 +253,19 @@ def main() -> None:
         "raw_ev_fallback_min_edge_over_fee": float(args.raw_ev_fallback_min_edge_over_fee),
         "min_expected_net": float(args.min_expected_net),
         "min_edge_over_fee": float(args.min_edge_over_fee),
+        "midband_veto": {
+            "enabled": bool(int(args.policy_midband_veto)),
+            "p_up_low": float(args.policy_midband_pup_low),
+            "p_up_high": float(args.policy_midband_pup_high),
+            "high_inclusive": bool(int(args.policy_midband_high_inclusive)),
+            "min_abs_ret_pred": (None if args.policy_midband_min_abs_ret_pred is None else float(args.policy_midband_min_abs_ret_pred)),
+            "max_abs_ret_pred": (None if args.policy_midband_max_abs_ret_pred is None else float(args.policy_midband_max_abs_ret_pred)),
+            "regime_states": [
+                value.strip().lower()
+                for value in str(args.policy_midband_regime_states).split(",")
+                if value.strip()
+            ],
+        },
     }
     policy = rrp._resolve_trade_decision_policy(policy_cfg)
     if not bool(policy.get("enabled", False)):
@@ -264,9 +289,12 @@ def main() -> None:
             "threshold_miss": 0,
             "expected_net_miss": 0,
             "edge_over_fee_miss": 0,
+            "nonfinite_expected_net": 0,
             "direction_mismatch": 0,
             "positive_envelope_out_of_bin": 0,
+            "positive_envelope_nonpositive_bin": 0,
             "positive_envelope_no_positive_bin": 0,
+            "positive_envelope_unmatched_bin": 0,
             "raw_ev_fallback_failed": 0,
             "raw_ev_fallback_passed": 0,
             "envelope_unavailable": 0,
@@ -283,8 +311,10 @@ def main() -> None:
             "min_edge_over_fee": min_edge_over_fee,
             "require_direction_ret_alignment": require_alignment,
             "enforce_positive_oof_envelope": enforce_envelope,
+            "positive_oof_envelope_mode": str(policy.get("positive_oof_envelope_mode", "strict_positive_bin")),
             "block_when_no_positive_oof_bin": block_no_positive_bin,
             "allow_raw_ev_fallback_when_no_positive_oof_bin": allow_raw_fallback,
+            "policy_midband_veto_enabled": bool((policy.get("midband_veto") or {}).get("enabled", False)),
         },
     }
 
@@ -305,6 +335,9 @@ def main() -> None:
             "expected_value": _as_float(row.get("expected_value", p_up * ret_pred), p_up * ret_pred),
             "signal_dir_only": signal_dir_only,
             "signal_ensemble": _as_int(row.get("signal_ensemble", 0), 0),
+            "incumbent_signal_reference": _as_float(row.get("incumbent_signal_reference", 0.0), 0.0),
+            "candidate_only_reference": _as_float(row.get("candidate_only_reference", 0.0), 0.0),
+            "candidate_incumbent_disagreement": _as_float(row.get("candidate_incumbent_disagreement", 0.0), 0.0),
             "trade_action": str(row.get("trade_action", "hold")),
             "volatility": {
                 "snapshot": {
@@ -326,17 +359,23 @@ def main() -> None:
         trade_prob = _as_float(payload.get("trade_probability", 0.0), 0.0)
         expected_net = _as_float(payload.get("expected_net", 0.0), 0.0)
         edge_over_fee = _as_float(payload.get("edge_over_fee", 0.0), 0.0)
+        expected_net_valid = bool(payload.get("expected_net_valid", True))
         direction_ret_aligned = bool(payload.get("direction_ret_aligned", True))
         envelope_obj = payload.get("positive_oof_envelope", {})
         envelope = envelope_obj if isinstance(envelope_obj, dict) else {}
         envelope_available = bool(envelope.get("available", False))
         has_positive_bin = bool(envelope.get("has_positive_bin", False))
         in_positive_bin = bool(envelope.get("in_positive_bin", False))
+        matched_populated_bin = bool(envelope.get("matched_populated_bin", False))
+        matched_positive_bin = bool(envelope.get("matched_positive_bin", False))
+        envelope_mode = str(payload.get("positive_oof_envelope_mode", policy.get("positive_oof_envelope_mode", "strict_positive_bin"))).lower()
         raw_fallback_pass = bool(payload.get("raw_ev_fallback_pass", False))
         triggered = bool(payload.get("triggered", False))
 
         if trade_prob < threshold:
             diagnostics["rules"]["threshold_miss"] += 1
+        if not expected_net_valid:
+            diagnostics["rules"]["nonfinite_expected_net"] += 1
         if expected_net < min_expected_net:
             diagnostics["rules"]["expected_net_miss"] += 1
         if edge_over_fee < min_edge_over_fee:
@@ -346,6 +385,10 @@ def main() -> None:
         if enforce_envelope:
             if not envelope_available:
                 diagnostics["rules"]["envelope_unavailable"] += 1
+            elif envelope_mode == "populated_bin_sign" and matched_populated_bin and (not matched_positive_bin):
+                diagnostics["rules"]["positive_envelope_nonpositive_bin"] += 1
+            elif envelope_mode == "populated_bin_sign" and (not matched_populated_bin):
+                diagnostics["rules"]["positive_envelope_unmatched_bin"] += 1
             elif has_positive_bin and (not in_positive_bin):
                 diagnostics["rules"]["positive_envelope_out_of_bin"] += 1
             elif (not has_positive_bin) and block_no_positive_bin:
@@ -933,6 +976,7 @@ def main() -> None:
             "use_oof_expected_value": bool(int(args.use_oof_expected_value)),
             "oof_expected_value_mode": str(args.oof_expected_value_mode),
             "enforce_positive_oof_envelope": bool(int(args.enforce_positive_oof_envelope)),
+            "positive_oof_envelope_mode": str(args.positive_oof_envelope_mode).lower(),
             "block_when_no_positive_oof_bin": bool(int(args.block_when_no_positive_oof_bin)),
             "positive_oof_min_samples": int(args.positive_oof_min_samples),
             "allow_raw_ev_fallback_when_no_positive_oof_bin": bool(
