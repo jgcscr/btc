@@ -4,6 +4,8 @@ This repository contains a Binance-only BTCUSDT forecasting and reliability pipe
 
 - Binance US spot kline ingestion for live refresh and inference
 - Hourly and intrabar feature generation for 15m, 1h, 4h, 8h, and 12h forecasting
+- Runtime trade-decision gating with confluence, feature-coverage, and target-range overlays
+- Automatic best-version model resolution for versioned model families during live inference
 - Dataset builders, model trainers, and evaluation tooling under `src/scripts/`
 - Reliability workflows with calibration, walk-forward validation, overlap trust checks, and promotion gating
 - Default-vs-midband matched-cycle paper tracking and longitudinal watchlist artifacts
@@ -32,22 +34,33 @@ In this workspace, commands are typically run with:
 Primary entrypoint:
 
 ```bash
-python -m src.scripts.run_refresh_and_predict --targets 1,4,8,12
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict --targets 0.25,1,4,8,12
 ```
 
-Config-driven run:
+Config-driven run with the current promoted default profile:
 
 ```bash
-python -m src.scripts.run_refresh_and_predict \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
   --config configs/run_refresh_and_predict.default.yaml
 ```
 
-Artifact-driven run (recommended after reliability workflow):
+Artifact-driven run with the latest trustworthy reliability bundle:
 
 ```bash
-python -m src.scripts.run_refresh_and_predict \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --targets 0.25,1,4,8,12 \
+  --thresholds-json artifacts/reliability/<run-id>/summary/calibrated_thresholds.json \
+  --platt-calibration artifacts/reliability/<run-id>/summary/platt_calibration.json \
+  --write-artifacts
+```
+
+Shadow/cadence-compatible run:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
   --config configs/run_refresh_and_predict.shadow_simplified.yaml \
-  --targets 1,4,8,12 \
+  --targets 0.25,1,4,8,12 \
   --thresholds-json artifacts/reliability/<run-id>/summary/calibrated_thresholds.json \
   --platt-calibration artifacts/reliability/<run-id>/summary/platt_calibration.json \
   --write-artifacts
@@ -56,7 +69,9 @@ python -m src.scripts.run_refresh_and_predict \
 Dry run:
 
 ```bash
-python -m src.scripts.run_refresh_and_predict --dry-run --targets 1,4,8,12
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --dry-run --targets 0.25,1,4,8,12
 ```
 
 Main outputs:
@@ -80,20 +95,36 @@ Main outputs:
 - `take_profit`
 - `expected_value`
 - `regime_state`
+- `trade_decision`
+- `confluence`
+- `execution_plan`
+- `projected_high` / `projected_low` when target-range models are enabled
 
-`artifacts/monitoring/latest.json` also includes local feature alignment diagnostics under `request.local_feature_overrides.feature_alignment`.
+`execution_plan.stop_management` records whether stop guardrails widened, capped, or swapped the selected stop candidate to keep the stop width inside the configured ATR band.
+
+`artifacts/monitoring/latest.json` also includes local feature alignment diagnostics under `request.local_feature_overrides.feature_alignment`, source freshness under `request.local_feature_overrides.source_freshness`, and feature-coverage enforcement results under `request.local_feature_overrides.feature_coverage`.
 
 Notes:
 
 - If `artifacts/models/target_ranges/metadata.json` exists, `run_refresh_and_predict` auto-enables target-range inference for supported horizons.
 - The default config currently requests targets `0.25,1,4,8,12`, so live output includes a 15m horizon in addition to hourly horizons.
+- `configs/run_refresh_and_predict.default.yaml` is the promoted default runtime profile.
+- `configs/run_refresh_and_predict.shadow_simplified.yaml` remains the cadence/shadow wrapper profile and is still used by `scripts/run_cadence.sh` because it writes artifacts directly.
+- Live inference now resolves the best available versioned model artifact within a model family before loading it.
+
+Execution plan quick guide:
+
+- `bias_only_ready`: the execution layer found an acceptable setup, but the upstream model still abstained so the final `trade_action` remains `hold`.
+- `waiting_pullback`: bias and confluence are acceptable, but price is outside the preferred entry zone and the plan is waiting for a retest.
+- `rejected`: a hard guard blocked the setup; inspect `execution_plan.reason` before overriding it.
+- Common reasons are `bias_direction_conflict`, `stop_too_tight_near_invalidation`, `stop_too_wide`, `risk_reward_below_floor`, `low_execution_confluence`, and `upstream_model_hold`.
 
 Cadence entrypoint:
 
 ```bash
-./scripts/run_cadence.sh daily
-./scripts/run_cadence.sh weekly
-./scripts/run_cadence.sh monthly
+batch ./scripts/run_cadence.sh daily
+batch ./scripts/run_cadence.sh weekly
+batch ./scripts/run_cadence.sh monthly
 ```
 
 That wrapper resolves the latest trustworthy reliability run for daily predictions, runs the runtime reliability profile for weekly refreshes, and runs the full default reliability profile for monthly retraining before refreshing predictions.
@@ -102,14 +133,14 @@ That wrapper resolves the latest trustworthy reliability run for daily predictio
 
 Prediction configs:
 
-- `configs/run_refresh_and_predict.default.yaml`
-- `configs/run_refresh_and_predict.shadow_simplified.yaml`
+- `configs/run_refresh_and_predict.default.yaml` - promoted runtime policy with trade-decision, confluence, feature-coverage, adaptive-threshold, regime-model, target-range, and execution-policy blocks.
+- `configs/run_refresh_and_predict.shadow_simplified.yaml` - shadow/cadence profile that mirrors the promoted policy while writing artifacts by default.
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`
 
 Reliability configs:
 
-- `configs/reliability_workflow.default.yaml`
-- `configs/reliability_workflow.runtime.yaml`
+- `configs/reliability_workflow.default.yaml` - full monthly/default workflow with labeled-dataset rebuilds, overlap drift guard, trusted baseline pack generation, raw direction snapshots, and deployable-threshold fallback.
+- `configs/reliability_workflow.runtime.yaml` - lighter runtime workflow pinned to the current trusted snapshot lineage and shadow paper-live config.
 - `configs/reliability_workflow.midband_paper.yaml`
 
 Other configs currently present:
@@ -125,11 +156,18 @@ Current active data source is Binance spot klines.
 Active command used by refresh/prediction flow:
 
 ```bash
-python -m data.ingestors.binance_us_spot
+/workspaces/btc/.venv/bin/python -m data.ingestors.binance_us_spot
 ```
 
 ```bash
-python -m data.ingestors.binance_spot_klines
+/workspaces/btc/.venv/bin/python -m data.ingestors.binance_spot_klines
+```
+
+Chunked historical backfill helper added for local history refreshes:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.backfill_binance_us_spot \
+  --interval 1h --days 365
 ```
 
 ## 5. Feature Processing Scripts Available
@@ -141,7 +179,7 @@ The following processors exist in `data/processed/`:
 Example run:
 
 ```bash
-python -m data.processed.compute_technical_features
+/workspaces/btc/.venv/bin/python -m data.processed.compute_technical_features
 ```
 
 ## 6. Dataset Build and Training Entrypoints
@@ -192,33 +230,39 @@ Model training/search scripts currently present include:
 Reliability workflow:
 
 ```bash
-python -m src.scripts.run_reliability_workflow \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
   --config configs/reliability_workflow.runtime.yaml
 ```
 
 Alternative config:
 
 ```bash
-python -m src.scripts.run_reliability_workflow \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
   --config configs/reliability_workflow.default.yaml
 ```
 
 Midband paper-evaluation profile:
 
 ```bash
-python -m src.scripts.run_reliability_workflow \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
   --config configs/reliability_workflow.midband_paper.yaml
 ```
 
 Keep workflow running when promotion gate blocks promotion:
 
 ```bash
-python -m src.scripts.run_reliability_workflow \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
   --config configs/reliability_workflow.runtime.yaml \
   --continue-on-promotion-fail
 ```
 
 With `--continue-on-promotion-fail`, the workflow can keep running and still write downstream summary artifacts even when the promotion gate blocks promotion.
+
+Current workflow behavior to be aware of:
+
+- The default workflow now builds the canonical labeled dataset, overlap feature-drift guard, raw direction-feature snapshots, and trusted baseline pack manifests.
+- Joint threshold tuning can fall back to `artifacts/monitoring/calibrated_thresholds_last_deployable.json` when the latest candidate is rejected.
+- Runtime paper-live resolution is config-driven via `search.paper_live_config` and no longer assumes the same prediction config for every workflow profile.
 
 Cadence automation:
 
@@ -419,23 +463,39 @@ Use this sequence for a fresh, reliability-calibrated prediction snapshot.
 1. Run reliability workflow (runtime profile)
 
 ```bash
-python -m src.scripts.run_reliability_workflow \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
   --config configs/reliability_workflow.runtime.yaml \
   --continue-on-promotion-fail
 ```
 
-2. Resolve latest reliability run id
+2. Resolve the latest trustworthy reliability run id
 
 ```bash
-RUN_ID=$(ls -1 artifacts/reliability | sort | tail -n 1)
+RUN_ID=$(
+  /workspaces/btc/.venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+
+for run_dir in sorted((p for p in Path('artifacts/reliability').iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True):
+    edge_path = run_dir / 'summary' / 'edge_trustworthiness.json'
+    thresholds_path = run_dir / 'summary' / 'calibrated_thresholds.json'
+    platt_path = run_dir / 'summary' / 'platt_calibration.json'
+    if not edge_path.exists() or not thresholds_path.exists() or not platt_path.exists():
+        continue
+    payload = json.loads(edge_path.read_text())
+    if payload.get('edge_trustworthy'):
+        print(run_dir.name)
+        break
+PY
+)
 echo "$RUN_ID"
 ```
 
 3. Run refresh + predict with latest calibrated thresholds and Platt calibration
 
 ```bash
-python -m src.scripts.run_refresh_and_predict \
-  --config configs/run_refresh_and_predict.shadow_simplified.yaml \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.default.yaml \
   --targets 0.25,1,4,8,12 \
   --thresholds-json artifacts/reliability/${RUN_ID}/summary/calibrated_thresholds.json \
   --platt-calibration artifacts/reliability/${RUN_ID}/summary/platt_calibration.json \
@@ -455,8 +515,24 @@ Quick validation checks:
 - Horizon `timestamp` values match latest candle time.
 - `entry_price`, `stop_loss`, and `take_profit` are present for each horizon in `artifacts/predictions/latest.json`.
 - `request.local_feature_overrides.feature_alignment` in `artifacts/monitoring/latest.json` lists any unresolved imputed columns.
+- `request.local_feature_overrides.feature_coverage.ok` remains true before treating the output as trade-ready.
 - Reliability trust artifacts show whether the run is overlap-trustworthy before treating new thresholds as deployable.
 
 For unattended cadence execution and the exact daily/weekly/monthly command breakdown, see `docs/operations_runbook.md`.
+
+## 11. Troubleshooting / Usage Notes
+
+- `scripts/run_cadence.sh` must be invoked with the batch prefix in this workspace: `batch ./scripts/run_cadence.sh daily`.
+- Do not run `./scripts/run_cadence.sh daily` directly. Direct execution fails and is not the supported invocation for future agents or users.
+- Historical replay is available for hourly horizons with cached artifacts:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --dry-run --targets 1,4,8,12 \
+  --replay-offset-bars 24
+```
+
+- Replay mode currently supports hourly horizons only and will overwrite `artifacts/predictions/latest.json` with the replayed snapshot, so run a fresh live prediction afterward if you want to restore the latest live artifact.
 
 

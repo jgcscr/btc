@@ -11,9 +11,9 @@ This repo uses three operating cadences:
 Use the shell entrypoint from the repository root:
 
 ```bash
-./scripts/run_cadence.sh daily
-./scripts/run_cadence.sh weekly
-./scripts/run_cadence.sh monthly
+batch ./scripts/run_cadence.sh daily
+batch ./scripts/run_cadence.sh weekly
+batch ./scripts/run_cadence.sh monthly
 ```
 
 In CI or other environments without the local `.venv`, set `PYTHON_BIN` explicitly if needed:
@@ -62,7 +62,7 @@ python -m src.scripts.run_reliability_workflow \
   --config configs/reliability_workflow.runtime.yaml \
   --continue-on-promotion-fail
 
-./scripts/run_cadence.sh daily
+batch ./scripts/run_cadence.sh daily
 ```
 
 ### Monthly
@@ -74,8 +74,29 @@ python -m src.scripts.run_reliability_workflow \
   --config configs/reliability_workflow.default.yaml \
   --continue-on-promotion-fail
 
-./scripts/run_cadence.sh daily
+batch ./scripts/run_cadence.sh daily
 ```
+
+Direct execution of `./scripts/run_cadence.sh <cadence>` is not supported in this workspace. Use the `batch` prefix for all cadence invocations.
+
+## Reading `execution_plan`
+
+- `bias_only_ready` means the execution layer likes the structure, stop, and target layout, but the predictive model still returned `hold`.
+- `waiting_pullback` means the setup is aligned and tradable only on a retest into the preferred entry zone.
+- `rejected` means a hard guard failed; the most common reasons in recent replay checks were `bias_direction_conflict`, `stop_too_tight_near_invalidation`, and `stop_too_wide`.
+- Treat `upstream_model_hold` as informational rather than a structural failure; treat the stop- and RR-related reasons as execution-quality failures.
+- `execution_plan.stop_management` shows whether the execution layer expanded, capped, or replaced the selected stop to keep it inside the configured ATR guardrails.
+
+Replay workflow for cached hourly bars:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --dry-run --targets 1,4,8,12 \
+  --replay-offset-bars 24
+```
+
+Replay mode is hourly-only for now and overwrites the usual prediction artifact paths, so restore a live run afterward when you are finished reviewing the historical snapshot.
 
 ## GitHub Actions Schedule
 
