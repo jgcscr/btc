@@ -10,7 +10,7 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import joblib
 
@@ -49,6 +49,7 @@ from src.trading.direction_config import (
 from src.trading.ensembles import parse_weight_spec
 from src.trading.signals import (
     DEFAULT_RESIDUAL_STD,
+    MIN_RESIDUAL_STD,
     PreparedData,
     compute_signal_for_index,
     format_ts_iso,
@@ -98,6 +99,8 @@ CONFIDENCE_MIN_DEFAULT = 0.0
 POSITION_SIZE_FLOOR_DEFAULT = 0.0
 POSITION_SIZE_CAP_DEFAULT = 1.0
 MIN_DIRECTIONAL_RETURN_BUFFER = 0.001
+EXECUTION_POLICY_DEFAULT_LOOKBACK_BARS = 240
+EXECUTION_POLICY_DEFAULT_MIN_SAMPLES = 40
 
 BREAKOUT_VOL_NORMALIZER = 0.05
 BREAKOUT_RET_NORMALIZER = 0.002
@@ -164,6 +167,7 @@ CONFIG_ALLOWED_KEYS = {
     "intrabar_aggregation",
     "feature_coverage_policy",
     "confluence_policy",
+    "execution_policy",
 }
 # boolean config keys; converted with _bool_env
 CONFIG_BOOL_FIELDS = {
@@ -611,6 +615,50 @@ def _normalize_confluence_policy_block(value: Mapping[str, Any]) -> Dict[str, An
     return normalized
 
 
+def _normalize_execution_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("execution_policy config must be a mapping.")
+
+    numeric_keys = {
+        "immediate_entry_min_support_ratio",
+        "pullback_entry_min_support_ratio",
+        "immediate_entry_min_mid_ratio",
+        "pullback_entry_min_mid_ratio",
+        "high_execution_alignment_ratio",
+        "medium_execution_alignment_ratio",
+        "entry_zone_atr_mult",
+        "max_chase_atr_mult",
+        "structure_buffer_atr_mult",
+    }
+    integer_keys = {"session_lookback_bars", "swing_lookback_bars"}
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key == "enabled":
+            normalized[key] = bool(raw_value)
+        elif key in {"bias_horizons", "execution_horizons"}:
+            if not isinstance(raw_value, Sequence) or isinstance(raw_value, (str, bytes)):
+                raise ValueError(f"{key} in execution_policy must be a list/sequence")
+            normalized[key] = [_normalize_horizon_value(item) for item in raw_value]
+        elif key in numeric_keys:
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key in integer_keys:
+            normalized[key] = int(raw_value) if raw_value is not None else None
+        elif key == "require_bias_alignment":
+            normalized[key] = bool(raw_value)
+        elif key in {"minimum_rr_by_horizon", "time_stop_bars_by_horizon", "regime_templates"}:
+            if not isinstance(raw_value, Mapping):
+                raise ValueError(f"{key} in execution_policy must be a mapping")
+            normalized[key] = dict(raw_value)
+        elif key in {"partial_take_profit", "trailing_stop", "analytics", "no_trade_guards"}:
+            if not isinstance(raw_value, Mapping):
+                raise ValueError(f"{key} in execution_policy must be a mapping")
+            normalized[key] = dict(raw_value)
+        else:
+            print(f"Warning: Unknown execution_policy config key '{raw_key}' ignored.", file=sys.stderr)
+    return normalized
+
+
 def _normalize_config_value(name: str, value: Any) -> Any:
     if name == "targets":
         if value is None:
@@ -676,6 +724,8 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_feature_coverage_policy_block(value)
         if name == "confluence_policy" and value is not None:
             return _normalize_confluence_policy_block(value)
+        if name == "execution_policy" and value is not None:
+            return _normalize_execution_policy_block(value)
         return value
     raise ValueError(f"Unsupported config key: {name}")
 
@@ -910,6 +960,11 @@ def _build_stub_summary(
             "target_range_overrides": {
                 "stop_loss": None,
                 "take_profit": None,
+            },
+            "execution_plan": {
+                "enabled": False,
+                "status": "dry_run",
+                "reason": "dry_run",
             },
             "direction_only_fallback": {
                 "active": False,
@@ -1195,6 +1250,88 @@ def _resolve_confluence_policy(config: Mapping[str, Any] | None) -> Dict[str, An
     }
 
 
+def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    cfg = config or {}
+
+    def _normalize_float_map(raw: Any, *, minimum: float = 0.0) -> Dict[float, float]:
+        if not isinstance(raw, Mapping):
+            return {}
+        resolved: Dict[float, float] = {}
+        for key, value in raw.items():
+            horizon = _coerce_numeric_horizon(key)
+            if horizon is None:
+                continue
+            try:
+                resolved[horizon] = max(float(value), minimum)
+            except (TypeError, ValueError):
+                continue
+        return resolved
+
+    partial_cfg = cfg.get("partial_take_profit") if isinstance(cfg.get("partial_take_profit"), Mapping) else {}
+    trailing_cfg = cfg.get("trailing_stop") if isinstance(cfg.get("trailing_stop"), Mapping) else {}
+    analytics_cfg = cfg.get("analytics") if isinstance(cfg.get("analytics"), Mapping) else {}
+    guards_cfg = cfg.get("no_trade_guards") if isinstance(cfg.get("no_trade_guards"), Mapping) else {}
+    raw_regime_templates = cfg.get("regime_templates") if isinstance(cfg.get("regime_templates"), Mapping) else {}
+    regime_templates: Dict[str, Dict[str, float]] = {}
+    for regime_name, raw_template in raw_regime_templates.items():
+        if not isinstance(raw_template, Mapping):
+            continue
+        regime_templates[str(regime_name)] = {
+            "tp_multiplier": max(float(raw_template.get("tp_multiplier", 1.0) or 1.0), 0.1),
+            "time_stop_multiplier": max(float(raw_template.get("time_stop_multiplier", 1.0) or 1.0), 0.1),
+            "size_multiplier": max(float(raw_template.get("size_multiplier", 1.0) or 1.0), 0.0),
+        }
+
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "bias_horizons": sorted({_normalize_horizon_value(v) for v in (cfg.get("bias_horizons") or [4.0, 8.0, 12.0])}),
+        "execution_horizons": sorted({_normalize_horizon_value(v) for v in (cfg.get("execution_horizons") or [0.25, 1.0])}),
+        "require_bias_alignment": bool(cfg.get("require_bias_alignment", True)),
+        "immediate_entry_min_support_ratio": max(min(float(cfg.get("immediate_entry_min_support_ratio") or 0.8), 1.0), 0.0),
+        "pullback_entry_min_support_ratio": max(min(float(cfg.get("pullback_entry_min_support_ratio") or 0.6), 1.0), 0.0),
+        "immediate_entry_min_mid_ratio": max(min(float(cfg.get("immediate_entry_min_mid_ratio") or 0.67), 1.0), 0.0),
+        "pullback_entry_min_mid_ratio": max(min(float(cfg.get("pullback_entry_min_mid_ratio") or 0.5), 1.0), 0.0),
+        "high_execution_alignment_ratio": max(min(float(cfg.get("high_execution_alignment_ratio") or 1.0), 1.0), 0.0),
+        "medium_execution_alignment_ratio": max(min(float(cfg.get("medium_execution_alignment_ratio") or 0.5), 1.0), 0.0),
+        "entry_zone_atr_mult": max(float(cfg.get("entry_zone_atr_mult") or 0.25), 0.01),
+        "max_chase_atr_mult": max(float(cfg.get("max_chase_atr_mult") or 0.35), 0.0),
+        "session_lookback_bars": max(int(cfg.get("session_lookback_bars") or 8), 2),
+        "swing_lookback_bars": max(int(cfg.get("swing_lookback_bars") or 6), 2),
+        "structure_buffer_atr_mult": max(float(cfg.get("structure_buffer_atr_mult") or 0.2), 0.0),
+        "minimum_rr_by_horizon": _normalize_float_map(cfg.get("minimum_rr_by_horizon"), minimum=0.0),
+        "time_stop_bars_by_horizon": {
+            horizon: max(int(round(value)), 1)
+            for horizon, value in _normalize_float_map(cfg.get("time_stop_bars_by_horizon"), minimum=1.0).items()
+        },
+        "partial_take_profit": {
+            "enabled": bool(partial_cfg.get("enabled", False)),
+            "tp1_r_multiple": max(float(partial_cfg.get("tp1_r_multiple") or 1.0), 0.1),
+            "tp1_size_fraction": max(min(float(partial_cfg.get("tp1_size_fraction") or 0.5), 1.0), 0.0),
+            "move_stop_to_break_even": bool(partial_cfg.get("move_stop_to_break_even", True)),
+        },
+        "trailing_stop": {
+            "enabled": bool(trailing_cfg.get("enabled", False)),
+            "activation_r_multiple": max(float(trailing_cfg.get("activation_r_multiple") or 1.0), 0.1),
+            "trail_buffer_atr_mult": max(float(trailing_cfg.get("trail_buffer_atr_mult") or 0.75), 0.0),
+        },
+        "analytics": {
+            "enabled": bool(analytics_cfg.get("enabled", False)),
+            "lookback_bars": max(int(analytics_cfg.get("lookback_bars") or EXECUTION_POLICY_DEFAULT_LOOKBACK_BARS), 10),
+            "mae_quantile": max(min(float(analytics_cfg.get("mae_quantile") or 0.75), 0.99), 0.5),
+            "mfe_quantile": max(min(float(analytics_cfg.get("mfe_quantile") or 0.6), 0.99), 0.5),
+            "min_samples": max(int(analytics_cfg.get("min_samples") or EXECUTION_POLICY_DEFAULT_MIN_SAMPLES), 10),
+        },
+        "no_trade_guards": {
+            "enabled": bool(guards_cfg.get("enabled", False)),
+            "min_stop_distance_atr_mult": max(float(guards_cfg.get("min_stop_distance_atr_mult") or 0.35), 0.0),
+            "max_stop_distance_atr_mult": max(float(guards_cfg.get("max_stop_distance_atr_mult") or 3.0), 0.0),
+            "max_entry_deviation_atr_mult": max(float(guards_cfg.get("max_entry_deviation_atr_mult") or 1.25), 0.0),
+            "require_favorable_entry_zone": bool(guards_cfg.get("require_favorable_entry_zone", True)),
+        },
+        "regime_templates": regime_templates,
+    }
+
+
 def _evaluate_feature_coverage(metadata: Mapping[str, Any], policy: Mapping[str, Any]) -> Dict[str, Any]:
     feature_alignment = metadata.get("feature_alignment", {}) if isinstance(metadata, Mapping) else {}
     source_freshness = metadata.get("source_freshness", {}) if isinstance(metadata, Mapping) else {}
@@ -1354,6 +1491,655 @@ def _apply_confluence_policy(
             if isinstance(trade_decision, dict):
                 trade_decision["confluence_gate_triggered"] = True
                 trade_decision["confluence_gate_reasons"] = reasons
+    return summary
+
+
+def _lookup_horizon_value(mapping: Mapping[float, float], horizon: float, default: float) -> float:
+    numeric_horizon = _normalize_horizon_value(horizon)
+    if numeric_horizon in mapping:
+        return float(mapping[numeric_horizon])
+    for key, value in mapping.items():
+        if abs(float(key) - numeric_horizon) <= 1e-6:
+            return float(value)
+    return float(default)
+
+
+def _execution_side(entry: Mapping[str, Any]) -> str:
+    return "long" if _direction_vote(entry) == "up" else "short"
+
+
+def _compute_atr_like_price_distance(
+    frame: pd.DataFrame,
+    *,
+    index: int,
+    fallback_close: float,
+    fallback_return_std: float,
+    window: int = 14,
+) -> float:
+    start = max(0, index - max(window, 2) + 1)
+    history = frame.iloc[start : index + 1].copy()
+    if {"high", "low", "close"}.issubset(history.columns):
+        high = pd.to_numeric(history["high"], errors="coerce")
+        low = pd.to_numeric(history["low"], errors="coerce")
+        close = pd.to_numeric(history["close"], errors="coerce")
+        valid_close = close.replace([np.inf, -np.inf], np.nan).dropna()
+        if not valid_close.empty:
+            anchor = float(valid_close.tail(window).median())
+            if anchor > 0.0 and fallback_close > 0.0:
+                deviation = abs(anchor / fallback_close - 1.0)
+                if deviation > 0.5:
+                    return max(float(fallback_close) * max(abs(float(fallback_return_std)), MIN_RESIDUAL_STD), 1e-8)
+            elif anchor <= 0.0 and fallback_close > 0.0:
+                return max(float(fallback_close) * max(abs(float(fallback_return_std)), MIN_RESIDUAL_STD), 1e-8)
+        prev_close = close.shift(1)
+        true_range = pd.concat(
+            [
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1, skipna=True)
+        atr = pd.to_numeric(true_range, errors="coerce").tail(window).mean()
+        if pd.notna(atr) and float(atr) > 0.0:
+            return float(atr)
+    return max(float(fallback_close) * max(abs(float(fallback_return_std)), MIN_RESIDUAL_STD), 1e-8)
+
+
+def _compute_recent_structure(
+    frame: pd.DataFrame,
+    *,
+    index: int,
+    session_lookback_bars: int,
+    swing_lookback_bars: int,
+    atr_distance: float,
+    fallback_price: float,
+) -> Dict[str, float]:
+    start_session = max(0, index - max(session_lookback_bars, 2) + 1)
+    start_swing = max(0, index - max(swing_lookback_bars, 2) + 1)
+    session_frame = frame.iloc[start_session : index + 1].copy()
+    swing_frame = frame.iloc[start_swing : index + 1].copy()
+
+    def _safe_series(df: pd.DataFrame, column: str, default: float) -> pd.Series:
+        if column not in df.columns:
+            return pd.Series([default], dtype=float)
+        series = pd.to_numeric(df[column], errors="coerce")
+        series = series.dropna()
+        if series.empty:
+            return pd.Series([default], dtype=float)
+        return series.astype(float)
+
+    high_session = float(_safe_series(session_frame, "high", fallback_price).max())
+    low_session = float(_safe_series(session_frame, "low", fallback_price).min())
+    swing_high = float(_safe_series(swing_frame, "high", fallback_price).max())
+    swing_low = float(_safe_series(swing_frame, "low", fallback_price).min())
+    close_series = _safe_series(session_frame, "close", fallback_price)
+    volume_series = _safe_series(session_frame, "volume", 0.0)
+    if float(volume_series.sum()) > 0.0 and len(close_series) == len(volume_series):
+        vwap = float((close_series * volume_series).sum() / volume_series.sum())
+    else:
+        vwap = float(close_series.iloc[-1]) if not close_series.empty else float(fallback_price)
+
+    if fallback_price > 0.0:
+        structure_values = (high_session, low_session, swing_high, swing_low, vwap)
+        invalid_structure = any(value <= 0.0 for value in structure_values)
+        if not invalid_structure:
+            invalid_structure = any(abs(value / fallback_price - 1.0) > 0.5 for value in structure_values)
+        if invalid_structure:
+            high_session = float(fallback_price + atr_distance)
+            low_session = float(max(fallback_price - atr_distance, 1e-8))
+            swing_high = float(fallback_price + atr_distance * 1.5)
+            swing_low = float(max(fallback_price - atr_distance * 1.5, 1e-8))
+            vwap = float(fallback_price)
+
+    return {
+        "session_high": high_session,
+        "session_low": low_session,
+        "swing_high": swing_high,
+        "swing_low": swing_low,
+        "vwap": vwap,
+        "atr_distance": float(max(atr_distance, 1e-8)),
+    }
+
+
+def _compute_excursion_priors(
+    frame: pd.DataFrame,
+    *,
+    index: int,
+    horizon_steps: int,
+    side: str,
+    lookback_bars: int,
+    min_samples: int,
+    mae_quantile: float,
+    mfe_quantile: float,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "available": False,
+        "sample_count": 0,
+        "mae_distance": None,
+        "mfe_distance": None,
+        "peak_step_p50": None,
+        "adverse_step_p50": None,
+    }
+    if horizon_steps <= 0 or index <= horizon_steps:
+        return result
+    if not {"high", "low", "close"}.issubset(frame.columns):
+        return result
+
+    high = pd.to_numeric(frame["high"], errors="coerce").to_numpy(dtype=float)
+    low = pd.to_numeric(frame["low"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)
+    end = max(index - horizon_steps, 0)
+    start = max(0, end - max(lookback_bars, min_samples))
+    maes: List[float] = []
+    mfes: List[float] = []
+    peak_steps: List[int] = []
+    adverse_steps: List[int] = []
+    for cursor in range(start, end):
+        entry = close[cursor]
+        if not math.isfinite(entry) or entry <= 0.0:
+            continue
+        future_high = high[cursor + 1 : cursor + 1 + horizon_steps]
+        future_low = low[cursor + 1 : cursor + 1 + horizon_steps]
+        if future_high.size == 0 or future_low.size == 0:
+            continue
+        if side == "long":
+            favorable_idx = int(np.nanargmax(future_high))
+            adverse_idx = int(np.nanargmin(future_low))
+            favorable = max(float(future_high[favorable_idx]) / entry - 1.0, 0.0)
+            adverse = max(1.0 - float(future_low[adverse_idx]) / entry, 0.0)
+        else:
+            favorable_idx = int(np.nanargmin(future_low))
+            adverse_idx = int(np.nanargmax(future_high))
+            favorable = max(entry / float(future_low[favorable_idx]) - 1.0, 0.0)
+            adverse = max(float(future_high[adverse_idx]) / entry - 1.0, 0.0)
+        if not math.isfinite(favorable) or not math.isfinite(adverse):
+            continue
+        mfes.append(favorable)
+        maes.append(adverse)
+        peak_steps.append(favorable_idx + 1)
+        adverse_steps.append(adverse_idx + 1)
+
+    if len(maes) < min_samples or len(mfes) < min_samples:
+        result["sample_count"] = len(maes)
+        return result
+
+    result.update(
+        {
+            "available": True,
+            "sample_count": len(maes),
+            "mae_distance": float(np.quantile(np.asarray(maes, dtype=float), mae_quantile)),
+            "mfe_distance": float(np.quantile(np.asarray(mfes, dtype=float), mfe_quantile)),
+            "peak_step_p50": int(round(float(np.quantile(np.asarray(peak_steps, dtype=float), 0.5)))),
+            "adverse_step_p50": int(round(float(np.quantile(np.asarray(adverse_steps, dtype=float), 0.5)))),
+        }
+    )
+    return result
+
+
+def _summarize_bias_context(
+    summary: Mapping[str, Mapping[str, Any]],
+    policy: Mapping[str, Any],
+) -> Dict[str, Any]:
+    bias_horizons = set(policy.get("bias_horizons", []))
+    execution_horizons = set(policy.get("execution_horizons", []))
+    bias_votes: List[str] = []
+    execution_entries: List[tuple[str, Mapping[str, Any]]] = []
+    for label, entry in summary.items():
+        horizon = _coerce_result_horizon(entry.get("horizon_hours"))
+        if horizon is None:
+            continue
+        if horizon in bias_horizons:
+            bias_votes.append(_direction_vote(entry))
+        if horizon in execution_horizons:
+            execution_entries.append((label, entry))
+    up_count = sum(1 for vote in bias_votes if vote == "up")
+    down_count = sum(1 for vote in bias_votes if vote == "down")
+    if up_count > down_count:
+        bias_direction = "up"
+        bias_alignment_ratio = up_count / max(len(bias_votes), 1)
+    elif down_count > up_count:
+        bias_direction = "down"
+        bias_alignment_ratio = down_count / max(len(bias_votes), 1)
+    else:
+        bias_direction = "neutral"
+        bias_alignment_ratio = 0.5 if bias_votes else 0.0
+    return {
+        "bias_direction": bias_direction,
+        "bias_alignment_ratio": float(bias_alignment_ratio),
+        "execution_entries": execution_entries,
+    }
+
+
+def _execution_alignment_ratio(
+    execution_entries: Sequence[tuple[str, Mapping[str, Any]]],
+    *,
+    direction: str,
+) -> float:
+    if not execution_entries:
+        return 0.0
+    aligned = sum(1 for _label, entry in execution_entries if _direction_vote(entry) == direction)
+    return aligned / len(execution_entries)
+
+
+def _classify_execution_tier(
+    entry: Mapping[str, Any],
+    *,
+    bias_direction: str,
+    execution_alignment_ratio: float,
+    policy: Mapping[str, Any],
+) -> str:
+    direction = _direction_vote(entry)
+    support_ratio = float(entry.get("confluence_support_ratio") or 0.0)
+    mid_ratio = float(entry.get("confluence_mid_term_ratio") or 0.0)
+    if bias_direction != "neutral" and direction != bias_direction:
+        return "low"
+    if (
+        support_ratio >= float(policy.get("immediate_entry_min_support_ratio", 0.8))
+        and mid_ratio >= float(policy.get("immediate_entry_min_mid_ratio", 0.67))
+        and execution_alignment_ratio >= float(policy.get("high_execution_alignment_ratio", 1.0))
+    ):
+        return "high"
+    if (
+        support_ratio >= float(policy.get("pullback_entry_min_support_ratio", 0.6))
+        and mid_ratio >= float(policy.get("pullback_entry_min_mid_ratio", 0.5))
+        and execution_alignment_ratio >= float(policy.get("medium_execution_alignment_ratio", 0.5))
+    ):
+        return "medium"
+    return "low"
+
+
+def _build_entry_zone(
+    *,
+    market_price: float,
+    side: str,
+    structure: Mapping[str, float],
+    policy: Mapping[str, Any],
+) -> Dict[str, float | bool | str]:
+    atr_distance = float(structure.get("atr_distance", 0.0))
+    entry_zone_width = atr_distance * float(policy.get("entry_zone_atr_mult", 0.25))
+    session_high = float(structure.get("session_high", market_price))
+    session_low = float(structure.get("session_low", market_price))
+    range_size = max(session_high - session_low, atr_distance)
+    vwap = float(structure.get("vwap", market_price))
+    if side == "long":
+        preferred = min(market_price, max(vwap, session_low + range_size * 0.382))
+    else:
+        preferred = max(market_price, min(vwap, session_high - range_size * 0.382))
+    zone_low = preferred - entry_zone_width
+    zone_high = preferred + entry_zone_width
+    in_zone = zone_low <= market_price <= zone_high
+    return {
+        "preferred_entry_price": float(preferred),
+        "entry_zone_low": float(zone_low),
+        "entry_zone_high": float(zone_high),
+        "entry_ready": bool(in_zone),
+        "vwap_reference": vwap,
+    }
+
+
+def _resolve_stop_with_guardrails(
+    *,
+    side: str,
+    planned_entry: float,
+    existing_stop: float,
+    structure_stop: float,
+    analytic_stop: float | None,
+    atr_distance: float,
+    guards_cfg: Mapping[str, Any],
+) -> Dict[str, Any]:
+    def _valid_stop(stop_value: float | None) -> bool:
+        if stop_value is None or not math.isfinite(float(stop_value)):
+            return False
+        numeric_stop = float(stop_value)
+        if side == "long":
+            return numeric_stop < planned_entry
+        return numeric_stop > planned_entry
+
+    def _distance(stop_value: float) -> float:
+        return planned_entry - stop_value if side == "long" else stop_value - planned_entry
+
+    candidates: List[Dict[str, Any]] = []
+    for source_name, stop_value in (
+        ("existing", existing_stop),
+        ("structure", structure_stop),
+        ("analytics", analytic_stop),
+    ):
+        if not _valid_stop(stop_value):
+            continue
+        numeric_stop = float(stop_value)
+        candidates.append(
+            {
+                "source": source_name,
+                "stop_loss": numeric_stop,
+                "risk_unit": _distance(numeric_stop),
+            }
+        )
+
+    if not candidates:
+        fallback_risk = max(atr_distance * 0.5, 1e-8)
+        fallback_stop = planned_entry - fallback_risk if side == "long" else planned_entry + fallback_risk
+        return {
+            "stop_loss": fallback_stop,
+            "risk_unit": fallback_risk,
+            "source": "atr_fallback",
+            "adjustment": {
+                "applied": True,
+                "type": "atr_fallback",
+                "reason": "no_valid_stop_candidates",
+                "risk_unit_before": None,
+                "risk_unit_after": fallback_risk,
+            },
+        }
+
+    selected = max(candidates, key=lambda item: float(item["risk_unit"]))
+    selected_stop = float(selected["stop_loss"])
+    risk_unit = float(selected["risk_unit"])
+    adjustment: Dict[str, Any] | None = None
+
+    if guards_cfg.get("enabled"):
+        min_stop = float(guards_cfg.get("min_stop_distance_atr_mult", 0.35)) * atr_distance
+        max_stop = float(guards_cfg.get("max_stop_distance_atr_mult", 3.0)) * atr_distance
+        if min_stop > 0.0 and risk_unit < min_stop:
+            adjusted_stop = planned_entry - min_stop if side == "long" else planned_entry + min_stop
+            adjustment = {
+                "applied": True,
+                "type": "expanded_to_min_stop_distance",
+                "reason": "stop_too_tight_near_invalidation",
+                "from_source": str(selected["source"]),
+                "risk_unit_before": risk_unit,
+                "risk_unit_after": min_stop,
+            }
+            selected_stop = float(adjusted_stop)
+            risk_unit = float(min_stop)
+        elif max_stop > 0.0 and risk_unit > max_stop:
+            within_band = [item for item in candidates if float(item["risk_unit"]) <= max_stop]
+            if within_band:
+                replacement = max(within_band, key=lambda item: float(item["risk_unit"]))
+                adjustment = {
+                    "applied": True,
+                    "type": "replaced_with_guardrail_candidate",
+                    "reason": "stop_too_wide",
+                    "from_source": str(selected["source"]),
+                    "to_source": str(replacement["source"]),
+                    "risk_unit_before": risk_unit,
+                    "risk_unit_after": float(replacement["risk_unit"]),
+                }
+                selected = replacement
+                selected_stop = float(replacement["stop_loss"])
+                risk_unit = float(replacement["risk_unit"])
+            else:
+                adjusted_stop = planned_entry - max_stop if side == "long" else planned_entry + max_stop
+                adjustment = {
+                    "applied": True,
+                    "type": "capped_to_max_stop_distance",
+                    "reason": "stop_too_wide",
+                    "from_source": str(selected["source"]),
+                    "risk_unit_before": risk_unit,
+                    "risk_unit_after": max_stop,
+                }
+                selected_stop = float(adjusted_stop)
+                risk_unit = float(max_stop)
+
+    return {
+        "stop_loss": float(selected_stop),
+        "risk_unit": float(max(risk_unit, 1e-8)),
+        "source": str(selected.get("source", "unknown")),
+        "adjustment": adjustment,
+    }
+
+
+def _apply_execution_policy(
+    summary: Dict[str, Dict[str, Any]],
+    contexts: Mapping[str, Dict[str, Any]],
+    policy: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    if not summary:
+        return summary
+
+    bias_context = _summarize_bias_context(summary, policy)
+    bias_direction = str(bias_context.get("bias_direction", "neutral"))
+    bias_alignment_ratio = float(bias_context.get("bias_alignment_ratio", 0.0))
+    execution_entries = bias_context.get("execution_entries", [])
+
+    for label, entry in summary.items():
+        market_price = float(entry.get("close", entry.get("entry_price", 0.0)) or 0.0)
+        entry["market_price"] = market_price
+        side = _execution_side(entry)
+        direction = _direction_vote(entry)
+        upstream_hold = str(entry.get("trade_action", "hold")) == "hold"
+        execution_alignment_ratio = _execution_alignment_ratio(execution_entries, direction=direction)
+        tier = _classify_execution_tier(
+            entry,
+            bias_direction=bias_direction,
+            execution_alignment_ratio=execution_alignment_ratio,
+            policy=policy,
+        )
+        plan: Dict[str, Any] = {
+            "enabled": bool(policy.get("enabled", False)),
+            "bias_direction": bias_direction,
+            "bias_alignment_ratio": bias_alignment_ratio,
+            "execution_alignment_ratio": float(execution_alignment_ratio),
+            "confluence_tier": tier,
+            "status": "ready",
+            "reason": "pass",
+            "side": side,
+            "entry_mode": "disabled",
+            "pending_trade_action": side,
+            "partial_take_profit": None,
+            "time_stop": None,
+            "trailing_stop": None,
+            "analytics": {"available": False},
+            "structure": None,
+            "stop_management": None,
+        }
+        if not bool(policy.get("enabled", False)):
+            entry["execution_plan"] = plan
+            continue
+
+        if bool(policy.get("require_bias_alignment", True)) and bias_direction != "neutral" and direction != bias_direction:
+            plan["status"] = "rejected"
+            plan["reason"] = "bias_direction_conflict"
+            entry["execution_plan"] = plan
+            continue
+
+        context = contexts.get(label)
+        if not context:
+            plan["status"] = "rejected"
+            plan["reason"] = "missing_execution_context"
+            entry["trade_action"] = "hold"
+            entry["signal_ensemble"] = 0
+            entry["execution_plan"] = plan
+            continue
+
+        prepared = context["prepared"]
+        index = int(context["index"])
+        horizon = float(context["horizon"])
+        residual_std = float(context["residual_std"])
+        regime_state = str(entry.get("regime_state", REGIME_NEUTRAL))
+        regime_template = (policy.get("regime_templates") or {}).get(regime_state, {})
+        horizon_steps = max(int(round(horizon)), 1)
+        atr_distance = _compute_atr_like_price_distance(
+            prepared.df_all,
+            index=index,
+            fallback_close=market_price,
+            fallback_return_std=residual_std,
+        )
+        structure = _compute_recent_structure(
+            prepared.df_all,
+            index=index,
+            session_lookback_bars=int(policy.get("session_lookback_bars", 8)),
+            swing_lookback_bars=int(policy.get("swing_lookback_bars", 6)),
+            atr_distance=atr_distance,
+            fallback_price=market_price,
+        )
+        plan["structure"] = structure
+        entry_zone = _build_entry_zone(
+            market_price=market_price,
+            side=side,
+            structure=structure,
+            policy=policy,
+        )
+        preferred_entry = float(entry_zone["preferred_entry_price"])
+        plan.update(entry_zone)
+
+        max_chase = float(policy.get("max_chase_atr_mult", 0.35)) * atr_distance
+        market_deviation = abs(market_price - preferred_entry)
+        if tier == "high" and (bool(entry_zone["entry_ready"]) or market_deviation <= max_chase):
+            entry_mode = "immediate"
+            planned_entry = market_price
+        elif tier in {"high", "medium"}:
+            entry_mode = "pullback"
+            planned_entry = preferred_entry
+        else:
+            entry_mode = "blocked"
+            planned_entry = preferred_entry
+        plan["entry_mode"] = entry_mode
+
+        analytics_cfg = policy.get("analytics", {}) if isinstance(policy.get("analytics"), Mapping) else {}
+        analytics_payload = {"available": False}
+        if analytics_cfg.get("enabled"):
+            analytics_payload = _compute_excursion_priors(
+                prepared.df_all,
+                index=index,
+                horizon_steps=horizon_steps,
+                side=side,
+                lookback_bars=int(analytics_cfg.get("lookback_bars", EXECUTION_POLICY_DEFAULT_LOOKBACK_BARS)),
+                min_samples=int(analytics_cfg.get("min_samples", EXECUTION_POLICY_DEFAULT_MIN_SAMPLES)),
+                mae_quantile=float(analytics_cfg.get("mae_quantile", 0.75)),
+                mfe_quantile=float(analytics_cfg.get("mfe_quantile", 0.6)),
+            )
+        plan["analytics"] = analytics_payload
+
+        existing_stop = float(entry.get("stop_loss", planned_entry))
+        existing_take = float(entry.get("take_profit", planned_entry))
+        structure_buffer = atr_distance * float(policy.get("structure_buffer_atr_mult", 0.2))
+        if side == "long":
+            structure_stop = min(float(structure["session_low"]), float(structure["swing_low"])) - structure_buffer
+            analytic_stop = planned_entry * (1.0 - float(analytics_payload.get("mae_distance") or 0.0))
+        else:
+            structure_stop = max(float(structure["session_high"]), float(structure["swing_high"])) + structure_buffer
+            analytic_stop = planned_entry * (1.0 + float(analytics_payload.get("mae_distance") or 0.0))
+        analytic_stop_value = analytic_stop if analytics_payload.get("available") else None
+
+        guards_cfg = policy.get("no_trade_guards", {}) if isinstance(policy.get("no_trade_guards"), Mapping) else {}
+        stop_resolution = _resolve_stop_with_guardrails(
+            side=side,
+            planned_entry=planned_entry,
+            existing_stop=existing_stop,
+            structure_stop=structure_stop,
+            analytic_stop=analytic_stop_value,
+            atr_distance=atr_distance,
+            guards_cfg=guards_cfg,
+        )
+        selected_stop = float(stop_resolution["stop_loss"])
+        risk_unit = float(stop_resolution["risk_unit"])
+        plan["stop_management"] = {
+            "source": stop_resolution.get("source"),
+            "adjustment": stop_resolution.get("adjustment"),
+        }
+
+        if guards_cfg.get("enabled"):
+            max_entry_dev = float(guards_cfg.get("max_entry_deviation_atr_mult", 1.25)) * atr_distance
+            if bool(guards_cfg.get("require_favorable_entry_zone", True)) and market_deviation > max_entry_dev and entry_mode == "immediate":
+                plan["status"] = "rejected"
+                plan["reason"] = "entry_too_extended"
+
+        rr_floor = _lookup_horizon_value(policy.get("minimum_rr_by_horizon", {}), horizon, 1.0)
+        rr_floor *= float(regime_template.get("tp_multiplier", 1.0) or 1.0)
+        existing_reward = abs(existing_take - planned_entry)
+        projected_high = _finite_float_or_none(entry.get("projected_high"))
+        projected_low = _finite_float_or_none(entry.get("projected_low"))
+        projection_reward = 0.0
+        if side == "long" and projected_high is not None:
+            projection_reward = max(projected_high - planned_entry, 0.0)
+        elif side == "short" and projected_low is not None:
+            projection_reward = max(planned_entry - projected_low, 0.0)
+        analytic_mfe_reward = planned_entry * float(analytics_payload.get("mfe_distance") or 0.0)
+        min_reward = rr_floor * risk_unit
+        if analytics_payload.get("available") and analytic_mfe_reward > 0.0 and analytic_mfe_reward < min_reward:
+            plan["status"] = "rejected"
+            plan["reason"] = "insufficient_mfe_headroom"
+        final_reward = max(existing_reward, projection_reward, min_reward)
+        if side == "long":
+            selected_take = planned_entry + final_reward
+        else:
+            selected_take = planned_entry - final_reward
+        risk_reward_ratio = final_reward / max(risk_unit, 1e-8)
+        if risk_reward_ratio < rr_floor:
+            plan["status"] = "rejected"
+            plan["reason"] = "risk_reward_below_floor"
+
+        partial_cfg = policy.get("partial_take_profit", {}) if isinstance(policy.get("partial_take_profit"), Mapping) else {}
+        partial_take_profit = None
+        if partial_cfg.get("enabled"):
+            tp1_distance = risk_unit * float(partial_cfg.get("tp1_r_multiple", 1.0))
+            tp1_price = planned_entry + tp1_distance if side == "long" else planned_entry - tp1_distance
+            partial_take_profit = {
+                "enabled": True,
+                "tp1_price": tp1_price,
+                "tp1_size_fraction": float(partial_cfg.get("tp1_size_fraction", 0.5)),
+                "tp2_price": selected_take,
+                "move_stop_to_break_even": bool(partial_cfg.get("move_stop_to_break_even", True)),
+            }
+
+        trailing_cfg = policy.get("trailing_stop", {}) if isinstance(policy.get("trailing_stop"), Mapping) else {}
+        trailing_stop = None
+        if trailing_cfg.get("enabled"):
+            activation_distance = risk_unit * float(trailing_cfg.get("activation_r_multiple", 1.0))
+            trailing_stop = {
+                "enabled": True,
+                "activation_price": planned_entry + activation_distance if side == "long" else planned_entry - activation_distance,
+                "trail_buffer": atr_distance * float(trailing_cfg.get("trail_buffer_atr_mult", 0.75)),
+            }
+
+        time_stop_map = policy.get("time_stop_bars_by_horizon", {}) if isinstance(policy.get("time_stop_bars_by_horizon"), Mapping) else {}
+        base_time_stop = max(int(round(_lookup_horizon_value(time_stop_map, horizon, max(horizon_steps, 1)))), 1)
+        time_stop_mult = float(regime_template.get("time_stop_multiplier", 1.0) or 1.0)
+        recommended_time_stop = max(int(round(base_time_stop * time_stop_mult)), 1)
+        if analytics_payload.get("available") and analytics_payload.get("peak_step_p50"):
+            recommended_time_stop = min(recommended_time_stop, max(int(analytics_payload["peak_step_p50"] * 1.25), 1))
+        time_stop_payload = {
+            "enabled": True,
+            "bars": recommended_time_stop,
+            "reason": "stagnation_exit",
+        }
+
+        if plan["status"] == "ready" and entry_mode == "pullback":
+            plan["status"] = "waiting_pullback"
+            plan["reason"] = "await_pullback_entry_zone"
+        elif plan["status"] == "ready" and entry_mode == "blocked":
+            plan["status"] = "rejected"
+            plan["reason"] = "low_execution_confluence"
+
+        position_size = float(entry.get("position_size", 0.0))
+        position_size *= float(regime_template.get("size_multiplier", 1.0) or 1.0)
+        if tier == "medium":
+            position_size *= 0.85
+        elif tier == "low":
+            position_size = 0.0
+
+        plan["partial_take_profit"] = partial_take_profit
+        plan["time_stop"] = time_stop_payload
+        plan["trailing_stop"] = trailing_stop
+
+        entry["entry_price"] = float(planned_entry)
+        entry["stop_loss"] = float(selected_stop)
+        entry["take_profit"] = float(selected_take)
+        entry["risk_reward_ratio"] = float(risk_reward_ratio)
+        entry["position_size"] = float(max(position_size, 0.0))
+        entry["execution_plan"] = plan
+
+        if upstream_hold and plan["status"] == "ready":
+            plan["status"] = "bias_only_ready"
+            plan["reason"] = "upstream_model_hold"
+            entry["trade_action"] = "hold"
+            entry["signal_ensemble"] = 0
+        elif plan["status"] != "ready":
+            entry["trade_action"] = "hold"
+            entry["signal_ensemble"] = 0
+        else:
+            entry["trade_action"] = side
     return summary
 
 
@@ -3247,6 +4033,7 @@ def run_predictions(
     regime_model_weights: Mapping[str, Any] | None = None,
     regime_model_dirs: Mapping[str, Any] | None = None,
     confluence_policy: Mapping[str, Any] | None = None,
+    execution_policy: Mapping[str, Any] | None = None,
     latest_close: float | None = None,
     confidence_min: float = CONFIDENCE_MIN_DEFAULT,
     position_size_floor: float = POSITION_SIZE_FLOOR_DEFAULT,
@@ -3266,6 +4053,7 @@ def run_predictions(
     regime_weight_policy = _resolve_regime_model_weights_policy(regime_model_weights)
     regime_model_dirs_policy = _resolve_regime_model_dirs_policy(regime_model_dirs)
     confluence_policy_resolved = _resolve_confluence_policy(confluence_policy)
+    execution_policy_resolved = _resolve_execution_policy(execution_policy)
     confidence_min = max(0.0, min(1.0, float(confidence_min)))
     position_size_floor = max(0.0, float(position_size_floor))
     position_size_cap = max(position_size_floor, float(position_size_cap))
@@ -3373,6 +4161,7 @@ def run_predictions(
                 residual_std_by_horizon[horizon] = DEFAULT_RESIDUAL_STD
 
     summary: Dict[str, Dict[str, float | str | int]] = {}
+    execution_contexts: Dict[str, Dict[str, Any]] = {}
     pending_trend_ts: Optional[str] = None
     pending_direction_fallback_ts: Optional[str] = None
     for horizon in normalized_targets:
@@ -3700,6 +4489,12 @@ def run_predictions(
             }
 
         summary[label] = result
+        execution_contexts[label] = {
+            "prepared": prepared,
+            "index": index,
+            "horizon": horizon,
+            "residual_std": residual_std,
+        }
     if trend_payload and pending_trend_ts:
         _write_trend_ignition_state(pending_trend_ts)
     if direction_fallback_policy and pending_direction_fallback_ts:
@@ -3707,6 +4502,9 @@ def run_predictions(
 
     if confluence_policy_resolved.get("enabled"):
         summary = _apply_confluence_policy(summary, confluence_policy_resolved)
+
+    if execution_policy_resolved.get("enabled"):
+        summary = _apply_execution_policy(summary, execution_contexts, execution_policy_resolved)
 
     if not summary:
         if offline:
@@ -3960,6 +4758,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Skip network-dependent steps and reuse cached datasets/models for smoke testing.",
     )
     parser.add_argument(
+        "--replay-offset-bars",
+        type=int,
+        default=0,
+        help=(
+            "Replay cached hourly predictions from N bars back using the prepared dataset instead of the latest bar. "
+            "Intended for hourly horizons such as 1,4,8,12."
+        ),
+    )
+    parser.add_argument(
         "--spot-provider",
         choices=("binanceus",),
         default="binanceus",
@@ -4127,6 +4934,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    if int(getattr(args, "replay_offset_bars", 0) or 0) < 0:
+        print("Error: --replay-offset-bars must be >= 0.", file=sys.stderr)
+        sys.exit(2)
     if not hasattr(args, "trend_ignition"):
         args.trend_ignition = None
     if not hasattr(args, "direction_only_fallback"):
@@ -4153,6 +4963,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.feature_coverage_policy = None
     if not hasattr(args, "confluence_policy"):
         args.confluence_policy = None
+    if not hasattr(args, "execution_policy"):
+        args.execution_policy = None
     if args.data_quality is None:
         args.data_quality = {}
     if args.data_quality_enabled:
@@ -4187,6 +4999,21 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if getattr(args, "config", None):
         print(f"Loaded CLI defaults from config: {args.config}")
+
+    replay_offset_bars = int(getattr(args, "replay_offset_bars", 0) or 0)
+    if replay_offset_bars > 0:
+        if any(float(target) < 1.0 for target in getattr(args, "targets", []) or []):
+            print(
+                "Error: --replay-offset-bars currently supports hourly horizons only; remove sub-hour targets such as 0.25.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if args.use_local_features:
+            print("Error: --replay-offset-bars cannot be combined with --use-local-features.", file=sys.stderr)
+            sys.exit(2)
+        if not args.dry_run:
+            print("Info: enabling --dry-run automatically for replay mode.")
+            args.dry_run = True
 
     if args.use_local_features and args.dry_run:
         print("Error: --use-local-features cannot be combined with --dry-run.", file=sys.stderr)
@@ -4374,6 +5201,34 @@ def main(argv: Sequence[str] | None = None) -> None:
                 file=sys.stderr,
             )
 
+    if replay_offset_bars > 0:
+        try:
+            replay_profile = _dataset_profile_for_horizon(1.0)
+            replay_candidate, used_fallback = _select_dataset_candidate(replay_profile)
+            prepared, replay_latest_index, _close_snapshot, _ts_snapshot = _load_prepared(
+                replay_candidate.path,
+                target_column=replay_candidate.target_column,
+                offline=True,
+            )
+            replay_index = replay_latest_index - replay_offset_bars
+            if replay_index < 0:
+                raise ValueError(
+                    f"Replay offset {replay_offset_bars} exceeds prepared dataset length {replay_latest_index + 1}."
+                )
+            replay_close = float(prepared.df_all["close"].iloc[replay_index])
+            replay_ts = format_ts_iso(prepared.df_all["ts"].iloc[replay_index])
+            prepared_override = (prepared, replay_index, replay_close, replay_ts)
+            latest_close = replay_close
+            fallback_msg = " (fallback dataset)" if used_fallback else ""
+            print(
+                "Replay mode enabled: using hourly cached dataset "
+                f"{replay_candidate.path.name}{fallback_msg} at index offset {replay_offset_bars} "
+                f"(timestamp={replay_ts})."
+            )
+        except Exception as exc:
+            print(f"Replay preparation failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     env_dir_lstm = os.getenv("DIR_LSTM_PATH") or args.dir_lstm_path
     env_dir_bilstm = os.getenv("DIR_BILSTM_PATH") or args.dir_bilstm_path
     env_dir_gru = os.getenv("DIR_GRU_PATH") or args.dir_gru_path
@@ -4449,6 +5304,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             regime_model_weights=getattr(args, "regime_model_weights", None),
             regime_model_dirs=getattr(args, "regime_model_dirs", None),
             confluence_policy=getattr(args, "confluence_policy", None),
+            execution_policy=getattr(args, "execution_policy", None),
             latest_close=latest_close,
             confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
             position_size_floor=float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),
