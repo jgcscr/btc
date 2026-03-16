@@ -156,7 +156,7 @@ quality:
     no_trade_vol_mult: 0.0
   quality_input: artifacts/monitoring/labeled_backtest_1h.csv
   incumbent_quality_path: artifacts/monitoring/model_quality_incumbent_1h_backtest.json
-  incumbent_backtest_csv: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+  incumbent_backtest_csv: artifacts/monitoring/labeled_backtest_1h_incumbent.csv
   min_auc_delta: 0.0
   max_brier_increase: 0.0
   max_ece_increase: 0.01
@@ -167,7 +167,7 @@ quality:
   require_champion_significance: true
   rolling_ab:
     enabled: true
-    baseline_input: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+    baseline_input: artifacts/monitoring/labeled_backtest_1h_incumbent.csv
     candidate_input: artifacts/backtests/historical_1h_pup060_full_simplified/backtest_signals.csv
     window_size: 240
     step_size: 24

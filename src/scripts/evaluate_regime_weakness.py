@@ -24,7 +24,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Assess recent regime weakness from calibration and walk-forward diagnostics.")
     parser.add_argument("--calibration", type=Path, required=True)
     parser.add_argument("--walkforward", type=Path, required=True)
+    parser.add_argument("--horizon", type=str, default="1h")
     parser.add_argument("--max-ece-drift", type=float, default=0.02)
+    parser.add_argument("--min-recent-auc", type=float, default=0.0)
     parser.add_argument("--min-net-return", type=float, default=0.0)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -32,13 +34,32 @@ def main() -> None:
     calib = _load_json(args.calibration)
     wf = _load_json(args.walkforward)
 
-    ece_drift = _to_float(calib.get("ece_drift"), 0.0)
-    auc_recent = _to_float(calib.get("auc_recent"), 0.0)
-    auc_baseline = _to_float(calib.get("auc_baseline"), 0.0)
+    horizons = calib.get("horizons", {}) if isinstance(calib, dict) else {}
+    calib_horizon = horizons.get(args.horizon, {}) if isinstance(horizons, dict) else {}
+    if not isinstance(calib_horizon, dict):
+        calib_horizon = {}
+    promotion_hardening = calib_horizon.get("promotion_hardening") if isinstance(calib_horizon, dict) else {}
+    if not isinstance(promotion_hardening, dict):
+        promotion_hardening = calib.get("promotion_hardening", {}) if isinstance(calib, dict) else {}
+    if not isinstance(promotion_hardening, dict):
+        promotion_hardening = {}
+
+    recent = calib_horizon.get("recent", {}) if isinstance(calib_horizon, dict) else {}
+    baseline = calib_horizon.get("baseline", {}) if isinstance(calib_horizon, dict) else {}
+    ece_drift = _to_float(calib_horizon.get("ece_drift"), 0.0)
+    auc_recent = _to_float(recent.get("auc"), 0.0)
+    auc_baseline = _to_float(baseline.get("auc"), 0.0)
     auc_delta = auc_recent - auc_baseline
     net_total = _to_float(wf.get("cum_ret_net_total"), 0.0)
+    failed_checks = promotion_hardening.get("failed_checks", []) if isinstance(promotion_hardening.get("failed_checks", []), list) else []
 
-    weakness = bool(ece_drift > float(args.max_ece_drift) or net_total < float(args.min_net_return) or auc_delta < 0.0)
+    weakness = bool(
+        ece_drift > float(args.max_ece_drift)
+        or net_total < float(args.min_net_return)
+        or auc_recent < float(args.min_recent_auc)
+        or auc_delta < 0.0
+        or bool(failed_checks)
+    )
     cadence = {
         "recalibration": "weekly" if weakness else "biweekly",
         "retrain": "weekly_recent_window" if weakness else "monthly",
@@ -47,15 +68,18 @@ def main() -> None:
 
     payload = {
         "regime_weakness_detected": weakness,
+        "horizon": str(args.horizon),
         "metrics": {
             "ece_drift": ece_drift,
             "auc_baseline": auc_baseline,
             "auc_recent": auc_recent,
             "auc_delta": auc_delta,
             "cum_ret_net_total": net_total,
+            "promotion_failed_checks": failed_checks,
         },
         "thresholds": {
             "max_ece_drift": float(args.max_ece_drift),
+            "min_recent_auc": float(args.min_recent_auc),
             "min_net_return": float(args.min_net_return),
         },
         "recommendations": cadence,

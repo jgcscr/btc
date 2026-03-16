@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -39,6 +39,12 @@ FEATURE_COLUMNS = [
     "regime_is_trend",
     "regime_is_neutral",
     "regime_is_chop",
+]
+
+REFERENCE_FEATURE_COLUMNS = [
+    "incumbent_signal_reference",
+    "candidate_only_reference",
+    "candidate_incumbent_disagreement",
 ]
 
 
@@ -135,6 +141,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--midband-focus-max-abs-ret-pred", type=float, default=0.001)
     parser.add_argument("--midband-focus-negative-weight", type=float, default=1.0)
     parser.add_argument("--midband-focus-positive-weight", type=float, default=1.0)
+    parser.add_argument("--feature-meta-path", type=Path, default=None)
+    parser.add_argument(
+        "--reference-feature-mode",
+        choices=("allow", "disable", "disable_on_source_mismatch"),
+        default="allow",
+    )
+    parser.add_argument("--reference-feature-expected-source", type=str, default=None)
+    parser.add_argument("--reference-feature-max-abs-value", type=float, default=None)
     parser.add_argument("--output", type=Path, required=True, help="Output JSON path.")
     return parser.parse_args()
 
@@ -176,6 +190,81 @@ def _extract_features(df: pd.DataFrame) -> pd.DataFrame:
     out["regime_is_neutral"] = (regime == "neutral").astype(float)
     out["regime_is_chop"] = (regime == "chop").astype(float)
     return out[FEATURE_COLUMNS]
+
+
+def _load_feature_meta(path: Path | None) -> Dict[str, Any]:
+    if path is None or not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _apply_reference_feature_controls(
+    X: pd.DataFrame,
+    *,
+    feature_meta: Dict[str, Any],
+    args: argparse.Namespace,
+) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    adjusted = X.copy()
+    incumbent_reference = feature_meta.get("incumbent_reference", {}) if isinstance(feature_meta, dict) else {}
+    incumbent_reference = incumbent_reference if isinstance(incumbent_reference, dict) else {}
+    source_path = incumbent_reference.get("source")
+    source_path = str(source_path) if source_path is not None else None
+    expected_source = (
+        str(args.reference_feature_expected_source)
+        if args.reference_feature_expected_source is not None and str(args.reference_feature_expected_source).strip()
+        else None
+    )
+    source_matches_expected = expected_source is None or source_path == expected_source
+    max_abs_value = args.reference_feature_max_abs_value
+
+    before_means = {
+        column: float(pd.to_numeric(adjusted.get(column, 0.0), errors="coerce").fillna(0.0).mean())
+        for column in REFERENCE_FEATURE_COLUMNS
+    }
+    clipped_columns: List[str] = []
+    if max_abs_value is not None:
+        max_abs = abs(float(max_abs_value))
+        for column in REFERENCE_FEATURE_COLUMNS:
+            if column in adjusted.columns:
+                adjusted[column] = pd.to_numeric(adjusted[column], errors="coerce").fillna(0.0).clip(-max_abs, max_abs)
+                clipped_columns.append(column)
+
+    disabled = False
+    disable_reason = "allowed"
+    if args.reference_feature_mode == "disable":
+        disabled = True
+        disable_reason = "disabled_by_config"
+    elif args.reference_feature_mode == "disable_on_source_mismatch" and not source_matches_expected:
+        disabled = True
+        disable_reason = "source_mismatch"
+
+    if disabled:
+        for column in REFERENCE_FEATURE_COLUMNS:
+            if column in adjusted.columns:
+                adjusted[column] = 0.0
+
+    after_means = {
+        column: float(pd.to_numeric(adjusted.get(column, 0.0), errors="coerce").fillna(0.0).mean())
+        for column in REFERENCE_FEATURE_COLUMNS
+    }
+    return adjusted, {
+        "mode": str(args.reference_feature_mode),
+        "feature_meta_path": (str(args.feature_meta_path) if args.feature_meta_path is not None else None),
+        "incumbent_reference_source": source_path,
+        "expected_source": expected_source,
+        "source_matches_expected": bool(source_matches_expected),
+        "max_abs_value": (None if max_abs_value is None else float(max_abs_value)),
+        "clipped_columns": clipped_columns,
+        "disabled": bool(disabled),
+        "disable_reason": disable_reason,
+        "feature_columns": list(REFERENCE_FEATURE_COLUMNS),
+        "feature_means_before": before_means,
+        "feature_means_after": after_means,
+    }
 
 
 def _safe_auc(y_true: np.ndarray, p: np.ndarray) -> float:
@@ -415,7 +504,13 @@ def main() -> None:
 
     target_net = pd.to_numeric(train_df[args.target_col], errors="coerce").fillna(0.0)
     y = (target_net > 0.0).astype(int)
+    feature_meta = _load_feature_meta(args.feature_meta_path)
     X = _extract_features(train_df)
+    X, reference_feature_controls = _apply_reference_feature_controls(
+        X,
+        feature_meta=feature_meta,
+        args=args,
+    )
     sample_weight = _build_midband_focus_weights(train_df, y, args)
 
     if int(y.nunique()) < 2:
@@ -514,8 +609,9 @@ def main() -> None:
     ]
     candidate_rows = int(trade_mask.sum())
     oof_rows = int(valid_oof.sum())
+    effective_row_count = int(len(df)) if bool(args.candidate_only) else int(len(X))
     deploy_checks = {
-        "min_rows": int(len(X)) >= int(args.min_rows),
+        "min_rows": effective_row_count >= int(args.min_rows),
         "min_candidate_rows": candidate_rows >= int(args.min_candidate_rows),
         "min_oof_rows": oof_rows >= int(args.min_oof_rows),
         "min_positive_oof_bins": len(positive_oof_bins) >= int(args.min_positive_oof_bins),
@@ -550,9 +646,11 @@ def main() -> None:
             "positive_weight": float(args.midband_focus_positive_weight),
             "focused_rows": int((sample_weight > 1.0).sum()),
         },
+        "reference_feature_controls": reference_feature_controls,
         "metrics": {
             "rows": int(len(X)),
             "full_rows": int(len(df)),
+            "effective_row_count_for_deploy": effective_row_count,
             "candidate_rows": candidate_rows,
             "auc": auc,
             "oof_auc": oof_auc,

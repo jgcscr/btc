@@ -190,10 +190,18 @@ def main() -> None:
         "candidate_only_reference",
         "candidate_incumbent_disagreement",
     ]
-    missing_before = {
-        col: int(pd.to_numeric(df[col], errors="coerce").isna().sum()) if col in df.columns else int(len(df))
-        for col in feature_cols
-    }
+    def _feature_missing_counts(frame: pd.DataFrame) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for col in feature_cols:
+            if col not in frame.columns:
+                counts[col] = int(len(frame))
+            elif col == "regime_state":
+                counts[col] = int(frame[col].isna().sum())
+            else:
+                counts[col] = int(pd.to_numeric(frame[col], errors="coerce").isna().sum())
+        return counts
+
+    missing_before = _feature_missing_counts(df)
     missing_after = dict(missing_before)
     backfill_by_column = {col: 0 for col in feature_cols}
     backfill_by_source: Dict[str, Dict[str, int]] = {}
@@ -229,10 +237,7 @@ def main() -> None:
                 per_source_counts[col] += filled_count
             backfill_by_source[str(src)] = per_source_counts
         df = base.drop(columns=["_ts_norm"], errors="ignore")
-    missing_after = {
-        col: int(pd.to_numeric(df[col], errors="coerce").isna().sum()) if col in df.columns else int(len(df))
-        for col in feature_cols
-    }
+    missing_after = _feature_missing_counts(df)
 
     policy_cfg: Dict[str, Any] = {
         "enabled": True,

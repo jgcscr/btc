@@ -44,6 +44,16 @@ Config-driven run with the current promoted default profile:
   --config configs/run_refresh_and_predict.default.yaml
 ```
 
+Run explicitly against the currently deployed shared bundle:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --thresholds-json artifacts/models/calibrated_thresholds_merged.json \
+  --platt-calibration artifacts/models/platt_calibration.json \
+  --trade-decision-model artifacts/models/trade_decision_model.json
+```
+
 Artifact-driven run with the latest trustworthy reliability bundle:
 
 ```bash
@@ -80,6 +90,7 @@ Main outputs:
 - `artifacts/predictions/history.json`
 - `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json`
+- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
 - `artifacts/monitoring/meta_baseline.json`
 - `artifacts/monitoring/meta_baseline.parquet`
 - `artifacts/monitoring/trend_ignition_state.json`
@@ -98,7 +109,10 @@ Main outputs:
 - `trade_decision`
 - `confluence`
 - `execution_plan`
+- `execution_prior_provenance`
 - `projected_high` / `projected_low` when target-range models are enabled
+
+The top-level payload also includes `execution_prior_summary`, which aggregates whether execution priors came from global history, regime/volatility buckets, and the stop/target source mix used by the current snapshot.
 
 `execution_plan.stop_management` records whether stop guardrails widened, capped, or swapped the selected stop candidate to keep the stop width inside the configured ATR band.
 
@@ -111,6 +125,7 @@ Notes:
 - `configs/run_refresh_and_predict.default.yaml` is the promoted default runtime profile.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml` remains the cadence/shadow wrapper profile and is still used by `scripts/run_cadence.sh` because it writes artifacts directly.
 - Live inference now resolves the best available versioned model artifact within a model family before loading it.
+- The current deployed bundle is recorded in `artifacts/monitoring/reliability_promotion_deploy_manifest.json`. At the time of this README update it points to run `20260316T030147Z` and variant `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`.
 
 Execution plan quick guide:
 
@@ -225,6 +240,16 @@ Model training/search scripts currently present include:
   - `src.scripts.search_ensemble_thresholds`
   - `src.scripts.search_ensemble_weights`
 
+Direction-model audit helper:
+
+- `src.scripts.audit_direction_models` writes `artifacts/analysis/direction_model_audit_latest.json` and can be used to derive component-weight recommendations for `train_meta_ensemble` / runtime regime weighting.
+
+Example:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.audit_direction_models
+```
+
 ## 7. Reliability and Evaluation
 
 Reliability workflow:
@@ -258,6 +283,20 @@ Keep workflow running when promotion gate blocks promotion:
 
 With `--continue-on-promotion-fail`, the workflow can keep running and still write downstream summary artifacts even when the promotion gate blocks promotion.
 
+Promotion and deploy behavior:
+
+- A successful promotion can now deploy the promoted thresholds, Platt calibration, trade-decision model, incumbent labeled backtest, and monitoring summaries into the shared `artifacts/models` and `artifacts/monitoring` targets configured under `quality.promotion_deploy`.
+- If promotion is blocked, the workflow still writes summary artifacts and does not overwrite the active shared baseline.
+- `summary/champion_gate_alignment_check.json` is the fail-fast guard that verifies the enforced champion gate source matches the expected source. For `official_shadow_variant: none`, the check only enforces labeled source and path consistency. For active official shadows, it also enforces metric equality against the policy-aligned companion gate.
+- `summary/trade_decision_model_shift_guard.json` is a hard promotion gate for trade-decision model drift. Treat failures as deployment blockers, not advisory diagnostics.
+- The current trade-decision default is conservative: reference features are source-aware, can be disabled on source mismatch, and may be clipped before training; the `reference_feature_ablation` shadow variant is evaluated but should only be deployed if it passes the same promotion checks as any other candidate.
+
+Regression check:
+
+```bash
+/workspaces/btc/.venv/bin/python -m unittest discover -s tests
+```
+
 Current workflow behavior to be aware of:
 
 - The default workflow now builds the canonical labeled dataset, overlap feature-drift guard, raw direction-feature snapshots, and trusted baseline pack manifests.
@@ -269,6 +308,8 @@ Cadence automation:
 - Shell entrypoint: `scripts/run_cadence.sh`
 - GitHub Actions schedule: `.github/workflows/cadence.yml`
 - Operations runbook: `docs/operations_runbook.md`
+- Trade-decision operator handoff: `docs/trade_decision_operator_handoff_20260316.md`
+- Trade-decision final comparison: `docs/trade_decision_final_comparison_20260315.md`
 
 The GitHub Actions workflow supports manual dispatch plus three UTC cadences:
 
@@ -328,6 +369,9 @@ Common artifacts include:
 - `workflow_manifest.json`
 - `calibrated_thresholds.json`
 - `platt_calibration.json`
+- `promotion_gate.json`
+- `champion_gate_alignment_check.json`
+- `trade_decision_model_shift_guard.json`
 - `walkforward_labeled_reconciliation.json`
 - `edge_trustworthiness.json`
 - `overlap_trust_stability.json`

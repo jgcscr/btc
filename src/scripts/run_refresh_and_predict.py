@@ -409,7 +409,10 @@ def _normalize_regime_model_weights_block(value: Mapping[str, Any]) -> Dict[str,
             normalized[key] = bool(raw_value)
             continue
         if key in {REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP}:
-            normalized[key] = str(raw_value) if raw_value is not None else None
+            if isinstance(raw_value, Mapping):
+                normalized[key] = {str(inner_key): str(inner_value) for inner_key, inner_value in raw_value.items()}
+            else:
+                normalized[key] = str(raw_value) if raw_value is not None else None
             continue
         print(
             f"Warning: Unknown regime_model_weights config key '{raw_key}' ignored.",
@@ -1140,6 +1143,30 @@ def _compute_profile_breakout_score(
     return round(score, 6)
 
 
+def _derive_regime_labels_from_frame(
+    frame: pd.DataFrame,
+    *,
+    volatility_col: str,
+    breakout_score_threshold: float,
+    chop_score_threshold: float,
+) -> pd.Series:
+    close = pd.to_numeric(frame.get("close"), errors="coerce") if "close" in frame.columns else pd.Series(np.nan, index=frame.index)
+    volatility = pd.to_numeric(frame.get(volatility_col), errors="coerce") if volatility_col in frame.columns else pd.Series(0.0, index=frame.index)
+    ret_component = pd.Series(0.0, index=frame.index, dtype=float)
+    valid_close = close > 0.0
+    if valid_close.any():
+        ret_component = np.log(close.where(valid_close)).diff().abs().fillna(0.0)
+    vol_component = volatility.fillna(0.0).abs()
+    norm_vol = (vol_component / BREAKOUT_VOL_NORMALIZER).clip(lower=0.0, upper=2.0) if BREAKOUT_VOL_NORMALIZER else vol_component * 0.0
+    norm_ret = (ret_component / BREAKOUT_RET_NORMALIZER).clip(lower=0.0, upper=2.0) if BREAKOUT_RET_NORMALIZER else ret_component * 0.0
+    score = ((norm_vol + norm_ret) / 2.0).fillna(0.0)
+
+    labels = pd.Series(REGIME_NEUTRAL, index=frame.index, dtype=object)
+    labels.loc[score >= breakout_score_threshold] = REGIME_TREND
+    labels.loc[score <= chop_score_threshold] = REGIME_CHOP
+    return labels
+
+
 def _compute_breakout_scores(
     prepared_bundles: Mapping[str, tuple[PreparedData, int, float, str]],
     volatility_snapshots: Mapping[str, Mapping[str, float]],
@@ -1270,6 +1297,11 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
     partial_cfg = cfg.get("partial_take_profit") if isinstance(cfg.get("partial_take_profit"), Mapping) else {}
     trailing_cfg = cfg.get("trailing_stop") if isinstance(cfg.get("trailing_stop"), Mapping) else {}
     analytics_cfg = cfg.get("analytics") if isinstance(cfg.get("analytics"), Mapping) else {}
+    analytics_bucket_cfg = (
+        analytics_cfg.get("regime_volatility_buckets")
+        if isinstance(analytics_cfg.get("regime_volatility_buckets"), Mapping)
+        else {}
+    )
     guards_cfg = cfg.get("no_trade_guards") if isinstance(cfg.get("no_trade_guards"), Mapping) else {}
     raw_regime_templates = cfg.get("regime_templates") if isinstance(cfg.get("regime_templates"), Mapping) else {}
     regime_templates: Dict[str, Dict[str, float]] = {}
@@ -1320,6 +1352,16 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
             "mae_quantile": max(min(float(analytics_cfg.get("mae_quantile") or 0.75), 0.99), 0.5),
             "mfe_quantile": max(min(float(analytics_cfg.get("mfe_quantile") or 0.6), 0.99), 0.5),
             "min_samples": max(int(analytics_cfg.get("min_samples") or EXECUTION_POLICY_DEFAULT_MIN_SAMPLES), 10),
+            "regime_volatility_buckets": {
+                "enabled": bool(analytics_bucket_cfg.get("enabled", False)),
+                "regime_col": str(analytics_bucket_cfg.get("regime_col") or "regime_state"),
+                "volatility_col": str(analytics_bucket_cfg.get("volatility_col") or "volatility_realized_24h"),
+                "min_bucket_samples": max(int(analytics_bucket_cfg.get("min_bucket_samples") or 12), 1),
+                "low_vol_quantile": max(min(float(analytics_bucket_cfg.get("low_vol_quantile") or 0.5), 0.95), 0.05),
+                "max_projection_mfe_ratio": max(float(analytics_bucket_cfg.get("max_projection_mfe_ratio") or 1.25), 0.5),
+                "breakout_score_threshold": float(analytics_bucket_cfg.get("breakout_score_threshold") or 0.8),
+                "chop_score_threshold": float(analytics_bucket_cfg.get("chop_score_threshold") or 0.3),
+            },
         },
         "no_trade_guards": {
             "enabled": bool(guards_cfg.get("enabled", False)),
@@ -1612,6 +1654,9 @@ def _compute_excursion_priors(
     min_samples: int,
     mae_quantile: float,
     mfe_quantile: float,
+    current_regime: str | None = None,
+    current_volatility: float | None = None,
+    bucket_policy: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "available": False,
@@ -1620,6 +1665,10 @@ def _compute_excursion_priors(
         "mfe_distance": None,
         "peak_step_p50": None,
         "adverse_step_p50": None,
+        "source": "global",
+        "matched_regime": None,
+        "volatility_bucket": None,
+        "bucket_threshold": None,
     }
     if horizon_steps <= 0 or index <= horizon_steps:
         return result
@@ -1631,11 +1680,73 @@ def _compute_excursion_priors(
     close = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)
     end = max(index - horizon_steps, 0)
     start = max(0, end - max(lookback_bars, min_samples))
+    selected_indices = list(range(start, end))
+
+    normalized_regime = str(current_regime or "").strip().lower() or None
+    if bucket_policy and bool(bucket_policy.get("enabled", False)) and start < end:
+        regime_col = str(bucket_policy.get("regime_col") or "regime_state")
+        volatility_col = str(bucket_policy.get("volatility_col") or "volatility_realized_24h")
+        min_bucket_samples = max(int(bucket_policy.get("min_bucket_samples") or min_samples), 1)
+        low_vol_quantile = max(min(float(bucket_policy.get("low_vol_quantile") or 0.5), 0.95), 0.05)
+        breakout_score_threshold = float(bucket_policy.get("breakout_score_threshold") or 0.8)
+        chop_score_threshold = float(bucket_policy.get("chop_score_threshold") or 0.3)
+
+        regime_matches: List[int] = []
+        bucket_matches: List[int] = []
+        regime_bucket_matches: List[int] = []
+        regime_match_used = False
+
+        if regime_col in frame.columns:
+            regime_series = frame[regime_col].iloc[start:end].fillna("").astype(str).str.strip().str.lower()
+            if normalized_regime is not None:
+                regime_matches = [start + offset for offset, value in enumerate(regime_series) if value == normalized_regime]
+                regime_match_used = bool(regime_matches)
+        elif normalized_regime is not None:
+            derived_regimes = _derive_regime_labels_from_frame(
+                frame.iloc[start:end].copy(),
+                volatility_col=volatility_col,
+                breakout_score_threshold=breakout_score_threshold,
+                chop_score_threshold=chop_score_threshold,
+            )
+            regime_matches = [start + offset for offset, value in enumerate(derived_regimes.astype(str).str.lower()) if value == normalized_regime]
+            regime_match_used = bool(regime_matches)
+
+        if volatility_col in frame.columns and current_volatility is not None and math.isfinite(float(current_volatility)):
+            volatility_history = pd.to_numeric(frame[volatility_col].iloc[start:end], errors="coerce")
+            valid_history = volatility_history.dropna()
+            if not valid_history.empty:
+                bucket_threshold = float(valid_history.quantile(low_vol_quantile))
+                current_bucket = "low_vol" if float(current_volatility) <= bucket_threshold else "high_vol"
+                bucket_matches = [
+                    start + offset
+                    for offset, value in enumerate(volatility_history)
+                    if pd.notna(value)
+                    and ((current_bucket == "low_vol" and float(value) <= bucket_threshold) or (current_bucket == "high_vol" and float(value) > bucket_threshold))
+                ]
+                result["volatility_bucket"] = current_bucket
+                result["bucket_threshold"] = bucket_threshold
+
+        if regime_matches and bucket_matches:
+            regime_bucket_matches = sorted(set(regime_matches).intersection(bucket_matches))
+
+        if len(regime_bucket_matches) >= min_bucket_samples:
+            selected_indices = regime_bucket_matches
+            result["source"] = "regime_volatility_bucket"
+        elif len(regime_matches) >= min_bucket_samples:
+            selected_indices = regime_matches
+            result["source"] = "regime_bucket"
+        elif len(bucket_matches) >= min_bucket_samples:
+            selected_indices = bucket_matches
+            result["source"] = "volatility_bucket"
+
+        if result["source"] in {"regime_bucket", "regime_volatility_bucket"} and regime_match_used:
+            result["matched_regime"] = normalized_regime
+
     maes: List[float] = []
     mfes: List[float] = []
     peak_steps: List[int] = []
     adverse_steps: List[int] = []
-    for cursor in range(start, end):
+    for cursor in selected_indices:
         entry = close[cursor]
         if not math.isfinite(entry) or entry <= 0.0:
             continue
@@ -1787,6 +1898,7 @@ def _resolve_stop_with_guardrails(
     analytic_stop: float | None,
     atr_distance: float,
     guards_cfg: Mapping[str, Any],
+    analytic_stop_preferred: bool = False,
 ) -> Dict[str, Any]:
     def _valid_stop(stop_value: float | None) -> bool:
         if stop_value is None or not math.isfinite(float(stop_value)):
@@ -1832,7 +1944,14 @@ def _resolve_stop_with_guardrails(
             },
         }
 
-    selected = max(candidates, key=lambda item: float(item["risk_unit"]))
+    if analytic_stop_preferred:
+        priority = {"analytics": 0, "structure": 1, "existing": 2}
+        selected = min(
+            candidates,
+            key=lambda item: (priority.get(str(item.get("source")), 99), abs(float(item["risk_unit"]) - atr_distance)),
+        )
+    else:
+        selected = max(candidates, key=lambda item: float(item["risk_unit"]))
     selected_stop = float(selected["stop_loss"])
     risk_unit = float(selected["risk_unit"])
     adjustment: Dict[str, Any] | None = None
@@ -1905,6 +2024,16 @@ def _apply_execution_policy(
     for label, entry in summary.items():
         market_price = float(entry.get("close", entry.get("entry_price", 0.0)) or 0.0)
         entry["market_price"] = market_price
+        entry["execution_prior_provenance"] = {
+            "analytics_source": "unavailable",
+            "matched_regime": None,
+            "volatility_bucket": None,
+            "bucket_threshold": None,
+            "sample_count": 0,
+            "stop_source": None,
+            "stop_adjustment_type": None,
+            "target_source": "existing_or_projection",
+        }
         side = _execution_side(entry)
         direction = _direction_vote(entry)
         upstream_hold = str(entry.get("trade_action", "hold")) == "hold"
@@ -2008,6 +2137,9 @@ def _apply_execution_policy(
                 min_samples=int(analytics_cfg.get("min_samples", EXECUTION_POLICY_DEFAULT_MIN_SAMPLES)),
                 mae_quantile=float(analytics_cfg.get("mae_quantile", 0.75)),
                 mfe_quantile=float(analytics_cfg.get("mfe_quantile", 0.6)),
+                current_regime=regime_state,
+                current_volatility=_finite_float_or_none((entry.get("volatility") or {}).get("current")),
+                bucket_policy=analytics_cfg.get("regime_volatility_buckets"),
             )
         plan["analytics"] = analytics_payload
 
@@ -2031,6 +2163,7 @@ def _apply_execution_policy(
             analytic_stop=analytic_stop_value,
             atr_distance=atr_distance,
             guards_cfg=guards_cfg,
+            analytic_stop_preferred=bool(analytics_payload.get("available")) and str(analytics_payload.get("source")) != "global",
         )
         selected_stop = float(stop_resolution["stop_loss"])
         risk_unit = float(stop_resolution["risk_unit"])
@@ -2060,7 +2193,15 @@ def _apply_execution_policy(
         if analytics_payload.get("available") and analytic_mfe_reward > 0.0 and analytic_mfe_reward < min_reward:
             plan["status"] = "rejected"
             plan["reason"] = "insufficient_mfe_headroom"
-        final_reward = max(existing_reward, projection_reward, min_reward)
+        final_reward = min_reward
+        if analytics_payload.get("available") and analytic_mfe_reward > 0.0:
+            projection_cap_ratio = float(
+                ((analytics_cfg.get("regime_volatility_buckets") or {}).get("max_projection_mfe_ratio") or 1.25)
+            )
+            projection_reward = min(projection_reward, analytic_mfe_reward * projection_cap_ratio) if projection_reward > 0.0 else 0.0
+            final_reward = max(min_reward, analytic_mfe_reward, projection_reward)
+        else:
+            final_reward = max(existing_reward, projection_reward, min_reward)
         if side == "long":
             selected_take = planned_entry + final_reward
         else:
@@ -2128,6 +2269,18 @@ def _apply_execution_policy(
         entry["take_profit"] = float(selected_take)
         entry["risk_reward_ratio"] = float(risk_reward_ratio)
         entry["position_size"] = float(max(position_size, 0.0))
+        analytics_payload_final = plan.get("analytics") if isinstance(plan.get("analytics"), Mapping) else {}
+        stop_management = plan.get("stop_management") if isinstance(plan.get("stop_management"), Mapping) else {}
+        entry["execution_prior_provenance"] = {
+            "analytics_source": analytics_payload_final.get("source", "unavailable") if analytics_payload_final else "unavailable",
+            "matched_regime": analytics_payload_final.get("matched_regime"),
+            "volatility_bucket": analytics_payload_final.get("volatility_bucket"),
+            "bucket_threshold": analytics_payload_final.get("bucket_threshold"),
+            "sample_count": analytics_payload_final.get("sample_count"),
+            "stop_source": stop_management.get("source"),
+            "stop_adjustment_type": (stop_management.get("adjustment") or {}).get("type") if stop_management else None,
+            "target_source": "analytics_mfe" if analytics_payload_final and analytics_payload_final.get("available") else "existing_or_projection",
+        }
         entry["execution_plan"] = plan
 
         if upstream_hold and plan["status"] == "ready":
@@ -2141,6 +2294,27 @@ def _apply_execution_policy(
         else:
             entry["trade_action"] = side
     return summary
+
+
+def _build_execution_prior_summary(summary: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    analytics_source_counts: Dict[str, int] = {}
+    stop_source_counts: Dict[str, int] = {}
+    target_source_counts: Dict[str, int] = {}
+    for entry in summary.values():
+        provenance = entry.get("execution_prior_provenance") if isinstance(entry, Mapping) else None
+        if not isinstance(provenance, Mapping):
+            continue
+        analytics_source = str(provenance.get("analytics_source") or "unavailable")
+        stop_source = str(provenance.get("stop_source") or "unknown")
+        target_source = str(provenance.get("target_source") or "unknown")
+        analytics_source_counts[analytics_source] = analytics_source_counts.get(analytics_source, 0) + 1
+        stop_source_counts[stop_source] = stop_source_counts.get(stop_source, 0) + 1
+        target_source_counts[target_source] = target_source_counts.get(target_source, 0) + 1
+    return {
+        "analytics_source_counts": analytics_source_counts,
+        "stop_source_counts": stop_source_counts,
+        "target_source_counts": target_source_counts,
+    }
 
 
 def _resolve_data_quality_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -2171,19 +2345,34 @@ def _resolve_regime_model_weights_policy(config: Mapping[str, Any] | None) -> Op
     if not config:
         return None
     if not bool(config.get("enabled", False)):
-        return {"enabled": False, "weights_by_regime": {}}
+        return {"enabled": False, "weights_by_regime": {}, "weights_by_regime_horizon": {}}
 
     weights_by_regime: Dict[str, Dict[str, float]] = {}
+    weights_by_regime_horizon: Dict[str, Dict[float, Dict[str, float]]] = {}
     for regime in (REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP):
         raw = config.get(regime)
         if not raw:
             continue
+        if isinstance(raw, Mapping):
+            per_horizon: Dict[float, Dict[str, float]] = {}
+            for raw_horizon, raw_weights in raw.items():
+                horizon = _coerce_numeric_horizon(raw_horizon)
+                if horizon is None:
+                    continue
+                parsed = parse_weight_spec(str(raw_weights))
+                if parsed:
+                    per_horizon[_normalize_horizon_value(horizon)] = {str(k): float(v) for k, v in parsed.items()}
+            if per_horizon:
+                weights_by_regime_horizon[regime] = per_horizon
+            continue
+
         parsed = parse_weight_spec(str(raw))
         if parsed:
             weights_by_regime[regime] = {str(k): float(v) for k, v in parsed.items()}
     return {
         "enabled": True,
         "weights_by_regime": weights_by_regime,
+        "weights_by_regime_horizon": weights_by_regime_horizon,
     }
 
 
@@ -2716,11 +2905,22 @@ def _apply_regime_weight_overrides(
     base_weights: Mapping[str, float],
     *,
     regime_state: str,
+    horizon: float | None = None,
     policy: Optional[Mapping[str, Any]],
 ) -> Dict[str, float]:
     resolved = {str(k): float(v) for k, v in base_weights.items()}
     if not policy or not bool(policy.get("enabled")):
         return resolved
+    normalized_horizon = _normalize_horizon_value(horizon) if horizon is not None else None
+    weights_by_regime_horizon = policy.get("weights_by_regime_horizon") or {}
+    if normalized_horizon is not None:
+        horizon_overrides = weights_by_regime_horizon.get(regime_state)
+        if isinstance(horizon_overrides, Mapping):
+            override = horizon_overrides.get(normalized_horizon)
+            if isinstance(override, Mapping):
+                for key, value in override.items():
+                    resolved[str(key)] = float(value)
+                return resolved
     weights_by_regime = policy.get("weights_by_regime") or {}
     override = weights_by_regime.get(regime_state)
     if not isinstance(override, Mapping):
@@ -2730,6 +2930,29 @@ def _apply_regime_weight_overrides(
         # Accept both model names and type aliases in the weight map.
         resolved[key_str] = float(value)
     return resolved
+
+
+def _get_active_regime_weight_override(
+    *,
+    regime_state: str,
+    horizon: float | None = None,
+    policy: Optional[Mapping[str, Any]],
+) -> Optional[Dict[str, float]]:
+    if not policy or not bool(policy.get("enabled")):
+        return None
+    normalized_horizon = _normalize_horizon_value(horizon) if horizon is not None else None
+    weights_by_regime_horizon = policy.get("weights_by_regime_horizon") or {}
+    if normalized_horizon is not None:
+        horizon_overrides = weights_by_regime_horizon.get(regime_state)
+        if isinstance(horizon_overrides, Mapping):
+            override = horizon_overrides.get(normalized_horizon)
+            if isinstance(override, Mapping):
+                return {str(k): float(v) for k, v in override.items()}
+    weights_by_regime = policy.get("weights_by_regime") or {}
+    override = weights_by_regime.get(regime_state)
+    if isinstance(override, Mapping):
+        return {str(k): float(v) for k, v in override.items()}
+    return None
 
 
 def _apply_abstention_policy(
@@ -4236,6 +4459,7 @@ def run_predictions(
         dir_weight_map = _apply_regime_weight_overrides(
             base_dir_weight_map,
             regime_state=regime_state,
+            horizon=horizon,
             policy=regime_weight_policy,
         )
 
@@ -4371,10 +4595,10 @@ def run_predictions(
             "expected_value": expected_value,
             "thresholds": horizon_thresholds,
             "regime_state": regime_state,
-            "regime_weight_overrides": (
-                regime_weight_policy.get("weights_by_regime", {}).get(regime_state)
-                if regime_weight_policy and regime_weight_policy.get("enabled")
-                else None
+            "regime_weight_overrides": _get_active_regime_weight_override(
+                regime_state=regime_state,
+                horizon=horizon,
+                policy=regime_weight_policy,
             ),
             "projected_high": target_projection.get("projected_high") if target_projection else None,
             "projected_low": target_projection.get("projected_low") if target_projection else None,
@@ -4524,9 +4748,11 @@ def run_predictions(
 def write_summary(summary: Dict[str, Dict[str, float | str | int]]) -> dict[str, Any]:
     LATEST_PREDICTION_PATH.parent.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
+    execution_prior_summary = _build_execution_prior_summary(summary)
     json_payload = {
         "generated_at": generated_at,
         "predictions": summary,
+        "execution_prior_summary": execution_prior_summary,
     }
     LATEST_PREDICTION_PATH.write_text(json.dumps(json_payload, indent=2))
     print(json.dumps(json_payload, indent=2))
@@ -4534,6 +4760,7 @@ def write_summary(summary: Dict[str, Dict[str, float | str | int]]) -> dict[str,
     history_entry = {
         "generated_at": generated_at,
         "predictions": summary,
+        "execution_prior_summary": execution_prior_summary,
     }
     history: List[Dict[str, object]] = []
     if HISTORY_PREDICTION_PATH.exists():

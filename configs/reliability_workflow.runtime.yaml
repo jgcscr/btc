@@ -18,8 +18,10 @@ search:
   utility_turnover_penalty: 0.5
   max_drawdown: -0.08
   min_trades: 10
-  meta_weight_threshold: 0.556
+  meta_weight_threshold: 0.52
+  meta_component_weights_from_audit_path: artifacts/analysis/direction_model_audit_latest.json
   paper_live_config: configs/run_refresh_and_predict.shadow_simplified.yaml
+  apply_direction_audit_to_paper_live: true
   paper_live_dry_run: false
 
 monitoring:
@@ -39,6 +41,7 @@ quality:
   enabled: true
   build_labeled_dataset: true
   backtest_csv: auto
+  champion_gate_source: auto
   prefer_backtest: true
   lookback_rows: 50000
   lookback_hours: 8760
@@ -152,18 +155,48 @@ quality:
     no_trade_vol_mult: 0.0
   quality_input: artifacts/monitoring/labeled_backtest_1h.csv
   incumbent_quality_path: artifacts/monitoring/model_quality_incumbent_1h_backtest.json
-  incumbent_backtest_csv: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+  incumbent_backtest_csv: artifacts/monitoring/labeled_backtest_1h_incumbent.csv
   min_auc_delta: 0.0
   max_brier_increase: 0.0
   max_ece_increase: 0.01
+  max_recent_ece: 0.08
+  max_ece_drift: 0.02
+  min_recent_auc: 0.50
   min_net_return: 0.0
   net_return_key: net_return_total
   min_trade_count: 10
   trade_count_key: trade_count
+  max_negative_rolling_windows: 2
+  require_nonnegative_rolling_delta: true
+  min_overlap_triggered_trades: 10
+  min_overlap_triggered_net_return: 0.0
+  min_overlap_triggered_hit_rate: 0.45
+  borderline_selection_exception:
+    enabled: true
+    require_champion_significance: true
+    require_rolling_stability: true
+    require_overlap_triggered_strength: true
   require_champion_significance: true
+  promotion_deploy:
+    enabled: true
+    thresholds_target: artifacts/models/calibrated_thresholds_merged.json
+    platt_calibration_target: artifacts/models/platt_calibration.json
+    trade_decision_model_target: artifacts/models/trade_decision_model.json
+    promoted_profile_target: artifacts/monitoring/labeled_backtest_1h.csv
+    promoted_profile_meta_target: artifacts/monitoring/labeled_backtest_1h_meta.json
+    incumbent_profile_target: artifacts/monitoring/labeled_backtest_1h_incumbent.csv
+    incumbent_profile_meta_target: artifacts/monitoring/labeled_backtest_1h_incumbent_meta.json
+    incumbent_quality_backtest_target: artifacts/monitoring/model_quality_incumbent_1h_backtest.json
+    incumbent_quality_target: artifacts/monitoring/model_quality_incumbent_1h.json
+    promotion_gate_target: artifacts/monitoring/promotion_gate_1h.json
+    calibration_robustness_target: artifacts/monitoring/calibration_robustness.json
+    rolling_ab_report_target: artifacts/monitoring/rolling_ab_report.json
+    rolling_ab_report_md_target: artifacts/monitoring/rolling_ab_report.md
+    selection_guard_rule_target: artifacts/monitoring/selection_calibration_guard_rule_1h.json
+    manifest_target: artifacts/monitoring/reliability_promotion_deploy_manifest.json
   rolling_ab:
     enabled: true
-    baseline_input: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+    baseline_input: artifacts/monitoring/labeled_backtest_1h_incumbent.csv
     candidate_input: artifacts/backtests/historical_1h_pup060_full_simplified/backtest_signals.csv
     window_size: 240
     step_size: 24
@@ -196,8 +229,15 @@ quality:
     enabled: true
     method: platt
     baseline_window: 240
-    recent_window: 120
+    recent_window: 288
     max_ece_drift: 0.02
+    selection_scope: signal_active
+    min_selection_rows: 15
+    adaptive_selection_rows:
+      enabled: true
+      min_floor: 8
+      baseline_ratio: 0.6
+      max_shortfall: 2
     regime_aware: true
     regime_col: regime_state
     min_regime_rows: 80
@@ -260,19 +300,58 @@ quality:
     enabled: true
     target_col: ret_ensemble_net
     signal_col: signal_ensemble
-    threshold: 0.58
+    threshold: 0.55
     positive_oof_envelope_mode: populated_bin_sign
     min_rows: 300
     min_candidate_rows: 60
     min_oof_rows: 40
     min_positive_oof_bins: 2
-    candidate_only: false
+    candidate_only: true
     ev_calibration_source: hybrid
     ev_min_candidate_rows: 20
     ev_bins: 6
     min_bin_samples: 4
     raw_ev_calibration_source: weighted_hybrid
     raw_ev_candidate_weight: 4.0
+    reference_feature_controls:
+      enabled: true
+      mode: disable_on_source_mismatch
+      expected_source_path: artifacts/monitoring/labeled_backtest_1h_incumbent.csv
+      max_abs_value: 0.25
+    reference_feature_ablation:
+      enabled: true
+      mode: disable
+      expected_source_path: artifacts/monitoring/labeled_backtest_1h_incumbent.csv
+      threshold_variants: [0.555, 0.56]
+      selection_calibration_guard:
+        enabled: true
+        source_threshold: 0.555
+        regime_col: regime_state
+        p_col: p_up
+        rules:
+          - regime_state: neutral
+            min_p_up: 0.46
+      neutral_abs_ret_pred_floor:
+        enabled: true
+        source_threshold: 0.555
+        regime_col: regime_state
+        ret_pred_col: ret_pred
+        regime_state: neutral
+        min_abs_ret_pred: 0.00212
+      neutral_p_up_cap:
+        enabled: true
+        source_threshold: 0.555
+        regime_col: regime_state
+        p_col: p_up
+        regime_state: neutral
+        max_p_up_exclusive: 0.499
+    model_shift_guard:
+      enabled: true
+      fail_when_unavailable: false
+      require_reference_source_stable: true
+      max_abs_intercept_delta: 0.25
+      max_abs_reference_coef_delta: 0.15
+      max_source_not_current_count: 50
     midband_focus:
       enabled: true
       p_up_low: 0.55
@@ -285,7 +364,52 @@ quality:
     weak_band_candidate_only_veto:
       enabled: true
       official_mode: midband
-      official_shadow_variant: none
+      official_shadow_variant: auto
+      official_shadow_selection:
+        recent_window_rows: 288
+        min_candidate_trades: 5
+        require_companion_promote: true
+        require_recent_calibration_ok: true
+        require_nonnegative_recent_delta: true
+        require_nonnegative_rolling_delta: true
+        require_candidate_not_dominated: true
+        prefer_calibration_stability_within_eligible: true
+        fallback_variant_when_no_eligible: none
+        threshold_variants: [0.56, 0.57, 0.58, 0.60]
+        selection_calibration_guard:
+          enabled: true
+          regime_col: regime_state
+          p_col: p_up
+          rules: []
+          auto_derive:
+            enabled: true
+            candidate_p_up_floors: [0.46, 0.47, 0.48, 0.49, 0.53, 0.54, 0.55]
+            min_blocked_recent_rows: 3
+            max_rules: 2
+            min_recent_ece_improvement: 0.0
+            min_ece_drift_improvement: 0.0
+            require_blocked_recent_net_nonpositive: false
+            max_blocked_recent_net_return_total: 0.02
+            require_recent_net_nonnegative: true
+            sparse_active_trade_cap: 5
+            sparse_min_blocked_recent_rows: 1
+            sparse_min_retained_recent_rows: 1
+            sparse_allow_row_policy_override: true
+            sparse_allow_missing_baseline: true
+            sparse_use_observed_p_up_values: true
+            augment_with_deployed_rule_neighborhood: true
+            deployed_rule_floor_step: 0.01
+            deployed_rule_lower_steps: 2
+            deployed_rule_upper_steps: 0
+            reuse_last_deployed_on_empty: true
+            deployed_rule_path: artifacts/monitoring/selection_calibration_guard_rule_1h.json
+            deploy_manifest_path: artifacts/monitoring/reliability_promotion_deploy_manifest.json
+        recent_triggered_regime_volatility:
+          enabled: true
+          regime_col: regime_state
+          volatility_col: volatility_realized_24h
+          min_regime_rows: 2
+          require_overall_regime_negative: true
       p_up_low: 0.55
       p_up_high: 0.60
       high_inclusive: false

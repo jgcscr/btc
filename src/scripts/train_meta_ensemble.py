@@ -75,7 +75,61 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable engineered regime/volatility meta features.",
     )
+    parser.add_argument(
+        "--component-weight-spec",
+        type=str,
+        default=None,
+        help="Optional comma-separated component weights, e.g. transformer:0,lstm:1.5,xgb:1.5.",
+    )
     return parser.parse_args()
+
+
+def parse_component_weight_spec(spec: str | None) -> Dict[str, float]:
+    weights = {
+        "p_up_transformer": 1.0,
+        "p_up_lstm": 1.0,
+        "p_up_xgb": 1.0,
+    }
+    if not spec:
+        return weights
+
+    aliases = {
+        "transformer": "p_up_transformer",
+        "lstm": "p_up_lstm",
+        "xgb": "p_up_xgb",
+        "p_up_transformer": "p_up_transformer",
+        "p_up_lstm": "p_up_lstm",
+        "p_up_xgb": "p_up_xgb",
+    }
+    for raw_chunk in str(spec).split(","):
+        chunk = raw_chunk.strip()
+        if not chunk:
+            continue
+        if ":" not in chunk:
+            raise ValueError(f"Invalid component weight chunk '{chunk}'. Expected name:value format.")
+        raw_name, raw_value = chunk.split(":", 1)
+        key = aliases.get(raw_name.strip())
+        if key is None:
+            continue
+        weights[key] = float(raw_value.strip())
+
+    if sum(max(value, 0.0) for value in weights.values()) <= 0.0:
+        raise ValueError("Component weight spec disabled all meta-ensemble inputs.")
+    return weights
+
+
+def weighted_probability_average(df: pd.DataFrame, columns: Sequence[str], component_weights: Dict[str, float]) -> pd.Series:
+    numer = pd.Series(0.0, index=df.index, dtype=float)
+    denom = 0.0
+    for column in columns:
+        weight = max(float(component_weights.get(column, 1.0)), 0.0)
+        if weight <= 0.0:
+            continue
+        numer = numer + pd.to_numeric(df[column], errors="coerce").fillna(0.0) * weight
+        denom += weight
+    if denom <= 0.0:
+        raise ValueError("At least one positive meta-ensemble component weight is required.")
+    return numer / denom
 
 
 def load_model_frame(path: Path, prob_column_name: str) -> pd.DataFrame:
@@ -129,16 +183,32 @@ def fit_logistic_regression(X_train: pd.DataFrame, y_train: pd.Series) -> Logist
     return model
 
 
-def build_meta_features(master: pd.DataFrame, *, add_regime_features: bool) -> Tuple[pd.DataFrame, List[str]]:
+def build_meta_features(
+    master: pd.DataFrame,
+    *,
+    add_regime_features: bool,
+    component_weights: Dict[str, float],
+) -> Tuple[pd.DataFrame, List[str]]:
     master = master.copy()
     base_cols = ["p_up_transformer", "p_up_lstm", "p_up_xgb"]
     feature_cols = list(base_cols)
 
     if add_regime_features:
         p_stack = master[base_cols].astype(float)
-        master["meta_prob_mean"] = p_stack.mean(axis=1)
+        weighted_mean = weighted_probability_average(master, base_cols, component_weights)
+        centered = p_stack.sub(weighted_mean, axis=0)
+        weight_vector = np.asarray([max(float(component_weights.get(col, 1.0)), 0.0) for col in base_cols], dtype=float)
+        weight_total = float(weight_vector.sum())
+        weighted_std = np.sqrt(
+            np.maximum(
+                0.0,
+                (centered.to_numpy(dtype=float) ** 2 @ weight_vector) / max(weight_total, 1e-12),
+            )
+        )
+        master["meta_prob_mean"] = weighted_mean
         master["meta_prob_std"] = p_stack.std(axis=1, ddof=0)
         master["meta_prob_span"] = p_stack.max(axis=1) - p_stack.min(axis=1)
+        master["meta_prob_weighted_std"] = weighted_std
         ret = pd.to_numeric(master["ret_1h"], errors="coerce").fillna(0.0)
         master["meta_ret_vol_24"] = ret.rolling(window=24, min_periods=8).std(ddof=0).fillna(0.0)
         master["meta_ret_trend_24"] = ret.rolling(window=24, min_periods=8).mean().fillna(0.0)
@@ -148,6 +218,7 @@ def build_meta_features(master: pd.DataFrame, *, add_regime_features: bool) -> T
                 "meta_prob_mean",
                 "meta_prob_std",
                 "meta_prob_span",
+                "meta_prob_weighted_std",
                 "meta_ret_vol_24",
                 "meta_ret_trend_24",
                 "meta_ret_abs_6",
@@ -233,6 +304,7 @@ def save_meta_config(
     oof_metrics: Dict[str, float],
     trainval_metrics: Dict[str, float],
     oof_splits: int,
+    component_weights: Dict[str, float],
 ) -> None:
     payload = {
         "feature_columns": list(feature_columns),
@@ -250,6 +322,7 @@ def save_meta_config(
         ],
         "oof_metrics": {key: float(value) for key, value in oof_metrics.items()},
         "trainval_metrics": {key: float(value) for key, value in trainval_metrics.items()},
+        "component_weights": {key: float(value) for key, value in component_weights.items()},
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
@@ -260,6 +333,7 @@ def save_meta_config(
 
 def main() -> None:
     args = parse_args()
+    component_weights = parse_component_weight_spec(args.component_weight_spec)
 
     transformer_df = load_model_frame(args.transformer_csv, "p_up_transformer")
     lstm_df = load_model_frame(args.lstm_csv, "p_up_lstm")
@@ -270,7 +344,11 @@ def main() -> None:
     master["p_up_xgb"] = xgb_df["p_up_xgb"].values
 
     master["target"] = (master["ret_1h"] > 0.0).astype(int)
-    master, feature_cols = build_meta_features(master, add_regime_features=not args.disable_regime_features)
+    master, feature_cols = build_meta_features(
+        master,
+        add_regime_features=not args.disable_regime_features,
+        component_weights=component_weights,
+    )
 
     n_rows = len(master)
     n_train, n_val = compute_split_indices(n_rows)
@@ -316,7 +394,11 @@ def main() -> None:
     full_backtest.loc[: n_test_start - 1, "p_up_meta"] = oof_prob
     full_backtest.loc[n_test_start:, "p_up_meta"] = final_model.predict_proba(test_df[feature_cols])[:, 1]
     # Gate signal uses a stable average of base probabilities to reduce over-compressed meta scores.
-    full_backtest["p_up_gate"] = full_backtest[["p_up_transformer", "p_up_lstm", "p_up_xgb"]].mean(axis=1)
+    full_backtest["p_up_gate"] = weighted_probability_average(
+        full_backtest,
+        ["p_up_transformer", "p_up_lstm", "p_up_xgb"],
+        component_weights,
+    )
     full_backtest["signal_meta"] = (full_backtest["p_up_gate"] >= args.weight_threshold).astype(int)
     full_backtest["y_true"] = full_backtest["target"].astype(int)
     full_backtest["fold"] = (np.arange(len(full_backtest)) // max(int(n_val), 1)).astype(int)
@@ -402,6 +484,7 @@ def main() -> None:
         oof_metrics,
         trainval_metrics,
         args.oof_splits,
+        component_weights,
     )
 
     base_fee = 2.0
