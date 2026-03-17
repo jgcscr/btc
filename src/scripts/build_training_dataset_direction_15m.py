@@ -168,31 +168,11 @@ def build_direction_dataset(
         if column in df.columns and column not in allowed_features:
             allowed_features.append(column)
     allowed_features = hourly_builder._append_technical_feature_columns(df, allowed_features)
-    if feature_reliability_json:
-        reliability_path = Path(feature_reliability_json)
-        if reliability_path.exists():
-            payload = json.loads(reliability_path.read_text(encoding="utf-8"))
-            accepted = payload.get("accepted_features")
-            score_map = payload.get("feature_scores", {}) if isinstance(payload, dict) else {}
-            if isinstance(accepted, list):
-                accepted_set = {str(v) for v in accepted}
-                filtered: list[str] = []
-                for feature in allowed_features:
-                    if feature in accepted_set:
-                        filtered.append(feature)
-                        continue
-                    score_obj = score_map.get(feature) if isinstance(score_map, dict) else None
-                    score = None
-                    if isinstance(score_obj, dict) and "score" in score_obj:
-                        try:
-                            score = float(score_obj["score"])
-                        except Exception:
-                            score = None
-                    if score is not None and score >= float(feature_reliability_min_score):
-                        filtered.append(feature)
-                if filtered:
-                    print(f"Feature reliability filter kept {len(filtered)} / {len(allowed_features)} features.")
-                    allowed_features = filtered
+    allowed_features = hourly_builder._filter_features_by_reliability(
+        allowed_features,
+        reliability_json=feature_reliability_json,
+        min_score=feature_reliability_min_score,
+    )
     df = hourly_builder._enforce_feature_coverage(df, allowed_features)
 
     X, y = make_features_and_target(

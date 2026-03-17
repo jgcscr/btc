@@ -131,15 +131,18 @@ def _filter_features_by_reliability(
         return allowed_features
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
     accepted = payload.get("accepted_features")
-    if not isinstance(accepted, list):
-        return allowed_features
-    accepted_set = {str(v) for v in accepted}
     feature_scores = payload.get("feature_scores", {}) if isinstance(payload, dict) else {}
+
+    if isinstance(accepted, list):
+        accepted_set = {str(v) for v in accepted}
+        filtered = [feature for feature in allowed_features if feature in accepted_set]
+        if filtered:
+            print(f"Feature reliability accepted set kept {len(filtered)} / {len(allowed_features)} features.")
+            return filtered
+        print("Feature reliability accepted set matched no allowed features; falling back to score filter.")
+
     filtered: list[str] = []
     for feature in allowed_features:
-        if feature in accepted_set:
-            filtered.append(feature)
-            continue
         score_obj = feature_scores.get(feature) if isinstance(feature_scores, dict) else None
         score = None
         if isinstance(score_obj, dict) and "score" in score_obj:

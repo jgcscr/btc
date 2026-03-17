@@ -1837,6 +1837,8 @@ def _apply_forecast_coherence_policy(
             "p_up_side": p_up_side,
             "triggered": False,
             "reasons": [],
+            "advisory_reasons": [],
+            "low_trust": False,
         }
 
         if not enabled or horizon not in scoped_horizons:
@@ -1863,9 +1865,26 @@ def _apply_forecast_coherence_policy(
         ):
             reasons.append("p_up_ret_mismatch")
 
+        advisory_reasons: List[str] = []
+        consensus_side = direction if direction == ret_side == projected_side and direction in {"up", "down"} else None
+        if (
+            bool(policy.get("block_on_p_up_ret_mismatch", True))
+            and consensus_side is not None
+            and p_up_side != "neutral"
+            and p_up_side != consensus_side
+            and p_up_value is not None
+            and abs(p_up_value - 0.5) < min_p_up_edge
+            and ret_pred_value >= min_abs_ret_pred
+            and not reasons
+            and (str(entry.get("trade_action", "hold")) == "hold" or not bool(entry.get("signal_ensemble", 0)))
+        ):
+            advisory_reasons.append("low_edge_p_up_ret_mismatch")
+
         payload["reasons"] = reasons
+        payload["advisory_reasons"] = advisory_reasons
         payload["triggered"] = bool(reasons)
-        payload["exclude_from_voting"] = bool(reasons) and exclude_from_voting
+        payload["low_trust"] = bool(advisory_reasons)
+        payload["exclude_from_voting"] = bool(reasons or advisory_reasons) and exclude_from_voting
         entry["forecast_coherence"] = payload
         if reasons:
             entry["trade_action"] = "hold"
@@ -1887,6 +1906,11 @@ def _apply_forecast_coherence_policy(
                 trade_decision["blocking_reason"] = "forecast_coherence_gate"
                 trade_decision["forecast_coherence_gate_triggered"] = True
                 trade_decision["forecast_coherence_gate_reasons"] = reasons
+        elif advisory_reasons:
+            trade_decision = entry.get("trade_decision")
+            if isinstance(trade_decision, dict):
+                trade_decision["forecast_coherence_low_trust"] = True
+                trade_decision["forecast_coherence_low_trust_reasons"] = advisory_reasons
     return summary
 
 
@@ -5203,6 +5227,75 @@ def _resolve_probability_calibration(
     return None, None, False
 
 
+def _resolve_trade_probability_for_horizon(
+    *,
+    platt_calibration: Mapping[str, Mapping[str, Any]] | None,
+    label: str,
+    regime_state: str,
+    raw_probability: float,
+    close: float,
+    projected_price: float,
+    ret_pred: float,
+    neutral_band: float = 0.02,
+) -> tuple[float, str | None, bool, Dict[str, Any] | None]:
+    calibration_key, params, calibration_used_regime_key = _resolve_probability_calibration(
+        platt_calibration,
+        label,
+        regime_state,
+    )
+    probability = float(raw_probability)
+    if isinstance(params, Mapping):
+        probability = _apply_probability_calibration(float(raw_probability), params)
+
+    ret_side = _direction_from_ret_pred(ret_pred)
+    projected_side = _direction_from_projected_price(close, projected_price)
+    raw_side = _direction_from_probability(raw_probability, neutral_band=neutral_band)
+    calibrated_side = _direction_from_probability(probability, neutral_band=neutral_band)
+    consensus_side = ret_side if ret_side == projected_side and ret_side in {"up", "down"} else None
+    guard_payload: Dict[str, Any] | None = None
+
+    if (
+        consensus_side is not None
+        and calibration_used_regime_key
+        and raw_side == consensus_side
+        and calibrated_side != consensus_side
+    ):
+        resolved_probability = float(raw_probability)
+        resolved_key: str | None = None
+        resolved_used_regime_key = False
+        fallback_source = "raw_probability"
+        base_probability = None
+        base_side = None
+
+        if platt_calibration:
+            base_params = platt_calibration.get(label)
+            if isinstance(base_params, Mapping):
+                base_probability = _apply_probability_calibration(float(raw_probability), base_params)
+                base_side = _direction_from_probability(base_probability, neutral_band=neutral_band)
+                if base_side == consensus_side:
+                    resolved_probability = float(base_probability)
+                    resolved_key = label
+                    fallback_source = "base_horizon_calibration"
+
+        guard_payload = {
+            "applied": True,
+            "reason": "regime_calibration_conflicts_with_forecast_consensus",
+            "forecast_side": consensus_side,
+            "raw_side": raw_side,
+            "regime_calibrated_side": calibrated_side,
+            "original_applied_key": calibration_key,
+            "fallback_source": fallback_source,
+            "raw_probability": float(raw_probability),
+            "regime_calibrated_probability": float(probability),
+            "base_probability": None if base_probability is None else float(base_probability),
+            "base_side": base_side,
+            "resolved_probability": float(resolved_probability),
+        }
+        return resolved_probability, resolved_key, resolved_used_regime_key, guard_payload
+
+    return probability, calibration_key, calibration_used_regime_key, guard_payload
+
+
 def _build_direction_output(
     *,
     enabled: bool,
@@ -5720,29 +5813,33 @@ def run_predictions(
         confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
         calibration_key = None
         calibration_used_regime_key = False
+        probability_guard = None
 
-        # Apply optional horizon/regime calibration with support for platt/isotonic/beta payloads.
-        calibration_key, params, calibration_used_regime_key = _resolve_probability_calibration(
-            platt_calibration,
-            label,
-            regime_state,
-        )
-        if isinstance(params, Mapping):
-                p_up = _apply_probability_calibration(float(p_up), params)
-                signal_dir_only = _resolve_direction_signal_for_horizon(
-                    raw_probability=raw_p_up,
-                    calibrated_probability=p_up,
-                    threshold=thresh,
-                    close=close,
-                    projected_price=_project_price(close, ret_pred),
-                    ret_pred=ret_pred,
-                    calibration_key=calibration_key,
-                    calibration_used_regime_key=calibration_used_regime_key,
-                )
-                signal_ensemble = int((p_up >= horizon_p_up) and (ret_pred >= horizon_ret) and (not bool(signal.get("volatility_flag"))))
-                expected_value = p_up * ret_pred - (1 - p_up) * residual_std
-                expected_value *= ev_multiplier
-                confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
+        # Apply optional horizon/regime calibration with a forecast-alignment guard for regime-specific flips.
+        if platt_calibration:
+            p_up, calibration_key, calibration_used_regime_key, probability_guard = _resolve_trade_probability_for_horizon(
+                platt_calibration=platt_calibration,
+                label=label,
+                regime_state=regime_state,
+                raw_probability=raw_p_up,
+                close=close,
+                projected_price=_project_price(close, ret_pred),
+                ret_pred=ret_pred,
+            )
+            signal_dir_only = _resolve_direction_signal_for_horizon(
+                raw_probability=raw_p_up,
+                calibrated_probability=p_up,
+                threshold=thresh,
+                close=close,
+                projected_price=_project_price(close, ret_pred),
+                ret_pred=ret_pred,
+                calibration_key=calibration_key,
+                calibration_used_regime_key=calibration_used_regime_key,
+            )
+            signal_ensemble = int((p_up >= horizon_p_up) and (ret_pred >= horizon_ret) and (not bool(signal.get("volatility_flag"))))
+            expected_value = p_up * ret_pred - (1 - p_up) * residual_std
+            expected_value *= ev_multiplier
+            confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
 
         stop_loss_price, take_profit_price = _compute_directional_stop_take_prices(
             close=close,
@@ -5827,6 +5924,7 @@ def run_predictions(
                 "applied_key": calibration_key,
                 "used_regime_key": calibration_used_regime_key,
                 "fallback_to_base": bool(calibration_key) and not calibration_used_regime_key,
+                "forecast_alignment_guard": probability_guard,
             },
             "regime_weight_overrides": _get_active_regime_weight_override(
                 regime_state=regime_state,

@@ -247,17 +247,17 @@ regime_model_weights:
 regime_model_dirs:
   enabled: true
   trend_ignition:
-    "1h": artifacts/models/xgb_dir1h_v2
+    "1h": artifacts/models/xgb_dir1h_v5
     "4h": artifacts/models/xgb_dir4h_v2
     "8h": artifacts/models/xgb_dir8h_v2
     "12h": artifacts/models/xgb_dir12h_v2
   neutral:
-    "1h": artifacts/models/xgb_dir1h_v2
+    "1h": artifacts/models/xgb_dir1h_v5
     "4h": artifacts/models/xgb_dir4h_v2
     "8h": artifacts/models/xgb_dir8h_v2
     "12h": artifacts/models/xgb_dir12h_v2
   chop:
-    "1h": artifacts/models/xgb_dir1h_v2
+    "1h": artifacts/models/xgb_dir1h_v5
     "4h": artifacts/models/xgb_dir4h_v2
     "8h": artifacts/models/xgb_dir8h_v2
     "12h": artifacts/models/xgb_dir12h_v2

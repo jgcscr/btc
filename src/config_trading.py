@@ -22,10 +22,10 @@ DEFAULT_REG_MODEL_DIR_1H: str = (
 	"models:/xgb_ret1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/xgb_ret1h_v1"
 )
 DEFAULT_DIR_MODEL_DIR_1H: str = (
-	"models:/xgb_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/xgb_dir1h_v2"
+	"models:/xgb_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/xgb_dir1h_v5"
 )
 DEFAULT_LSTM_MODEL_DIR_1H: str | None = (
-	"models:/lstm_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/lstm_dir1h_v2"
+	"models:/lstm_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/lstm_dir1h_v1"
 )
 DEFAULT_BILSTM_MODEL_DIR_1H: str | None = None
 DEFAULT_GRU_MODEL_DIR_1H: str | None = None

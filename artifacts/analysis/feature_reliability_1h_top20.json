@@ -1,0 +1,228 @@
+{
+  "rows": 8834,
+  "settings": {
+    "baseline_window": 240,
+    "recent_window": 120,
+    "min_score": 0.0,
+    "max_features": 20
+  },
+  "accepted_features": [
+    "volume_delta_1h",
+    "intrabar_vol_term_structure_6h_24h",
+    "close_pct_change_1h",
+    "close_delta_1h",
+    "momentum_slope_2h",
+    "intrabar_volume_regime_transition",
+    "range_expansion_1h",
+    "momentum_slope_4h",
+    "liquidity_close_position_ratio",
+    "volume_pct_change_1h",
+    "intrabar_taker_imbalance_persistence",
+    "intrabar_volume_regime_zscore_24h",
+    "intrabar_wick_asymmetry_mean",
+    "vwap_deviation_8h",
+    "num_trades",
+    "intrabar_wick_asymmetry_persistence",
+    "liquidity_range_ratio_6h",
+    "taker_buy_quote_volume",
+    "taker_buy_base_volume",
+    "cvd_zscore_6h"
+  ],
+  "feature_scores": {
+    "open": {
+      "missing_ratio": 0.0,
+      "drift": 1.1952420571926905,
+      "score": 0.880475794280731
+    },
+    "high": {
+      "missing_ratio": 0.0,
+      "drift": 1.1888997640565888,
+      "score": 0.8811100235943411
+    },
+    "low": {
+      "missing_ratio": 0.0,
+      "drift": 1.2382503886617846,
+      "score": 0.8761749611338215
+    },
+    "close": {
+      "missing_ratio": 0.0,
+      "drift": 1.2111311073433566,
+      "score": 0.8788868892656644
+    },
+    "volume": {
+      "missing_ratio": 0.0,
+      "drift": 0.3516539849895895,
+      "score": 0.9648346015010411
+    },
+    "quote_volume": {
+      "missing_ratio": 0.0,
+      "drift": 0.34058489758696087,
+      "score": 0.9659415102413039
+    },
+    "num_trades": {
+      "missing_ratio": 0.0,
+      "drift": 0.17787575225660343,
+      "score": 0.9822124247743397
+    },
+    "taker_buy_base_volume": {
+      "missing_ratio": 0.0,
+      "drift": 0.21559343356307847,
+      "score": 0.9784406566436922
+    },
+    "taker_buy_quote_volume": {
+      "missing_ratio": 0.0,
+      "drift": 0.20059592384708466,
+      "score": 0.9799404076152916
+    },
+    "close_delta_1h": {
+      "missing_ratio": 0.0,
+      "drift": 0.01711439570144304,
+      "score": 0.9982885604298557
+    },
+    "close_pct_change_1h": {
+      "missing_ratio": 0.0,
+      "drift": 0.011484898131187051,
+      "score": 0.9988515101868813
+    },
+    "volume_delta_1h": {
+      "missing_ratio": 0.0,
+      "drift": 0.004853278842761433,
+      "score": 0.9995146721157239
+    },
+    "volume_pct_change_1h": {
+      "missing_ratio": 0.0,
+      "drift": 0.09285819050883272,
+      "score": 0.9907141809491167
+    },
+    "cvd_ratio_6h": {
+      "missing_ratio": 0.0,
+      "drift": 0.5125860861022705,
+      "score": 0.948741391389773
+    },
+    "cvd_zscore_6h": {
+      "missing_ratio": 0.0,
+      "drift": 0.2167173215042042,
+      "score": 0.9783282678495796
+    },
+    "liquidity_range_ratio_6h": {
+      "missing_ratio": 0.0,
+      "drift": 0.1919851330318216,
+      "score": 0.9808014866968179
+    },
+    "liquidity_close_position_ratio": {
+      "missing_ratio": 0.0,
+      "drift": 0.07324793670662988,
+      "score": 0.992675206329337
+    },
+    "range_expansion_1h": {
+      "missing_ratio": 0.0,
+      "drift": 0.0268082904237219,
+      "score": 0.9973191709576278
+    },
+    "distance_from_session_high_8h": {
+      "missing_ratio": 0.0,
+      "drift": 0.283664897994292,
+      "score": 0.9716335102005708
+    },
+    "distance_from_session_low_8h": {
+      "missing_ratio": 0.0,
+      "drift": 0.28825617344191096,
+      "score": 0.9711743826558089
+    },
+    "vwap_deviation_8h": {
+      "missing_ratio": 0.0,
+      "drift": 0.12555800663681288,
+      "score": 0.9874441993363187
+    },
+    "momentum_slope_2h": {
+      "missing_ratio": 0.0,
+      "drift": 0.018314416519903818,
+      "score": 0.9981685583480097
+    },
+    "momentum_slope_4h": {
+      "missing_ratio": 0.0,
+      "drift": 0.027997204907224002,
+      "score": 0.9972002795092776
+    },
+    "volatility_realized_24h": {
+      "missing_ratio": 0.0,
+      "drift": 0.9300219936721483,
+      "score": 0.9069978006327851
+    },
+    "volatility_ewm_24h": {
+      "missing_ratio": 0.0,
+      "drift": 0.933947442573769,
+      "score": 0.9066052557426231
+    },
+    "volatility_realized_72h": {
+      "missing_ratio": 0.0,
+      "drift": 1.022925088456329,
+      "score": 0.8977074911543671
+    },
+    "volatility_ewm_72h": {
+      "missing_ratio": 0.0,
+      "drift": 1.2743676172969536,
+      "score": 0.8725632382703046
+    },
+    "volatility_garch_like": {
+      "missing_ratio": 0.0,
+      "drift": 0.8159606967758462,
+      "score": 0.9184039303224154
+    },
+    "intrabar_path_range": {
+      "missing_ratio": 0.0,
+      "drift": 0.4651810754472497,
+      "score": 0.953481892455275
+    },
+    "intrabar_quote_volume_sum": {
+      "missing_ratio": 0.0,
+      "drift": 0.3898286762905439,
+      "score": 0.9610171323709457
+    },
+    "intrabar_realized_vol_15m": {
+      "missing_ratio": 0.0,
+      "drift": 0.4330782361612298,
+      "score": 0.956692176383877
+    },
+    "intrabar_taker_imbalance_mean": {
+      "missing_ratio": 0.0,
+      "drift": 0.44228968239529004,
+      "score": 0.955771031760471
+    },
+    "intrabar_taker_imbalance_persistence": {
+      "missing_ratio": 0.0,
+      "drift": 0.10700684228479956,
+      "score": 0.9892993157715201
+    },
+    "intrabar_vol_term_structure_6h_24h": {
+      "missing_ratio": 0.0,
+      "drift": 0.009788297283395045,
+      "score": 0.9990211702716605
+    },
+    "intrabar_volume_regime_transition": {
+      "missing_ratio": 0.0,
+      "drift": 0.019957190792168043,
+      "score": 0.9980042809207832
+    },
+    "intrabar_volume_regime_zscore_24h": {
+      "missing_ratio": 0.0,
+      "drift": 0.11863332772768745,
+      "score": 0.9881366672272313
+    },
+    "intrabar_volume_sum": {
+      "missing_ratio": 0.0,
+      "drift": 0.38982848452008506,
+      "score": 0.9610171515479915
+    },
+    "intrabar_wick_asymmetry_mean": {
+      "missing_ratio": 0.0,
+      "drift": 0.1217586180408921,
+      "score": 0.9878241381959108
+    },
+    "intrabar_wick_asymmetry_persistence": {
+      "missing_ratio": 0.0,
+      "drift": 0.18560671346996754,
+      "score": 0.9814393286530032
+    }
+  }
+}

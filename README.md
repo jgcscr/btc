@@ -121,9 +121,11 @@ The top-level payload also includes `execution_prior_summary`, which aggregates 
 
 `execution_plan.stop_management` records whether stop guardrails widened, capped, or swapped the selected stop candidate to keep the stop width inside the configured ATR band.
 
-`probability_calibration` records the requested horizon/regime calibration key, the key actually applied, and whether runtime fell back to the base horizon calibration.
+`probability_calibration` records the requested horizon/regime calibration key, the key actually applied, whether runtime fell back to the base horizon calibration, and any `forecast_alignment_guard` fallback used when a regime-specific calibration would have flipped a raw probability that already agreed with both forecast branches.
 
 `direction_output` is a user-facing direction payload. It can apply a separate direction-only calibration/remap, expose the probability used for display, and emit `neutral` inside the configured band without changing `trade_action` or the internal `direction_next` used by policy gates.
+
+`forecast_coherence` now distinguishes hard gating from advisory low-trust conflicts. Strong disagreements still populate `reasons`, force `hold`, and can neutralize display direction. Low-edge `p_up` conflicts that are already non-tradable instead populate `advisory_reasons`, set `low_trust: true`, and exclude that horizon from confluence/bias voting without rewriting the numeric probability.
 
 `artifacts/monitoring/latest.json` also includes local feature alignment diagnostics under `request.local_feature_overrides.feature_alignment`, source freshness under `request.local_feature_overrides.source_freshness`, and feature-coverage enforcement results under `request.local_feature_overrides.feature_coverage`.
 

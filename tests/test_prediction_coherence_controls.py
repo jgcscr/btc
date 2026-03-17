@@ -12,6 +12,7 @@ from src.scripts.run_refresh_and_predict import (
     _resolve_execution_target_reward,
     _resolve_direction_signal_for_horizon,
     _resolve_probability_calibration,
+    _resolve_trade_probability_for_horizon,
     _resolve_direction_threshold_for_horizon,
 )
 
@@ -57,6 +58,58 @@ class PredictionCoherenceControlTests(unittest.TestCase):
         self.assertEqual(key, "1h")
         self.assertEqual(params, {"method": "platt", "a": 0.25, "b": 0.05})
         self.assertFalse(used_regime_key)
+
+    def test_trade_probability_guard_falls_back_to_raw_when_regime_calibration_flips_forecast_aligned_side(self) -> None:
+        probability, key, used_regime_key, payload = _resolve_trade_probability_for_horizon(
+            platt_calibration={
+                "1h@neutral": {
+                    "method": "isotonic",
+                    "x": [0.38, 0.38],
+                    "y": [0.58, 0.58],
+                },
+            },
+            label="1h",
+            regime_state="neutral",
+            raw_probability=0.38,
+            close=100.0,
+            projected_price=99.0,
+            ret_pred=-0.01,
+        )
+
+        self.assertAlmostEqual(probability, 0.38)
+        self.assertIsNone(key)
+        self.assertFalse(used_regime_key)
+        self.assertTrue(payload["applied"])
+        self.assertEqual(payload["fallback_source"], "raw_probability")
+        self.assertEqual(payload["forecast_side"], "down")
+
+    def test_trade_probability_guard_can_fall_back_to_base_horizon_calibration(self) -> None:
+        probability, key, used_regime_key, payload = _resolve_trade_probability_for_horizon(
+            platt_calibration={
+                "12h": {
+                    "method": "isotonic",
+                    "x": [0.14, 0.14],
+                    "y": [0.20, 0.20],
+                },
+                "12h@neutral": {
+                    "method": "isotonic",
+                    "x": [0.14, 0.14],
+                    "y": [0.90, 0.90],
+                },
+            },
+            label="12h",
+            regime_state="neutral",
+            raw_probability=0.14,
+            close=100.0,
+            projected_price=99.0,
+            ret_pred=-0.01,
+        )
+
+        self.assertAlmostEqual(probability, 0.20)
+        self.assertEqual(key, "12h")
+        self.assertFalse(used_regime_key)
+        self.assertTrue(payload["applied"])
+        self.assertEqual(payload["fallback_source"], "base_horizon_calibration")
 
     def test_forecast_coherence_policy_blocks_incoherent_hourly_entry(self) -> None:
         summary = {
@@ -116,6 +169,43 @@ class PredictionCoherenceControlTests(unittest.TestCase):
         self.assertIn("direction_ret_mismatch", updated["1h"]["forecast_coherence"]["reasons"])
         self.assertIn("direction_projected_price_mismatch", updated["1h"]["forecast_coherence"]["reasons"])
         self.assertFalse(updated["4h"]["forecast_coherence"]["triggered"])
+
+    def test_forecast_coherence_policy_marks_low_edge_probability_conflict_as_low_trust(self) -> None:
+        summary = {
+            "1h": {
+                "horizon_hours": 1.0,
+                "close": 100.0,
+                "projected_price": 100.2,
+                "ret_pred": 0.01,
+                "p_up": 0.459,
+                "direction_next": "up",
+                "direction_next_display": "up",
+                "trade_action": "hold",
+                "signal_ensemble": 0,
+                "trade_decision": {"enabled": True, "triggered": False},
+            }
+        }
+        policy = {
+            "enabled": True,
+            "horizons": [1.0],
+            "block_on_direction_ret_mismatch": True,
+            "block_on_direction_projected_price_mismatch": True,
+            "block_on_p_up_ret_mismatch": True,
+            "p_up_neutral_band": 0.02,
+            "min_p_up_edge": 0.05,
+            "min_abs_ret_pred": 0.0,
+            "exclude_blocked_horizons_from_voting": True,
+        }
+
+        updated = _apply_forecast_coherence_policy(summary, policy)
+
+        self.assertFalse(updated["1h"]["forecast_coherence"]["triggered"])
+        self.assertTrue(updated["1h"]["forecast_coherence"]["low_trust"])
+        self.assertTrue(updated["1h"]["forecast_coherence"]["exclude_from_voting"])
+        self.assertIn("low_edge_p_up_ret_mismatch", updated["1h"]["forecast_coherence"]["advisory_reasons"])
+        self.assertEqual(updated["1h"]["direction_next_display"], "up")
+        self.assertEqual(updated["1h"]["trade_action"], "hold")
+        self.assertTrue(updated["1h"]["trade_decision"]["forecast_coherence_low_trust"])
 
     def test_projected_price_mismatch_is_ignored_for_non_positive_close(self) -> None:
         summary = {
