@@ -1,0 +1,812 @@
+{
+  "history_path": "artifacts/predictions/history.json",
+  "neutral_band": 0.02,
+  "horizons": [
+    "1h",
+    "4h",
+    "8h",
+    "12h"
+  ],
+  "rows": 100,
+  "latest_generated_at": "2026-03-17T06:45:30.843087+00:00",
+  "latest_rows": [
+    {
+      "generated_at": "2026-03-17T06:45:30.843087+00:00",
+      "horizon": "12h",
+      "regime_state": "neutral",
+      "close": 74060.93,
+      "ret_pred": -0.0009281157981604338,
+      "projected_price": 73992.22476897758,
+      "raw_probability": 0.14002602419187002,
+      "calibrated_probability": 0.8963066116697569,
+      "calibration_delta": 0.7562805874778868,
+      "direction_next": "down",
+      "raw_side": "down",
+      "calibrated_side": "up",
+      "ret_side": "down",
+      "projected_side": "down",
+      "ret_alignment_bucket": "calibration_introduced_mismatch",
+      "projected_alignment_bucket": "calibration_introduced_mismatch",
+      "calibration_key": "12h@neutral",
+      "used_regime_key": true
+    },
+    {
+      "generated_at": "2026-03-17T06:45:30.843087+00:00",
+      "horizon": "1h",
+      "regime_state": "neutral",
+      "close": 74060.93,
+      "ret_pred": -0.0017213044920936227,
+      "projected_price": 73933.55824274037,
+      "raw_probability": 0.3884746089577675,
+      "calibrated_probability": 0.5723254189628108,
+      "calibration_delta": 0.18385081000504327,
+      "direction_next": "down",
+      "raw_side": "down",
+      "calibrated_side": "up",
+      "ret_side": "down",
+      "projected_side": "down",
+      "ret_alignment_bucket": "calibration_introduced_mismatch",
+      "projected_alignment_bucket": "calibration_introduced_mismatch",
+      "calibration_key": "1h@neutral",
+      "used_regime_key": true
+    },
+    {
+      "generated_at": "2026-03-17T06:45:30.843087+00:00",
+      "horizon": "4h",
+      "regime_state": "neutral",
+      "close": 74060.93,
+      "ret_pred": -0.013698735274374485,
+      "projected_price": 73053.30626825061,
+      "raw_probability": 0.6090968363370682,
+      "calibrated_probability": 0.7911584413157802,
+      "calibration_delta": 0.18206160497871193,
+      "direction_next": "down",
+      "raw_side": "up",
+      "calibrated_side": "up",
+      "ret_side": "down",
+      "projected_side": "down",
+      "ret_alignment_bucket": "both_mismatch",
+      "projected_alignment_bucket": "both_mismatch",
+      "calibration_key": "4h@neutral",
+      "used_regime_key": true
+    },
+    {
+      "generated_at": "2026-03-17T06:45:30.843087+00:00",
+      "horizon": "8h",
+      "regime_state": "neutral",
+      "close": 74060.93,
+      "ret_pred": -0.004584549926221371,
+      "projected_price": 73722.17109073763,
+      "raw_probability": 0.636441099507713,
+      "calibrated_probability": 0.7842943187513456,
+      "calibration_delta": 0.1478532192436326,
+      "direction_next": "down",
+      "raw_side": "up",
+      "calibrated_side": "up",
+      "ret_side": "down",
+      "projected_side": "down",
+      "ret_alignment_bucket": "both_mismatch",
+      "projected_alignment_bucket": "both_mismatch",
+      "calibration_key": "8h@neutral",
+      "used_regime_key": true
+    }
+  ],
+  "by_horizon": {
+    "12h": {
+      "rows": 25,
+      "avg_calibration_delta": 0.4109413704859748,
+      "median_calibration_delta": 0.3037363795391504,
+      "raw_vs_ret_match_rate": 0.2,
+      "calibrated_vs_ret_match_rate": 0.8,
+      "raw_vs_projected_match_rate": 0.2,
+      "calibrated_vs_projected_match_rate": 0.8,
+      "ret_alignment_buckets": {
+        "both_match": {
+          "count": 0,
+          "rate": 0.0
+        },
+        "both_mismatch": {
+          "count": 0,
+          "rate": 0.0
+        },
+        "calibration_introduced_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_fixed_mismatch": {
+          "count": 20,
+          "rate": 0.8
+        }
+      },
+      "projected_alignment_buckets": {
+        "both_match": {
+          "count": 0,
+          "rate": 0.0
+        },
+        "both_mismatch": {
+          "count": 0,
+          "rate": 0.0
+        },
+        "calibration_introduced_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_fixed_mismatch": {
+          "count": 20,
+          "rate": 0.8
+        }
+      },
+      "calibration_keys": {
+        "12h": 5,
+        "12h@trend_ignition": 15,
+        "12h@neutral": 5
+      },
+      "used_regime_key_rate": 0.8,
+      "recent_window": {
+        "rows": 25,
+        "avg_calibration_delta": 0.4109413704859748,
+        "raw_vs_ret_match_rate": 0.2,
+        "calibrated_vs_ret_match_rate": 0.8,
+        "recent_examples": [
+          {
+            "generated_at": "2026-03-17T06:18:13.308543+00:00",
+            "horizon": "12h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0009281157981604338,
+            "projected_price": 73992.22476897758,
+            "raw_probability": 0.14002602419187002,
+            "calibrated_probability": 0.8963066116697569,
+            "calibration_delta": 0.7562805874778868,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "12h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:23:52.393266+00:00",
+            "horizon": "12h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0009281157981604338,
+            "projected_price": 73992.22476897758,
+            "raw_probability": 0.14002602419187002,
+            "calibrated_probability": 0.8963066116697569,
+            "calibration_delta": 0.7562805874778868,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "12h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:29:17.051553+00:00",
+            "horizon": "12h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0009281157981604338,
+            "projected_price": 73992.22476897758,
+            "raw_probability": 0.14002602419187002,
+            "calibrated_probability": 0.8963066116697569,
+            "calibration_delta": 0.7562805874778868,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "12h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:35:57.333333+00:00",
+            "horizon": "12h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0009281157981604338,
+            "projected_price": 73992.22476897758,
+            "raw_probability": 0.14002602419187002,
+            "calibrated_probability": 0.8963066116697569,
+            "calibration_delta": 0.7562805874778868,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "12h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:45:30.843087+00:00",
+            "horizon": "12h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0009281157981604338,
+            "projected_price": 73992.22476897758,
+            "raw_probability": 0.14002602419187002,
+            "calibrated_probability": 0.8963066116697569,
+            "calibration_delta": 0.7562805874778868,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "12h@neutral",
+            "used_regime_key": true
+          }
+        ]
+      },
+      "latest_row": {
+        "generated_at": "2026-03-17T06:45:30.843087+00:00",
+        "horizon": "12h",
+        "regime_state": "neutral",
+        "close": 74060.93,
+        "ret_pred": -0.0009281157981604338,
+        "projected_price": 73992.22476897758,
+        "raw_probability": 0.14002602419187002,
+        "calibrated_probability": 0.8963066116697569,
+        "calibration_delta": 0.7562805874778868,
+        "direction_next": "down",
+        "raw_side": "down",
+        "calibrated_side": "up",
+        "ret_side": "down",
+        "projected_side": "down",
+        "ret_alignment_bucket": "calibration_introduced_mismatch",
+        "projected_alignment_bucket": "calibration_introduced_mismatch",
+        "calibration_key": "12h@neutral",
+        "used_regime_key": true
+      }
+    },
+    "1h": {
+      "rows": 25,
+      "avg_calibration_delta": 0.14966281771879994,
+      "median_calibration_delta": 0.1508220653837109,
+      "raw_vs_ret_match_rate": 0.76,
+      "calibrated_vs_ret_match_rate": 0.36,
+      "raw_vs_projected_match_rate": 0.76,
+      "calibrated_vs_projected_match_rate": 0.36,
+      "ret_alignment_buckets": {
+        "both_match": {
+          "count": 8,
+          "rate": 0.32
+        },
+        "both_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_introduced_mismatch": {
+          "count": 11,
+          "rate": 0.44
+        },
+        "calibration_fixed_mismatch": {
+          "count": 1,
+          "rate": 0.04
+        }
+      },
+      "projected_alignment_buckets": {
+        "both_match": {
+          "count": 8,
+          "rate": 0.32
+        },
+        "both_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_introduced_mismatch": {
+          "count": 11,
+          "rate": 0.44
+        },
+        "calibration_fixed_mismatch": {
+          "count": 1,
+          "rate": 0.04
+        }
+      },
+      "calibration_keys": {
+        "1h@trend_ignition": 12,
+        "1h": 8,
+        "1h@neutral": 5
+      },
+      "used_regime_key_rate": 0.68,
+      "recent_window": {
+        "rows": 25,
+        "avg_calibration_delta": 0.14966281771879994,
+        "raw_vs_ret_match_rate": 0.76,
+        "calibrated_vs_ret_match_rate": 0.36,
+        "recent_examples": [
+          {
+            "generated_at": "2026-03-17T06:18:13.308543+00:00",
+            "horizon": "1h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0017213044920936227,
+            "projected_price": 73933.55824274037,
+            "raw_probability": 0.3884746089577675,
+            "calibrated_probability": 0.5723254189628108,
+            "calibration_delta": 0.18385081000504327,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "1h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:23:52.393266+00:00",
+            "horizon": "1h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0017213044920936227,
+            "projected_price": 73933.55824274037,
+            "raw_probability": 0.3884746089577675,
+            "calibrated_probability": 0.5723254189628108,
+            "calibration_delta": 0.18385081000504327,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "1h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:29:17.051553+00:00",
+            "horizon": "1h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0017213044920936227,
+            "projected_price": 73933.55824274037,
+            "raw_probability": 0.3884746089577675,
+            "calibrated_probability": 0.5723254189628108,
+            "calibration_delta": 0.18385081000504327,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "1h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:35:57.333333+00:00",
+            "horizon": "1h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0017213044920936227,
+            "projected_price": 73933.55824274037,
+            "raw_probability": 0.3884746089577675,
+            "calibrated_probability": 0.5723254189628108,
+            "calibration_delta": 0.18385081000504327,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "1h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:45:30.843087+00:00",
+            "horizon": "1h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.0017213044920936227,
+            "projected_price": 73933.55824274037,
+            "raw_probability": 0.3884746089577675,
+            "calibrated_probability": 0.5723254189628108,
+            "calibration_delta": 0.18385081000504327,
+            "direction_next": "down",
+            "raw_side": "down",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "calibration_introduced_mismatch",
+            "projected_alignment_bucket": "calibration_introduced_mismatch",
+            "calibration_key": "1h@neutral",
+            "used_regime_key": true
+          }
+        ]
+      },
+      "latest_row": {
+        "generated_at": "2026-03-17T06:45:30.843087+00:00",
+        "horizon": "1h",
+        "regime_state": "neutral",
+        "close": 74060.93,
+        "ret_pred": -0.0017213044920936227,
+        "projected_price": 73933.55824274037,
+        "raw_probability": 0.3884746089577675,
+        "calibrated_probability": 0.5723254189628108,
+        "calibration_delta": 0.18385081000504327,
+        "direction_next": "down",
+        "raw_side": "down",
+        "calibrated_side": "up",
+        "ret_side": "down",
+        "projected_side": "down",
+        "ret_alignment_bucket": "calibration_introduced_mismatch",
+        "projected_alignment_bucket": "calibration_introduced_mismatch",
+        "calibration_key": "1h@neutral",
+        "used_regime_key": true
+      }
+    },
+    "4h": {
+      "rows": 25,
+      "avg_calibration_delta": -0.12126361018168882,
+      "median_calibration_delta": -0.231710221317608,
+      "raw_vs_ret_match_rate": 0.8,
+      "calibrated_vs_ret_match_rate": 0.6,
+      "raw_vs_projected_match_rate": 0.8,
+      "calibrated_vs_projected_match_rate": 0.6,
+      "ret_alignment_buckets": {
+        "both_match": {
+          "count": 15,
+          "rate": 0.6
+        },
+        "both_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_introduced_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_fixed_mismatch": {
+          "count": 0,
+          "rate": 0.0
+        }
+      },
+      "projected_alignment_buckets": {
+        "both_match": {
+          "count": 15,
+          "rate": 0.6
+        },
+        "both_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_introduced_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_fixed_mismatch": {
+          "count": 0,
+          "rate": 0.0
+        }
+      },
+      "calibration_keys": {
+        "4h": 13,
+        "4h@trend_ignition": 7,
+        "4h@neutral": 5
+      },
+      "used_regime_key_rate": 0.48,
+      "recent_window": {
+        "rows": 25,
+        "avg_calibration_delta": -0.12126361018168882,
+        "raw_vs_ret_match_rate": 0.8,
+        "calibrated_vs_ret_match_rate": 0.6,
+        "recent_examples": [
+          {
+            "generated_at": "2026-03-17T06:18:13.308543+00:00",
+            "horizon": "4h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.013698735274374485,
+            "projected_price": 73053.30626825061,
+            "raw_probability": 0.6090968363370682,
+            "calibrated_probability": 0.7911584413157802,
+            "calibration_delta": 0.18206160497871193,
+            "direction_next": "up",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "4h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:23:52.393266+00:00",
+            "horizon": "4h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.013698735274374485,
+            "projected_price": 73053.30626825061,
+            "raw_probability": 0.6090968363370682,
+            "calibrated_probability": 0.7911584413157802,
+            "calibration_delta": 0.18206160497871193,
+            "direction_next": "up",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "4h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:29:17.051553+00:00",
+            "horizon": "4h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.013698735274374485,
+            "projected_price": 73053.30626825061,
+            "raw_probability": 0.6090968363370682,
+            "calibrated_probability": 0.7911584413157802,
+            "calibration_delta": 0.18206160497871193,
+            "direction_next": "down",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "4h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:35:57.333333+00:00",
+            "horizon": "4h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.013698735274374485,
+            "projected_price": 73053.30626825061,
+            "raw_probability": 0.6090968363370682,
+            "calibrated_probability": 0.7911584413157802,
+            "calibration_delta": 0.18206160497871193,
+            "direction_next": "down",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "4h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:45:30.843087+00:00",
+            "horizon": "4h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.013698735274374485,
+            "projected_price": 73053.30626825061,
+            "raw_probability": 0.6090968363370682,
+            "calibrated_probability": 0.7911584413157802,
+            "calibration_delta": 0.18206160497871193,
+            "direction_next": "down",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "4h@neutral",
+            "used_regime_key": true
+          }
+        ]
+      },
+      "latest_row": {
+        "generated_at": "2026-03-17T06:45:30.843087+00:00",
+        "horizon": "4h",
+        "regime_state": "neutral",
+        "close": 74060.93,
+        "ret_pred": -0.013698735274374485,
+        "projected_price": 73053.30626825061,
+        "raw_probability": 0.6090968363370682,
+        "calibrated_probability": 0.7911584413157802,
+        "calibration_delta": 0.18206160497871193,
+        "direction_next": "down",
+        "raw_side": "up",
+        "calibrated_side": "up",
+        "ret_side": "down",
+        "projected_side": "down",
+        "ret_alignment_bucket": "both_mismatch",
+        "projected_alignment_bucket": "both_mismatch",
+        "calibration_key": "4h@neutral",
+        "used_regime_key": true
+      }
+    },
+    "8h": {
+      "rows": 25,
+      "avg_calibration_delta": -0.08807298078512449,
+      "median_calibration_delta": -0.10886676519287941,
+      "raw_vs_ret_match_rate": 0.72,
+      "calibrated_vs_ret_match_rate": 0.8,
+      "raw_vs_projected_match_rate": 0.72,
+      "calibrated_vs_projected_match_rate": 0.8,
+      "ret_alignment_buckets": {
+        "both_match": {
+          "count": 18,
+          "rate": 0.72
+        },
+        "both_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_introduced_mismatch": {
+          "count": 0,
+          "rate": 0.0
+        },
+        "calibration_fixed_mismatch": {
+          "count": 2,
+          "rate": 0.08
+        }
+      },
+      "projected_alignment_buckets": {
+        "both_match": {
+          "count": 18,
+          "rate": 0.72
+        },
+        "both_mismatch": {
+          "count": 5,
+          "rate": 0.2
+        },
+        "calibration_introduced_mismatch": {
+          "count": 0,
+          "rate": 0.0
+        },
+        "calibration_fixed_mismatch": {
+          "count": 2,
+          "rate": 0.08
+        }
+      },
+      "calibration_keys": {
+        "8h": 13,
+        "8h@trend_ignition": 7,
+        "8h@neutral": 5
+      },
+      "used_regime_key_rate": 0.48,
+      "recent_window": {
+        "rows": 25,
+        "avg_calibration_delta": -0.08807298078512449,
+        "raw_vs_ret_match_rate": 0.72,
+        "calibrated_vs_ret_match_rate": 0.8,
+        "recent_examples": [
+          {
+            "generated_at": "2026-03-17T06:18:13.308543+00:00",
+            "horizon": "8h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.004584549926221371,
+            "projected_price": 73722.17109073763,
+            "raw_probability": 0.636441099507713,
+            "calibrated_probability": 0.7842943187513456,
+            "calibration_delta": 0.1478532192436326,
+            "direction_next": "up",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "8h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:23:52.393266+00:00",
+            "horizon": "8h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.004584549926221371,
+            "projected_price": 73722.17109073763,
+            "raw_probability": 0.636441099507713,
+            "calibrated_probability": 0.7842943187513456,
+            "calibration_delta": 0.1478532192436326,
+            "direction_next": "up",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "8h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:29:17.051553+00:00",
+            "horizon": "8h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.004584549926221371,
+            "projected_price": 73722.17109073763,
+            "raw_probability": 0.636441099507713,
+            "calibrated_probability": 0.7842943187513456,
+            "calibration_delta": 0.1478532192436326,
+            "direction_next": "down",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "8h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:35:57.333333+00:00",
+            "horizon": "8h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.004584549926221371,
+            "projected_price": 73722.17109073763,
+            "raw_probability": 0.636441099507713,
+            "calibrated_probability": 0.7842943187513456,
+            "calibration_delta": 0.1478532192436326,
+            "direction_next": "down",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "8h@neutral",
+            "used_regime_key": true
+          },
+          {
+            "generated_at": "2026-03-17T06:45:30.843087+00:00",
+            "horizon": "8h",
+            "regime_state": "neutral",
+            "close": 74060.93,
+            "ret_pred": -0.004584549926221371,
+            "projected_price": 73722.17109073763,
+            "raw_probability": 0.636441099507713,
+            "calibrated_probability": 0.7842943187513456,
+            "calibration_delta": 0.1478532192436326,
+            "direction_next": "down",
+            "raw_side": "up",
+            "calibrated_side": "up",
+            "ret_side": "down",
+            "projected_side": "down",
+            "ret_alignment_bucket": "both_mismatch",
+            "projected_alignment_bucket": "both_mismatch",
+            "calibration_key": "8h@neutral",
+            "used_regime_key": true
+          }
+        ]
+      },
+      "latest_row": {
+        "generated_at": "2026-03-17T06:45:30.843087+00:00",
+        "horizon": "8h",
+        "regime_state": "neutral",
+        "close": 74060.93,
+        "ret_pred": -0.004584549926221371,
+        "projected_price": 73722.17109073763,
+        "raw_probability": 0.636441099507713,
+        "calibrated_probability": 0.7842943187513456,
+        "calibration_delta": 0.1478532192436326,
+        "direction_next": "down",
+        "raw_side": "up",
+        "calibrated_side": "up",
+        "ret_side": "down",
+        "projected_side": "down",
+        "ret_alignment_bucket": "both_mismatch",
+        "projected_alignment_bucket": "both_mismatch",
+        "calibration_key": "8h@neutral",
+        "used_regime_key": true
+      }
+    }
+  }
+}

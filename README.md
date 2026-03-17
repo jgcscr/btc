@@ -265,11 +265,17 @@ Marginal 1h direction audit helper:
 - `src.scripts.analyze_direction_marginal_calibration` writes `artifacts/analysis/direction_marginal_1h_latest.json` plus a CSV export of the marginal rows so you can inspect the 0.50-0.60 `p_up` slice, its realized accuracy, regime mix, and the largest feature shifts versus the non-marginal baseline.
 - Scratch validation runs should stay under `artifacts/tmp_validation/`; the canonical retained outputs are the copies under `artifacts/analysis/` and the workflow run summary directory.
 
+Probability-branch alignment helper:
+
+- `src.scripts.analyze_probability_branch_alignment` writes `artifacts/analysis/probability_branch_alignment_latest.json` so you can compare raw classifier probability, calibrated trade probability, and the regression branch by horizon. The report highlights when calibration fixes a classifier-vs-return mismatch and when it introduces one.
+
 Example:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.analyze_direction_marginal_calibration \
   --include-reliability-snapshots
+
+/workspaces/btc/.venv/bin/python -m src.scripts.analyze_probability_branch_alignment
 ```
 
 ## 7. Reliability and Evaluation
