@@ -138,6 +138,67 @@ def _fit_calibrator(p: np.ndarray, y: np.ndarray, method: str) -> Dict[str, Any]
     raise ValueError(f"Unsupported calibration method: {method}")
 
 
+def _summarize_regime_calibration_coverage_from_labeled_csv(
+    path: str,
+    *,
+    regime_col: str,
+    min_rows: int,
+) -> Dict[str, Any]:
+    df = pd.read_csv(path)
+    coverage: Dict[str, Any] = {
+        "enabled": True,
+        "path": path,
+        "regime_col": regime_col,
+        "min_rows": int(min_rows),
+        "rows": int(len(df)),
+        "has_regime_col": regime_col in df.columns,
+        "has_horizon_col": "horizon" in df.columns,
+        "default_horizon_applied": "horizon" not in df.columns,
+        "eligible_entries": [],
+        "ineligible_entries": [],
+    }
+    required = {"p_up", "y_true"}
+    missing_required = sorted(column for column in required if column not in df.columns)
+    coverage["missing_required_columns"] = missing_required
+    if missing_required or regime_col not in df.columns:
+        coverage["reason"] = "missing_required_columns" if missing_required else "missing_regime_col"
+        return coverage
+
+    working = df.copy()
+    if "horizon" not in working.columns:
+        working["horizon"] = "1h"
+
+    for horizon, horizon_df in working.groupby("horizon"):
+        for regime, group in horizon_df.groupby(regime_col):
+            y_values = pd.to_numeric(group["y_true"], errors="coerce")
+            p_values = pd.to_numeric(group["p_up"], errors="coerce")
+            mask = y_values.notna() & p_values.notna()
+            labels = y_values[mask].to_numpy(dtype=float).astype(int)
+            row_summary = {
+                "horizon": str(horizon),
+                "regime_state": str(regime),
+                "rows": int(labels.size),
+                "class_count": int(np.unique(labels).size) if labels.size else 0,
+            }
+            if labels.size < min_rows:
+                row_summary["eligible"] = False
+                row_summary["reason"] = "insufficient_rows"
+                coverage["ineligible_entries"].append(row_summary)
+            elif np.unique(labels).size <= 1:
+                row_summary["eligible"] = False
+                row_summary["reason"] = "single_class"
+                coverage["ineligible_entries"].append(row_summary)
+            else:
+                row_summary["eligible"] = True
+                row_summary["reason"] = "ready"
+                coverage["eligible_entries"].append(row_summary)
+
+    coverage["eligible_entry_count"] = int(len(coverage["eligible_entries"]))
+    coverage["ineligible_entry_count"] = int(len(coverage["ineligible_entries"]))
+    coverage["reason"] = "ready" if coverage["eligible_entries"] else "no_eligible_entries"
+    return coverage
+
+
 def _fit_regime_calibration_from_labeled_csv(
     path: str,
     *,
@@ -170,6 +231,34 @@ def _fit_regime_calibration_from_labeled_csv(
             if yy_r.size < min_rows or np.unique(yy_r).size <= 1:
                 continue
             out[f"{horizon}@{regime}"] = _fit_calibrator(pp_r, yy_r, method)
+    return out
+
+
+def _fit_base_horizon_calibration_from_labeled_csv(
+    path: str,
+    *,
+    min_rows: int,
+    method: str,
+) -> Dict[str, Dict[str, Any]]:
+    df = pd.read_csv(path)
+    required = {"p_up", "y_true"}
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Labeled calibration input missing required columns: {missing}")
+
+    if "horizon" not in df.columns:
+        df["horizon"] = "1h"
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for horizon, horizon_df in df.groupby("horizon"):
+        y_r = pd.to_numeric(horizon_df["y_true"], errors="coerce")
+        p_r = pd.to_numeric(horizon_df["p_up"], errors="coerce")
+        mask = y_r.notna() & p_r.notna()
+        yy_r = y_r[mask].to_numpy(dtype=float).astype(int)
+        pp_r = p_r[mask].to_numpy(dtype=float)
+        if yy_r.size < min_rows or np.unique(yy_r).size <= 1:
+            continue
+        out[str(horizon)] = _fit_calibrator(pp_r, yy_r, method)
     return out
 
 
@@ -229,6 +318,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--fit-base-horizons-from-labeled-input",
+        action="store_true",
+        help=(
+            "Also fit base horizon keys like '1h' and '4h' from --labeled-input instead of only adding horizon@regime keys."
+        ),
+    )
+    parser.add_argument(
+        "--skip-model-fit",
+        action="store_true",
+        help="Skip model-validation calibration and emit only labeled-input-derived calibrators.",
+    )
+    parser.add_argument(
         "--regime-col",
         type=str,
         default="regime_state",
@@ -240,65 +341,104 @@ def main() -> None:
         default=100,
         help="Minimum labeled rows required per horizon@regime for calibration fit.",
     )
+    parser.add_argument(
+        "--min-regime-rows-floor",
+        type=int,
+        default=20,
+        help="Hard lower bound applied to --min-regime-rows (default: 20). Use lower values only for controlled experiments.",
+    )
+    parser.add_argument(
+        "--coverage-output-path",
+        type=str,
+        default=None,
+        help="Optional JSON path for regime-calibration coverage diagnostics.",
+    )
     args = parser.parse_args()
+    regime_min_rows = max(int(args.min_regime_rows), int(args.min_regime_rows_floor))
 
     output: Dict[str, Dict[str, Any]] = {}
-    for horizon in args.horizons:
-        if horizon < 1:
-            dataset_path = args.dataset_15m
-        elif horizon == 1:
-            dataset_path = args.dataset_1h
-        else:
-            dataset_path = args.dataset_multi
-        model_path = _resolve_xgb_dir_model_path(args.model_root, horizon)
+    coverage_payload: Dict[str, Any] = {
+        "enabled": bool(args.labeled_input),
+        "reason": "no_labeled_input" if not args.labeled_input else "pending",
+    }
+    if not args.skip_model_fit:
+        for horizon in args.horizons:
+            if horizon < 1:
+                dataset_path = args.dataset_15m
+            elif horizon == 1:
+                dataset_path = args.dataset_1h
+            else:
+                dataset_path = args.dataset_multi
+            model_path = _resolve_xgb_dir_model_path(args.model_root, horizon)
 
-        dataset = _load_dataset(dataset_path, horizon)
-        X_val = dataset["X_val"]
-        y_val = dataset["y_val"]
-        y_val = np.asarray(y_val, dtype=float)
-        unique_y = np.unique(y_val[~np.isnan(y_val)]) if y_val.size else np.asarray([])
-        if unique_y.size > 0 and not np.all(np.isin(unique_y, [0.0, 1.0])):
-            y_val = (y_val > 0.0).astype(int)
-        dataset_feature_names = [str(name) for name in dataset.get("feature_names", [])]
+            dataset = _load_dataset(dataset_path, horizon)
+            X_val = dataset["X_val"]
+            y_val = dataset["y_val"]
+            y_val = np.asarray(y_val, dtype=float)
+            unique_y = np.unique(y_val[~np.isnan(y_val)]) if y_val.size else np.asarray([])
+            if unique_y.size > 0 and not np.all(np.isin(unique_y, [0.0, 1.0])):
+                y_val = (y_val > 0.0).astype(int)
+            dataset_feature_names = [str(name) for name in dataset.get("feature_names", [])]
 
-        model = XGBClassifier()
-        model._estimator_type = "classifier"
-        model.load_model(model_path)
-        if not hasattr(model, "classes_"):
-            model.classes_ = np.array([0, 1])
+            model = XGBClassifier()
+            model._estimator_type = "classifier"
+            model.load_model(model_path)
+            if not hasattr(model, "classes_"):
+                model.classes_ = np.array([0, 1])
 
-        model_feature_names = _load_model_feature_names(model_path)
-        X_val = _align_features(X_val, dataset_feature_names, model_feature_names)
+            model_feature_names = _load_model_feature_names(model_path)
+            X_val = _align_features(X_val, dataset_feature_names, model_feature_names)
 
-        p_val = model.predict_proba(X_val)[:, 1]
-        params = _fit_calibrator(p_val, y_val, args.method)
-        label = _format_horizon_label(horizon)
-        output[label] = params
-        if args.method == "platt":
-            print(f"Calibrated {label} (platt): a={params['a']:.4f} b={params['b']:.4f}")
-        elif args.method == "beta":
-            print(
-                "Calibrated "
-                f"{label} (beta): a={params['a']:.4f} b={params['b']:.4f} c={params['c']:.4f}"
-            )
-        else:
-            print(f"Calibrated {label} (isotonic): {len(params.get('x', []))} knots")
+            p_val = model.predict_proba(X_val)[:, 1]
+            params = _fit_calibrator(p_val, y_val, args.method)
+            label = _format_horizon_label(horizon)
+            output[label] = params
+            if args.method == "platt":
+                print(f"Calibrated {label} (platt): a={params['a']:.4f} b={params['b']:.4f}")
+            elif args.method == "beta":
+                print(
+                    "Calibrated "
+                    f"{label} (beta): a={params['a']:.4f} b={params['b']:.4f} c={params['c']:.4f}"
+                )
+            else:
+                print(f"Calibrated {label} (isotonic): {len(params.get('x', []))} knots")
 
     if args.labeled_input:
+        if args.fit_base_horizons_from_labeled_input:
+            base_extra = _fit_base_horizon_calibration_from_labeled_csv(
+                args.labeled_input,
+                min_rows=regime_min_rows,
+                method=args.method,
+            )
+            if base_extra:
+                output.update(base_extra)
+                print(f"Added {len(base_extra)} base horizon calibration entries from labeled input.")
+        coverage_payload = _summarize_regime_calibration_coverage_from_labeled_csv(
+            args.labeled_input,
+            regime_col=args.regime_col,
+            min_rows=regime_min_rows,
+        )
         extra = _fit_regime_calibration_from_labeled_csv(
             args.labeled_input,
             regime_col=args.regime_col,
-            min_rows=max(int(args.min_regime_rows), 20),
+            min_rows=regime_min_rows,
             method=args.method,
         )
         if extra:
             output.update(extra)
             print(f"Added {len(extra)} horizon/regime calibration entries from labeled input.")
+        elif coverage_payload.get("reason") == "ready":
+            coverage_payload["reason"] = "ready_but_no_entries_emitted"
 
     os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
     with open(args.output_path, "w", encoding="utf-8") as handle:
         json.dump(output, handle, indent=2)
     print(f"Saved calibration to {args.output_path}")
+    if args.coverage_output_path:
+        os.makedirs(os.path.dirname(args.coverage_output_path) or ".", exist_ok=True)
+        with open(args.coverage_output_path, "w", encoding="utf-8") as handle:
+            json.dump(coverage_payload, handle, indent=2)
+        print(f"Saved regime calibration coverage to {args.coverage_output_path}")
 
 
 if __name__ == "__main__":

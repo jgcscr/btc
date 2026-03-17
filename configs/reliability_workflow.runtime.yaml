@@ -22,6 +22,31 @@ search:
   meta_component_weights_from_audit_path: artifacts/analysis/direction_model_audit_latest.json
   paper_live_config: configs/run_refresh_and_predict.shadow_simplified.yaml
   apply_direction_audit_to_paper_live: true
+  direction_output_shadow:
+    enabled: true
+    apply_to_paper_live: true
+    horizons: [1]
+    marginal_horizon: 1h
+    calibration_method: isotonic
+    min_rows: 200
+    neutral_band: 0.02
+    include_reliability_snapshots: true
+    apply_marginal_audit_weights: true
+  upstream_direction_candidate:
+    enabled: true
+    apply_to_paper_live: false
+    marginal_horizon: 1h
+  trade_decision_chop_suppression_candidate:
+    enabled: true
+    apply_to_paper_live: false
+    recent_window_rows: 288
+    signal_col: signal_ensemble
+    p_col: p_up
+    ret_pred_col: ret_pred
+    return_col: ret_ensemble_net
+    regime_col: regime_state
+    min_regime_rows: 2
+    require_overall_regime_negative: true
   paper_live_dry_run: false
 
 monitoring:
@@ -240,7 +265,7 @@ quality:
       max_shortfall: 2
     regime_aware: true
     regime_col: regime_state
-    min_regime_rows: 80
+    min_regime_rows: 20
   leakage_audit:
     enabled: true
     y_key: y

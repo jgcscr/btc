@@ -88,6 +88,7 @@ Main outputs:
 
 - `artifacts/predictions/latest.json`
 - `artifacts/predictions/history.json`
+- `artifacts/analysis/prediction_coherence_latest.json`
 - `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json`
 - `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
@@ -101,20 +102,28 @@ Main outputs:
 
 - `entry_price`
 - `direction_next`
+- `direction_next_display`
 - `trade_action`
 - `stop_loss`
 - `take_profit`
 - `expected_value`
 - `regime_state`
+- `probability_calibration`
+- `direction_output`
 - `trade_decision`
 - `confluence`
 - `execution_plan`
 - `execution_prior_provenance`
+- `forecast_coherence`
 - `projected_high` / `projected_low` when target-range models are enabled
 
 The top-level payload also includes `execution_prior_summary`, which aggregates whether execution priors came from global history, regime/volatility buckets, and the stop/target source mix used by the current snapshot.
 
 `execution_plan.stop_management` records whether stop guardrails widened, capped, or swapped the selected stop candidate to keep the stop width inside the configured ATR band.
+
+`probability_calibration` records the requested horizon/regime calibration key, the key actually applied, and whether runtime fell back to the base horizon calibration.
+
+`direction_output` is a user-facing direction payload. It can apply a separate direction-only calibration/remap, expose the probability used for display, and emit `neutral` inside the configured band without changing `trade_action` or the internal `direction_next` used by policy gates.
 
 `artifacts/monitoring/latest.json` also includes local feature alignment diagnostics under `request.local_feature_overrides.feature_alignment`, source freshness under `request.local_feature_overrides.source_freshness`, and feature-coverage enforcement results under `request.local_feature_overrides.feature_coverage`.
 
@@ -149,6 +158,7 @@ That wrapper resolves the latest trustworthy reliability run for daily predictio
 Prediction configs:
 
 - `configs/run_refresh_and_predict.default.yaml` - promoted runtime policy with trade-decision, confluence, feature-coverage, adaptive-threshold, regime-model, target-range, and execution-policy blocks.
+- `configs/run_refresh_and_predict.default.yaml` now also carries a `forecast_coherence_policy` block that can force `hold` and exclude incoherent higher-horizon forecasts from confluence/bias voting.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml` - shadow/cadence profile that mirrors the promoted policy while writing artifacts by default.
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`
 
@@ -248,6 +258,18 @@ Example:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.audit_direction_models
+```
+
+Marginal 1h direction audit helper:
+
+- `src.scripts.analyze_direction_marginal_calibration` writes `artifacts/analysis/direction_marginal_1h_latest.json` plus a CSV export of the marginal rows so you can inspect the 0.50-0.60 `p_up` slice, its realized accuracy, regime mix, and the largest feature shifts versus the non-marginal baseline.
+- Scratch validation runs should stay under `artifacts/tmp_validation/`; the canonical retained outputs are the copies under `artifacts/analysis/` and the workflow run summary directory.
+
+Example:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.analyze_direction_marginal_calibration \
+  --include-reliability-snapshots
 ```
 
 ## 7. Reliability and Evaluation
@@ -369,12 +391,33 @@ Common artifacts include:
 - `workflow_manifest.json`
 - `calibrated_thresholds.json`
 - `platt_calibration.json`
+- `platt_calibration_coverage.json`
+- `platt_calibration_policy_aligned_labeled.csv`
+- `direction_output_labeled_1h.csv`
+- `direction_output_isotonic_1h.json`
+- `paper_live_direction_output_shadow_config.yaml`
+- `paper_live_upstream_direction_candidate.yaml`
+- `direction_marginal_1h.json`
 - `promotion_gate.json`
 - `champion_gate_alignment_check.json`
 - `trade_decision_model_shift_guard.json`
 - `walkforward_labeled_reconciliation.json`
 - `edge_trustworthiness.json`
 - `overlap_trust_stability.json`
+
+`platt_calibration.json` can contain both base horizon keys such as `1h` and regime-aware keys such as `1h@neutral` or `1h@trend_ignition`.
+
+`platt_calibration_coverage.json` records whether the labeled input actually supported horizon-regime calibration, including when the workflow had to default missing horizon labels to `1h`.
+
+`platt_calibration_policy_aligned_labeled.csv` is the dedicated history-plus-OHLCV calibration source used when the workflow regenerates multi-horizon regime-aware calibration entries such as `4h@neutral` or `8h@chop`.
+
+`direction_output_labeled_1h.csv` and `direction_output_isotonic_1h.json` are the separate direction-only calibration inputs emitted for the shadow display policy. `paper_live_direction_output_shadow_config.yaml` points runtime direction display at that artifact and can optionally add a marginal 1h component rerank inside the audited `0.50-0.60` band without changing internal `direction_next` or `trade_action`.
+
+The runtime and midband paper workflow profiles now opt in to applying `paper_live_direction_output_shadow_config.yaml` during stage-7 paper-live refresh. The default reliability profile still emits the shadow bundle without applying it automatically.
+
+`paper_live_upstream_direction_candidate.yaml` is a candidate-only internal 1h weight update derived from the same marginal audit. The workflow emits it for replay validation, but the checked-in profiles keep `apply_to_paper_live: false` so it does not change paper-live execution by default.
+
+`direction_marginal_1h.json` is the workflow-emitted marginal-slice audit used to derive the optional 1h rerank weights for the shadow profile.
 
 ## 8. Matched-Cycle Default vs Midband Tracking
 
@@ -549,6 +592,7 @@ echo "$RUN_ID"
 4. Read outputs
 
 - `artifacts/predictions/latest.json`
+- `artifacts/analysis/prediction_coherence_latest.json`
 - `artifacts/monitoring/latest.json`
 - `artifacts/reliability/${RUN_ID}/summary/edge_trustworthiness.json`
 - `artifacts/reliability/${RUN_ID}/summary/walkforward_labeled_reconciliation.json`

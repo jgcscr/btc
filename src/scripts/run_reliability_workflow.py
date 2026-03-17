@@ -16,6 +16,7 @@ import pandas as pd
 import yaml
 from sklearn.metrics import roc_auc_score
 
+from src.scripts.build_direction_output_shadow_config import build_shadow_config
 from src.scripts import run_refresh_and_predict as rrp
 
 
@@ -139,6 +140,7 @@ def _build_audit_weighted_runtime_config(
 
     regime_specs = recs.get("recommended_regime_weights_1h")
     fallback_spec = recs.get("recommended_weight_spec_1h")
+    apply_fallback_for_missing_regimes = bool(recs.get("apply_fallback_for_missing_regimes", True))
     if not isinstance(regime_specs, dict) and not fallback_spec:
         return False
 
@@ -153,7 +155,7 @@ def _build_audit_weighted_runtime_config(
             raw = regime_specs.get(regime)
             if raw is not None:
                 spec = str(raw)
-        if spec is None and fallback_spec is not None:
+        if spec is None and apply_fallback_for_missing_regimes and fallback_spec is not None:
             spec = str(fallback_spec)
         if spec is None:
             continue
@@ -184,6 +186,15 @@ def _join_horizons(horizons: Sequence[float | int]) -> str:
     return ",".join(str(v) for v in horizons)
 
 
+def _format_horizon_label(horizon: float | int) -> str:
+    value = float(horizon)
+    if value.is_integer() and value >= 1.0:
+        return f"{int(round(value))}h"
+    if value < 1.0:
+        return f"{int(round(value * 60))}m"
+    return f"{value:g}h"
+
+
 def _load_prediction_targets(config_path: Path | None) -> List[float]:
     if config_path is None or not config_path.exists():
         return []
@@ -203,6 +214,285 @@ def _load_prediction_targets(config_path: Path | None) -> List[float]:
         except (TypeError, ValueError):
             continue
     return resolved
+
+
+def _resolve_direction_output_shadow_horizons(
+    shadow_cfg: Mapping[str, Any],
+    *,
+    default_horizons: Sequence[float | int] = (1.0,),
+) -> List[float]:
+    raw_values = shadow_cfg.get("horizons") if isinstance(shadow_cfg, Mapping) else None
+    values = raw_values if isinstance(raw_values, list) and raw_values else list(default_horizons)
+    resolved: List[float] = []
+    for value in values:
+        try:
+            horizon = float(value)
+        except (TypeError, ValueError):
+            continue
+        if horizon <= 0:
+            continue
+        if horizon not in resolved:
+            resolved.append(horizon)
+    return resolved or [1.0]
+
+
+def _write_direction_output_shadow_config(
+    *,
+    base_config_path: Path,
+    direction_output_calibration_path: Path,
+    output_path: Path,
+    meta_output_path: Path,
+    marginal_audit_path: Path | None = None,
+    neutral_band: float = 0.02,
+    horizons: Sequence[float] = (1.0,),
+) -> Dict[str, Any]:
+    payload = build_shadow_config(
+        base_config_path=base_config_path,
+        direction_output_calibration_path=direction_output_calibration_path,
+        output_path=output_path,
+        marginal_audit_path=marginal_audit_path,
+        neutral_band=neutral_band,
+        horizons=horizons,
+    )
+    meta_output_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def _write_upstream_direction_candidate_config(
+    *,
+    base_config_path: Path,
+    marginal_audit_path: Path,
+    output_path: Path,
+    meta_output_path: Path,
+    apply_to_paper_live: bool = False,
+) -> Dict[str, Any]:
+    audit_payload = _load_json(marginal_audit_path)
+    applied = _build_audit_weighted_runtime_config(
+        base_config_path=base_config_path,
+        audit_payload=audit_payload,
+        output_path=output_path,
+    )
+    weight_recommendations = audit_payload.get("weight_recommendations") if isinstance(audit_payload, dict) else None
+    payload = {
+        "base_config": str(base_config_path),
+        "marginal_audit_path": str(marginal_audit_path),
+        "output_path": str(output_path),
+        "apply_to_paper_live": bool(apply_to_paper_live),
+        "internal_direction_weight_update_applied": bool(applied),
+        "horizon_scope": [1.0],
+        "recommended_weight_spec_1h": (
+            weight_recommendations.get("recommended_weight_spec_1h") if isinstance(weight_recommendations, Mapping) else None
+        ),
+        "recommended_regime_weights_1h": (
+            weight_recommendations.get("recommended_regime_weights_1h") if isinstance(weight_recommendations, Mapping) else None
+        ),
+        "apply_fallback_for_missing_regimes": (
+            weight_recommendations.get("apply_fallback_for_missing_regimes") if isinstance(weight_recommendations, Mapping) else None
+        ),
+    }
+    meta_output_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def _round_down_to_step(value: float, *, step: float) -> float:
+    if step <= 0.0:
+        return float(value)
+    return float(np.floor(float(value) / float(step)) * float(step))
+
+
+def _round_up_to_step(value: float, *, step: float) -> float:
+    if step <= 0.0:
+        return float(value)
+    return float(np.ceil(float(value) / float(step)) * float(step))
+
+
+def _derive_trade_decision_regime_midband_candidate(
+    *,
+    candidate_path: Path,
+    recent_window_rows: int,
+    signal_col: str,
+    p_col: str,
+    ret_pred_col: str,
+    return_col: str,
+    regime_col: str,
+    min_regime_rows: int,
+    require_overall_regime_negative: bool,
+    band_step: float = 0.01,
+) -> Dict[str, Any]:
+    recent_rule = _derive_recent_triggered_regime_volatility_rule(
+        candidate_path=candidate_path,
+        recent_window_rows=recent_window_rows,
+        signal_col=signal_col,
+        return_col=return_col,
+        regime_col=regime_col,
+        volatility_col="volatility_realized_24h",
+        min_regime_rows=min_regime_rows,
+        require_overall_regime_negative=require_overall_regime_negative,
+    )
+    if not bool(recent_rule.get("enabled", False)):
+        return {
+            "enabled": False,
+            "reason": recent_rule.get("reason", "recent_rule_disabled"),
+            "candidate_path": str(candidate_path),
+            "recent_rule": recent_rule,
+        }
+
+    df = pd.read_csv(candidate_path)
+    required = {signal_col, p_col, ret_pred_col, regime_col}
+    missing = [column for column in required if column not in df.columns]
+    if missing:
+        return {
+            "enabled": False,
+            "reason": "missing_required_columns",
+            "candidate_path": str(candidate_path),
+            "missing_columns": missing,
+            "recent_rule": recent_rule,
+        }
+
+    working = df.copy()
+    if "ts" in working.columns:
+        working["ts"] = pd.to_datetime(working["ts"], utc=True, errors="coerce")
+        working = working.sort_values("ts")
+    recent = working.tail(max(int(recent_window_rows), 1)).copy()
+    signal = pd.to_numeric(recent[signal_col], errors="coerce").fillna(0.0)
+    recent = recent.loc[signal > 0.0].copy()
+    if recent.empty:
+        return {
+            "enabled": False,
+            "reason": "no_recent_active_trades",
+            "candidate_path": str(candidate_path),
+            "recent_rule": recent_rule,
+        }
+
+    recent["_regime"] = recent[regime_col].map(
+        lambda value: str(value).strip().lower() if pd.notna(value) else "missing"
+    )
+    selected_regimes = [
+        str(value).strip().lower()
+        for value in (recent_rule.get("selected_regimes", []) if isinstance(recent_rule.get("selected_regimes"), list) else [])
+        if str(value).strip()
+    ]
+    scoped = recent.loc[recent["_regime"].isin(selected_regimes)].copy()
+    if scoped.empty:
+        return {
+            "enabled": False,
+            "reason": "no_rows_for_selected_regimes",
+            "candidate_path": str(candidate_path),
+            "selected_regimes": selected_regimes,
+            "recent_rule": recent_rule,
+        }
+
+    p_values = pd.to_numeric(scoped[p_col], errors="coerce")
+    abs_ret_pred = pd.to_numeric(scoped[ret_pred_col], errors="coerce").abs()
+    valid = p_values.notna() & abs_ret_pred.notna()
+    scoped = scoped.loc[valid].copy()
+    p_values = p_values.loc[valid]
+    abs_ret_pred = abs_ret_pred.loc[valid]
+    if scoped.empty:
+        return {
+            "enabled": False,
+            "reason": "no_valid_probability_rows",
+            "candidate_path": str(candidate_path),
+            "selected_regimes": selected_regimes,
+            "recent_rule": recent_rule,
+        }
+
+    p_up_low = round(max(0.0, min(1.0, _round_down_to_step(float(p_values.min()), step=band_step))), 6)
+    p_up_high = round(max(0.0, min(1.0, _round_up_to_step(float(p_values.max()), step=band_step))), 6)
+    min_abs_ret_pred = round(max(0.0, _round_down_to_step(float(abs_ret_pred.min()), step=0.0001)), 6)
+    if p_up_high < p_up_low:
+        p_up_high = p_up_low
+
+    return {
+        "enabled": True,
+        "reason": "ready",
+        "candidate_path": str(candidate_path),
+        "selected_regimes": selected_regimes,
+        "recent_window_rows": int(recent_window_rows),
+        "row_count": int(scoped.shape[0]),
+        "p_up_low": float(p_up_low),
+        "p_up_high": float(p_up_high),
+        "high_inclusive": True,
+        "min_abs_ret_pred": float(min_abs_ret_pred),
+        "max_abs_ret_pred": None,
+        "p_up_min_observed": float(p_values.min()),
+        "p_up_max_observed": float(p_values.max()),
+        "abs_ret_pred_min_observed": float(abs_ret_pred.min()),
+        "abs_ret_pred_max_observed": float(abs_ret_pred.max()),
+        "recent_rule": recent_rule,
+    }
+
+
+def _write_trade_decision_midband_candidate_config(
+    *,
+    base_config_path: Path,
+    candidate_path: Path,
+    output_path: Path,
+    meta_output_path: Path,
+    recent_window_rows: int = 288,
+    signal_col: str = "signal_ensemble",
+    p_col: str = "p_up",
+    ret_pred_col: str = "ret_pred",
+    return_col: str = "ret_ensemble_net",
+    regime_col: str = "regime_state",
+    min_regime_rows: int = 2,
+    require_overall_regime_negative: bool = True,
+    apply_to_paper_live: bool = False,
+) -> Dict[str, Any]:
+    candidate_rule = _derive_trade_decision_regime_midband_candidate(
+        candidate_path=candidate_path,
+        recent_window_rows=recent_window_rows,
+        signal_col=signal_col,
+        p_col=p_col,
+        ret_pred_col=ret_pred_col,
+        return_col=return_col,
+        regime_col=regime_col,
+        min_regime_rows=min_regime_rows,
+        require_overall_regime_negative=require_overall_regime_negative,
+    )
+
+    payload = _load_yaml(base_config_path)
+    trade_decision_policy = payload.get("trade_decision_policy")
+    if not isinstance(trade_decision_policy, dict):
+        trade_decision_policy = {}
+    current_midband = trade_decision_policy.get("midband_veto")
+    if not isinstance(current_midband, dict):
+        current_midband = {}
+
+    applied = False
+    if bool(candidate_rule.get("enabled", False)):
+        updated_midband = dict(current_midband)
+        updated_midband.update(
+            {
+                "enabled": True,
+                "p_up_low": float(candidate_rule["p_up_low"]),
+                "p_up_high": float(candidate_rule["p_up_high"]),
+                "high_inclusive": bool(candidate_rule.get("high_inclusive", True)),
+                "min_abs_ret_pred": float(candidate_rule.get("min_abs_ret_pred", 0.0)),
+                "max_abs_ret_pred": candidate_rule.get("max_abs_ret_pred"),
+                "regime_states": list(candidate_rule.get("selected_regimes", [])),
+            }
+        )
+        trade_decision_policy["midband_veto"] = updated_midband
+        payload["trade_decision_policy"] = trade_decision_policy
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        applied = True
+
+    meta_payload = {
+        "base_config": str(base_config_path),
+        "candidate_path": str(candidate_path),
+        "output_path": str(output_path),
+        "apply_to_paper_live": bool(apply_to_paper_live),
+        "trade_decision_midband_update_applied": bool(applied),
+        "candidate_rule": candidate_rule,
+        "previous_midband_veto": current_midband,
+    }
+    meta_output_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_output_path.write_text(json.dumps(meta_payload, indent=2), encoding="utf-8")
+    return meta_payload
 
 
 def _count_npz_rows(npz_path: Path) -> int:
@@ -3116,6 +3406,20 @@ def main() -> None:
     config = _load_yaml(args.config)
     cv_cfg = config.get("cv", {})
     search_cfg = config.get("search", {})
+    direction_output_shadow_cfg_obj = search_cfg.get("direction_output_shadow", {}) if isinstance(search_cfg, dict) else {}
+    direction_output_shadow_cfg = direction_output_shadow_cfg_obj if isinstance(direction_output_shadow_cfg_obj, dict) else {}
+    upstream_direction_candidate_cfg_obj = search_cfg.get("upstream_direction_candidate", {}) if isinstance(search_cfg, dict) else {}
+    upstream_direction_candidate_cfg = (
+        upstream_direction_candidate_cfg_obj if isinstance(upstream_direction_candidate_cfg_obj, dict) else {}
+    )
+    trade_decision_chop_suppression_candidate_cfg_obj = (
+        search_cfg.get("trade_decision_chop_suppression_candidate", {}) if isinstance(search_cfg, dict) else {}
+    )
+    trade_decision_chop_suppression_candidate_cfg = (
+        trade_decision_chop_suppression_candidate_cfg_obj
+        if isinstance(trade_decision_chop_suppression_candidate_cfg_obj, dict)
+        else {}
+    )
     monitoring_cfg = config.get("monitoring", {})
     cadence_cfg = config.get("cadence", {})
     quality_cfg = config.get("quality", {})
@@ -3322,6 +3626,8 @@ def main() -> None:
             *[str(h) for h in calibration_horizons],
             "--output-path",
             str(summary_dir / "platt_calibration.json"),
+            "--coverage-output-path",
+            str(summary_dir / "platt_calibration_coverage.json"),
             "--method",
             str(calibration_cfg.get("method", "platt")),
         ]
@@ -5649,6 +5955,8 @@ def main() -> None:
                         *[str(h) for h in calibration_horizons],
                         "--output-path",
                         str(summary_dir / "platt_calibration.json"),
+                        "--coverage-output-path",
+                        str(summary_dir / "platt_calibration_coverage.json"),
                         "--method",
                         str(calibration_cfg.get("method", "platt")),
                         "--labeled-input",
@@ -9324,6 +9632,83 @@ def main() -> None:
                             except Exception as exc:
                                 print(f"Warning: failed to refresh policy-aligned calibration diagnostics: {exc}", file=sys.stderr)
 
+                        if bool(calibration_cfg.get("regime_aware", True)):
+                            policy_regime_labeled_path = summary_dir / "platt_calibration_policy_aligned_labeled.csv"
+                            policy_regime_labeled_meta_path = summary_dir / "platt_calibration_policy_aligned_labeled_meta.json"
+                            policy_regime_labeled_input = current_candidate_for_calibration
+                            policy_regime_horizons = [
+                                _format_horizon_label(horizon)
+                                for horizon in calibration_horizons
+                                if float(horizon) >= 1.0
+                            ]
+                            if policy_regime_horizons:
+                                policy_regime_labeled_cmd = [
+                                    python,
+                                    "-m",
+                                    "src.scripts.build_labeled_backtest_from_history",
+                                    "--no-prefer-backtest",
+                                    "--include-reliability-snapshots",
+                                    "--output",
+                                    str(policy_regime_labeled_path),
+                                    "--meta-output",
+                                    str(policy_regime_labeled_meta_path),
+                                    "--fold-size",
+                                    str(int(quality_cfg.get("fold_size", 12))),
+                                    "--lookback-rows",
+                                    str(int(quality_cfg.get("lookback_rows", 2000))),
+                                    "--lookback-hours",
+                                    str(int(quality_cfg.get("lookback_hours", 0))),
+                                    "--min-rows",
+                                    str(int(quality_cfg.get("min_labeled_rows", 200))),
+                                    "--horizons",
+                                    *policy_regime_horizons,
+                                ]
+                                try:
+                                    results.append(
+                                        _run_step(
+                                            "build_policy_aligned_regime_calibration_dataset",
+                                            policy_regime_labeled_cmd,
+                                            logs_dir / "build_policy_aligned_regime_calibration_dataset.log",
+                                            args.dry_run,
+                                        )
+                                    )
+                                except RuntimeError as exc:
+                                    print(
+                                        "Warning: failed to build policy-aligned regime calibration dataset; "
+                                        f"falling back to policy-aligned candidate input: {exc}",
+                                        file=sys.stderr,
+                                    )
+                                if policy_regime_labeled_path.exists() or args.dry_run:
+                                    policy_regime_labeled_input = policy_regime_labeled_path
+
+                            policy_regime_calib_cmd = [
+                                python,
+                                "-m",
+                                "src.scripts.train_platt_calibration",
+                                "--horizons",
+                                *[str(h) for h in calibration_horizons],
+                                "--output-path",
+                                str(summary_dir / "platt_calibration.json"),
+                                "--coverage-output-path",
+                                str(summary_dir / "platt_calibration_coverage.json"),
+                                "--method",
+                                str(calibration_cfg.get("method", "platt")),
+                                "--labeled-input",
+                                str(policy_regime_labeled_input),
+                                "--regime-col",
+                                str(calibration_cfg.get("regime_col", "regime_state")),
+                                "--min-regime-rows",
+                                str(int(calibration_cfg.get("min_regime_rows", 100))),
+                            ]
+                            results.append(
+                                _run_step(
+                                    "platt_calibration_regime_aware_policy_aligned_official",
+                                    policy_regime_calib_cmd,
+                                    logs_dir / "platt_calibration_regime_aware_policy_aligned_official.log",
+                                    args.dry_run,
+                                )
+                            )
+
                     if bool(regime_weakness_cfg.get("enabled", True)):
                         calibration_path = summary_dir / "calibration_robustness.json"
                         if (calibration_path.exists() and walkforward_output.exists()) or args.dry_run:
@@ -9700,6 +10085,59 @@ def main() -> None:
 
     if not args.skip_paper_live:
         paper_live_config = str(search_cfg.get("paper_live_config", "configs/run_refresh_and_predict.default.yaml"))
+        direction_output_shadow_enabled = bool(direction_output_shadow_cfg.get("enabled", False))
+        direction_output_shadow_apply_to_paper_live = bool(direction_output_shadow_cfg.get("apply_to_paper_live", False))
+        upstream_direction_candidate_enabled = bool(upstream_direction_candidate_cfg.get("enabled", False))
+        upstream_direction_candidate_apply_to_paper_live = bool(
+            upstream_direction_candidate_cfg.get("apply_to_paper_live", False)
+        )
+        trade_decision_chop_suppression_candidate_enabled = bool(
+            trade_decision_chop_suppression_candidate_cfg.get("enabled", False)
+        )
+        trade_decision_chop_suppression_candidate_apply_to_paper_live = bool(
+            trade_decision_chop_suppression_candidate_cfg.get("apply_to_paper_live", False)
+        )
+        direction_output_shadow_horizons = _resolve_direction_output_shadow_horizons(direction_output_shadow_cfg)
+        direction_output_shadow_horizon_labels = [_format_horizon_label(horizon) for horizon in direction_output_shadow_horizons]
+        direction_output_shadow_label = (
+            direction_output_shadow_horizon_labels[0]
+            if len(direction_output_shadow_horizon_labels) == 1
+            else "multi_horizon"
+        )
+        direction_output_shadow_method = str(direction_output_shadow_cfg.get("calibration_method", "isotonic"))
+        direction_output_shadow_neutral_band = float(direction_output_shadow_cfg.get("neutral_band", 0.02))
+        direction_output_shadow_include_snapshots = bool(
+            direction_output_shadow_cfg.get("include_reliability_snapshots", True)
+        )
+        direction_output_shadow_apply_marginal_weights = bool(
+            direction_output_shadow_cfg.get("apply_marginal_audit_weights", True)
+        )
+        marginal_audit_enabled = bool(direction_output_shadow_enabled or upstream_direction_candidate_enabled)
+        marginal_horizon = str(
+            upstream_direction_candidate_cfg.get(
+                "marginal_horizon",
+                direction_output_shadow_cfg.get(
+                    "marginal_horizon",
+                    direction_output_shadow_horizon_labels[0] if direction_output_shadow_horizon_labels else "1h",
+                ),
+            )
+        )
+        direction_output_shadow_labeled_path = summary_dir / f"direction_output_labeled_{direction_output_shadow_label}.csv"
+        direction_output_shadow_labeled_meta_path = summary_dir / f"direction_output_labeled_{direction_output_shadow_label}_meta.json"
+        direction_output_shadow_calibration_path = summary_dir / f"direction_output_{direction_output_shadow_method}_{direction_output_shadow_label}.json"
+        direction_output_shadow_coverage_path = summary_dir / f"direction_output_{direction_output_shadow_method}_{direction_output_shadow_label}_coverage.json"
+        direction_output_shadow_config_path = summary_dir / "paper_live_direction_output_shadow_config.yaml"
+        direction_output_shadow_config_meta_path = summary_dir / "paper_live_direction_output_shadow_config_meta.json"
+        upstream_direction_candidate_path = summary_dir / "paper_live_upstream_direction_candidate.yaml"
+        upstream_direction_candidate_meta_path = summary_dir / "paper_live_upstream_direction_candidate_meta.json"
+        trade_decision_chop_suppression_candidate_path = (
+            summary_dir / "paper_live_trade_decision_chop_suppression_candidate.yaml"
+        )
+        trade_decision_chop_suppression_candidate_meta_path = (
+            summary_dir / "paper_live_trade_decision_chop_suppression_candidate_meta.json"
+        )
+        direction_output_shadow_marginal_audit_path = summary_dir / f"direction_marginal_{marginal_horizon}.json"
+        direction_output_shadow_marginal_rows_path = summary_dir / f"direction_marginal_{marginal_horizon}_rows.csv"
         direction_audit_input = summary_dir / "backtest_signals_meta_ensemble_decision_aligned.csv"
         if not direction_audit_input.exists() and not args.dry_run:
             direction_audit_input = summary_dir / "backtest_signals_meta_ensemble.csv"
@@ -9735,6 +10173,214 @@ def main() -> None:
                         paper_live_config = str(audit_weighted_config_path)
                 except Exception as exc:
                     print(f"Warning: failed to derive audit-weighted paper-live config: {exc}", file=sys.stderr)
+        if marginal_audit_enabled:
+            direction_output_shadow_min_rows = int(
+                direction_output_shadow_cfg.get("min_rows", 200)
+            )
+            direction_output_shadow_min_regime_rows = int(
+                direction_output_shadow_cfg.get("min_regime_rows", calibration_cfg.get("min_regime_rows", 20))
+            )
+            direction_output_shadow_fold_size = int(direction_output_shadow_cfg.get("fold_size", quality_cfg.get("fold_size", 12)))
+            direction_output_shadow_lookback_rows = int(
+                direction_output_shadow_cfg.get("lookback_rows", quality_cfg.get("lookback_rows", 2000))
+            )
+            direction_output_shadow_lookback_hours = int(
+                direction_output_shadow_cfg.get("lookback_hours", quality_cfg.get("lookback_hours", 0))
+            )
+
+            marginal_audit_cmd = [
+                python,
+                "-m",
+                "src.scripts.analyze_direction_marginal_calibration",
+                "--history-path",
+                "artifacts/predictions/history.json",
+                "--spot-ohlcv-path",
+                "data/spot_klines",
+                "--horizon",
+                marginal_horizon,
+                "--benchmark-config",
+                str(paper_live_config),
+                "--fold-size",
+                str(direction_output_shadow_fold_size),
+                "--lookback-rows",
+                str(direction_output_shadow_lookback_rows),
+                "--lookback-hours",
+                str(direction_output_shadow_lookback_hours),
+                "--output",
+                str(direction_output_shadow_marginal_audit_path),
+                "--rows-output",
+                str(direction_output_shadow_marginal_rows_path),
+            ]
+            if direction_output_shadow_include_snapshots:
+                marginal_audit_cmd.append("--include-reliability-snapshots")
+            results.append(
+                _run_step(
+                    "direction_marginal_audit",
+                    marginal_audit_cmd,
+                    logs_dir / "direction_marginal_audit.log",
+                    args.dry_run,
+                )
+            )
+
+            if not args.dry_run and upstream_direction_candidate_enabled and direction_output_shadow_marginal_audit_path.exists():
+                try:
+                    candidate_payload = _write_upstream_direction_candidate_config(
+                        base_config_path=Path(paper_live_config),
+                        marginal_audit_path=direction_output_shadow_marginal_audit_path,
+                        output_path=upstream_direction_candidate_path,
+                        meta_output_path=upstream_direction_candidate_meta_path,
+                        apply_to_paper_live=upstream_direction_candidate_apply_to_paper_live,
+                    )
+                    if (
+                        candidate_payload.get("internal_direction_weight_update_applied")
+                        and upstream_direction_candidate_apply_to_paper_live
+                    ):
+                        paper_live_config = str(upstream_direction_candidate_path)
+                except Exception as exc:
+                    print(f"Warning: failed to derive upstream direction candidate config: {exc}", file=sys.stderr)
+
+        if not args.dry_run and trade_decision_chop_suppression_candidate_enabled and direction_audit_input.exists():
+            try:
+                candidate_payload = _write_trade_decision_midband_candidate_config(
+                    base_config_path=Path(paper_live_config),
+                    candidate_path=direction_audit_input,
+                    output_path=trade_decision_chop_suppression_candidate_path,
+                    meta_output_path=trade_decision_chop_suppression_candidate_meta_path,
+                    recent_window_rows=int(
+                        trade_decision_chop_suppression_candidate_cfg.get("recent_window_rows", 288)
+                    ),
+                    signal_col=str(trade_decision_chop_suppression_candidate_cfg.get("signal_col", "signal_ensemble")),
+                    p_col=str(trade_decision_chop_suppression_candidate_cfg.get("p_col", "p_up")),
+                    ret_pred_col=str(
+                        trade_decision_chop_suppression_candidate_cfg.get("ret_pred_col", "ret_pred")
+                    ),
+                    return_col=str(
+                        trade_decision_chop_suppression_candidate_cfg.get("return_col", "ret_ensemble_net")
+                    ),
+                    regime_col=str(
+                        trade_decision_chop_suppression_candidate_cfg.get("regime_col", "regime_state")
+                    ),
+                    min_regime_rows=int(
+                        trade_decision_chop_suppression_candidate_cfg.get("min_regime_rows", 2)
+                    ),
+                    require_overall_regime_negative=bool(
+                        trade_decision_chop_suppression_candidate_cfg.get("require_overall_regime_negative", True)
+                    ),
+                    apply_to_paper_live=trade_decision_chop_suppression_candidate_apply_to_paper_live,
+                )
+                if (
+                    candidate_payload.get("trade_decision_midband_update_applied")
+                    and trade_decision_chop_suppression_candidate_apply_to_paper_live
+                ):
+                    paper_live_config = str(trade_decision_chop_suppression_candidate_path)
+            except Exception as exc:
+                print(
+                    f"Warning: failed to derive trade decision chop suppression candidate config: {exc}",
+                    file=sys.stderr,
+                )
+
+        if direction_output_shadow_enabled:
+            direction_output_labeled_cmd = [
+                python,
+                "-m",
+                "src.scripts.build_labeled_backtest_from_history",
+                "--no-prefer-backtest",
+                "--output",
+                str(direction_output_shadow_labeled_path),
+                "--meta-output",
+                str(direction_output_shadow_labeled_meta_path),
+                "--fold-size",
+                str(direction_output_shadow_fold_size),
+                "--lookback-rows",
+                str(direction_output_shadow_lookback_rows),
+                "--lookback-hours",
+                str(direction_output_shadow_lookback_hours),
+                "--min-rows",
+                str(direction_output_shadow_min_rows),
+                "--horizons",
+                *direction_output_shadow_horizon_labels,
+            ]
+            if direction_output_shadow_include_snapshots:
+                direction_output_labeled_cmd.append("--include-reliability-snapshots")
+            try:
+                results.append(
+                    _run_step(
+                        "build_direction_output_shadow_dataset",
+                        direction_output_labeled_cmd,
+                        logs_dir / "build_direction_output_shadow_dataset.log",
+                        args.dry_run,
+                    )
+                )
+            except RuntimeError as exc:
+                print(
+                    "Warning: failed to build direction output shadow dataset; skipping direction output shadow calibration: "
+                    f"{exc}",
+                    file=sys.stderr,
+                )
+
+            if direction_output_shadow_labeled_path.exists() or args.dry_run:
+                direction_output_calibration_cmd = [
+                    python,
+                    "-m",
+                    "src.scripts.train_platt_calibration",
+                    "--horizons",
+                    *[str(horizon) for horizon in direction_output_shadow_horizons],
+                    "--output-path",
+                    str(direction_output_shadow_calibration_path),
+                    "--coverage-output-path",
+                    str(direction_output_shadow_coverage_path),
+                    "--method",
+                    direction_output_shadow_method,
+                    "--labeled-input",
+                    str(direction_output_shadow_labeled_path),
+                    "--fit-base-horizons-from-labeled-input",
+                    "--skip-model-fit",
+                    "--regime-col",
+                    str(calibration_cfg.get("regime_col", "regime_state")),
+                    "--min-regime-rows",
+                    str(direction_output_shadow_min_regime_rows),
+                ]
+                results.append(
+                    _run_step(
+                        "direction_output_shadow_calibration",
+                        direction_output_calibration_cmd,
+                        logs_dir / "direction_output_shadow_calibration.log",
+                        args.dry_run,
+                    )
+                )
+
+            if args.dry_run:
+                if direction_output_shadow_apply_to_paper_live:
+                    paper_live_config = str(direction_output_shadow_config_path)
+            elif direction_output_shadow_calibration_path.exists():
+                try:
+                    _write_direction_output_shadow_config(
+                        base_config_path=Path(paper_live_config),
+                        direction_output_calibration_path=direction_output_shadow_calibration_path,
+                        output_path=direction_output_shadow_config_path,
+                        meta_output_path=direction_output_shadow_config_meta_path,
+                        marginal_audit_path=(
+                            direction_output_shadow_marginal_audit_path
+                            if direction_output_shadow_apply_marginal_weights
+                            and direction_output_shadow_marginal_audit_path.exists()
+                            else None
+                        ),
+                        neutral_band=direction_output_shadow_neutral_band,
+                        horizons=direction_output_shadow_horizons,
+                    )
+                    if direction_output_shadow_apply_to_paper_live:
+                        paper_live_config = str(direction_output_shadow_config_path)
+                except Exception as exc:
+                    print(f"Warning: failed to derive direction-output shadow config: {exc}", file=sys.stderr)
+
+                if direction_output_shadow_marginal_audit_path.exists():
+                    latest_direction_marginal_path = Path(f"artifacts/analysis/direction_marginal_{marginal_horizon}_latest.json")
+                    latest_direction_marginal_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(direction_output_shadow_marginal_audit_path, latest_direction_marginal_path)
+                if direction_output_shadow_marginal_rows_path.exists():
+                    latest_direction_marginal_rows_path = Path(f"artifacts/analysis/direction_marginal_{marginal_horizon}_rows.csv")
+                    latest_direction_marginal_rows_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(direction_output_shadow_marginal_rows_path, latest_direction_marginal_rows_path)
         paper_cmd = [
             python,
             "-m",
@@ -9804,6 +10450,28 @@ def main() -> None:
                 latest_audit_path = Path("artifacts/analysis/direction_model_audit_latest.json")
                 latest_audit_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(summary_dir / "direction_model_audit.json", latest_audit_path)
+
+        prediction_coherence_cmd = [
+            python,
+            "-m",
+            "src.scripts.analyze_prediction_coherence",
+            "--history-path",
+            "artifacts/predictions/history.json",
+            "--output",
+            str(summary_dir / "prediction_coherence.json"),
+        ]
+        results.append(
+            _run_step(
+                "prediction_coherence",
+                prediction_coherence_cmd,
+                logs_dir / "prediction_coherence.log",
+                args.dry_run,
+            )
+        )
+        if not args.dry_run:
+            latest_prediction_coherence_path = Path("artifacts/analysis/prediction_coherence_latest.json")
+            latest_prediction_coherence_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(summary_dir / "prediction_coherence.json", latest_prediction_coherence_path)
 
         # Mark monitoring artifact with no-trade/fallback regime diagnostics.
         regime_path = summary_dir / "regime_diagnostics.json"

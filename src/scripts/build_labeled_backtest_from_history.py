@@ -9,27 +9,78 @@ import numpy as np
 import pandas as pd
 
 
-def _find_latest_spot_ohlcv(path: Path) -> Path:
+def _format_horizon_label(horizon: float) -> str:
+    if float(horizon).is_integer() and horizon >= 1.0:
+        return f"{int(round(horizon))}h"
+    if horizon < 1.0:
+        return f"{int(round(horizon * 60))}m"
+    return f"{horizon:g}h"
+
+
+def _parse_horizon_hours(horizon: str) -> float:
+    value = str(horizon).strip().lower()
+    if value.endswith("h"):
+        return float(value[:-1])
+    if value.endswith("m"):
+        return float(value[:-1]) / 60.0
+    return float(value)
+
+
+def _realized_column_names(horizon: str) -> Tuple[str, str]:
+    label = _format_horizon_label(_parse_horizon_hours(horizon))
+    return (f"close_next_{label}", f"ret_{label}_realized")
+
+
+def _resolve_spot_ohlcv_files(path: Path) -> List[Path]:
     if path.is_file():
-        return path
+        return [path]
     if not path.exists():
         raise FileNotFoundError(f"Spot OHLCV path not found: {path}")
     candidates = sorted(path.glob("*.parquet"))
     if not candidates:
+        candidates = sorted(path.glob("*.csv"))
+    if not candidates:
         raise FileNotFoundError(f"No parquet files found under {path}")
-    return candidates[-1]
+    return candidates
 
 
-def _load_history_rows(path: Path, horizon: str) -> pd.DataFrame:
+def _load_prediction_entries(path: Path, *, include_reliability_snapshots: bool = False) -> List[Dict[str, object]]:
+    sources: List[Path] = []
+    if include_reliability_snapshots:
+        sources.extend(sorted(Path("artifacts/reliability").glob("*/summary/live_predictions_snapshot.json")))
+    sources.append(path)
+
+    entries: List[Dict[str, object]] = []
+    for source in sources:
+        if not source.exists():
+            continue
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            entries.extend(item for item in payload if isinstance(item, dict))
+        elif isinstance(payload, dict):
+            entries.append(payload)
+    if not entries:
+        raise RuntimeError(f"No prediction entries found from configured sources rooted at {path}")
+    return entries
+
+
+def _load_history_rows(
+    path: Path,
+    horizon: str,
+    *,
+    include_reliability_snapshots: bool = False,
+) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"History not found: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError("Prediction history must be a JSON list")
+    payload = _load_prediction_entries(path, include_reliability_snapshots=include_reliability_snapshots)
 
     rows: List[Dict[str, object]] = []
     for entry in payload:
-        predictions = entry.get("predictions", {}) if isinstance(entry, dict) else {}
+        predictions = entry.get("predictions") if isinstance(entry, dict) else {}
+        if not isinstance(predictions, dict) and isinstance(entry, dict):
+            predictions = entry.get("horizons")
+        if not isinstance(predictions, dict) and isinstance(entry, dict):
+            predictions = entry
         horizon_pred = predictions.get(horizon, {}) if isinstance(predictions, dict) else {}
         if not isinstance(horizon_pred, dict):
             continue
@@ -41,6 +92,8 @@ def _load_history_rows(path: Path, horizon: str) -> pd.DataFrame:
         row: Dict[str, object] = {
             "ts": ts_value,
             "generated_at": entry.get("generated_at") if isinstance(entry, dict) else None,
+            "horizon": _format_horizon_label(_parse_horizon_hours(horizon)),
+            "horizon_hours": _parse_horizon_hours(horizon),
             "p_up": p_up,
             "ret_pred": horizon_pred.get("ret_pred"),
             "signal_dir_only": horizon_pred.get("signal_dir_only"),
@@ -65,17 +118,22 @@ def _load_history_rows(path: Path, horizon: str) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df["generated_at"] = pd.to_datetime(df["generated_at"], utc=True, errors="coerce")
     df = df.dropna(subset=["ts"]).copy()
     df["ts_hour"] = df["ts"].dt.floor("h")
-    df = df.sort_values("ts").drop_duplicates(subset=["ts_hour"], keep="last")
+    df = df.sort_values(["ts", "generated_at"]).drop_duplicates(subset=["ts_hour"], keep="last")
     return df.reset_index(drop=True)
 
 
-def _load_ohlcv(path: Path) -> pd.DataFrame:
-    if path.suffix.lower() == ".csv":
-        df = pd.read_csv(path)
-    else:
-        df = pd.read_parquet(path)
+def _load_ohlcv(path: Path, horizons: Optional[List[str]] = None) -> pd.DataFrame:
+    source_files = _resolve_spot_ohlcv_files(path)
+    frames: List[pd.DataFrame] = []
+    for source_file in source_files:
+        if source_file.suffix.lower() == ".csv":
+            frames.append(pd.read_csv(source_file))
+        else:
+            frames.append(pd.read_parquet(source_file))
+    df = pd.concat(frames, ignore_index=True)
     if "ts" not in df.columns or "close" not in df.columns:
         raise ValueError("OHLCV input must include 'ts' and 'close' columns")
     out = df[["ts", "close"]].copy()
@@ -83,8 +141,19 @@ def _load_ohlcv(path: Path) -> pd.DataFrame:
     out["close"] = pd.to_numeric(out["close"], errors="coerce")
     out = out.dropna(subset=["ts", "close"]).sort_values("ts").drop_duplicates(subset=["ts"], keep="last")
     out["ts_hour"] = out["ts"].dt.floor("h")
-    out["close_next_1h"] = out["close"].shift(-1)
-    out["ret_1h_realized"] = np.log(out["close_next_1h"] / out["close"])
+
+    target_horizons = horizons or ["1h"]
+    for horizon in target_horizons:
+        horizon_steps = int(round(_parse_horizon_hours(horizon)))
+        if horizon_steps <= 0:
+            raise ValueError(f"Unsupported horizon for OHLCV labeling: {horizon}")
+        close_next_col, ret_col = _realized_column_names(horizon)
+        out[close_next_col] = out["close"].shift(-horizon_steps)
+        out[ret_col] = np.log(out[close_next_col] / out["close"])
+
+    default_close_next_col, default_ret_col = _realized_column_names("1h")
+    out["close_next_1h"] = out[default_close_next_col]
+    out["ret_1h_realized"] = out[default_ret_col]
     out["y_true"] = (out["ret_1h_realized"] > 0).astype(int)
     return out.reset_index(drop=True)
 
@@ -223,6 +292,7 @@ def _build_from_backtest(
     fold_size: int,
     lookback_rows: Optional[int],
     lookback_hours: Optional[int],
+    include_reliability_snapshots: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     backtest = _load_backtest_rows(backtest_csv)
     backtest = _apply_time_filters(backtest, lookback_rows=lookback_rows, lookback_hours=lookback_hours)
@@ -232,12 +302,18 @@ def _build_from_backtest(
         )
     labeled = backtest.dropna(subset=["y_true"]).copy()
     try:
-        history_df = _load_history_rows(history_path, horizon)
+        history_df = _load_history_rows(
+            history_path,
+            horizon,
+            include_reliability_snapshots=include_reliability_snapshots,
+        )
         labeled = _enrich_with_history_decision_features(labeled, history_df)
     except Exception:
         # Keep canonical backtest behavior even when history enrichment is unavailable.
         pass
     labeled["y_true"] = labeled["y_true"].astype(int)
+    labeled["horizon"] = "1h"
+    labeled["horizon_hours"] = 1.0
     labeled = _assign_fold(labeled, fold_size)
     meta = {
         "source": "backtest_csv",
@@ -255,18 +331,31 @@ def _build_from_history(
     fold_size: int,
     lookback_rows: Optional[int],
     lookback_hours: Optional[int],
+    include_reliability_snapshots: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
-    history_df = _load_history_rows(history_path, horizon)
+    history_df = _load_history_rows(
+        history_path,
+        horizon,
+        include_reliability_snapshots=include_reliability_snapshots,
+    )
     history_df = _apply_time_filters(history_df, lookback_rows=lookback_rows, lookback_hours=lookback_hours)
-    ohlcv_file = _find_latest_spot_ohlcv(spot_ohlcv_path)
-    ohlcv_df = _load_ohlcv(ohlcv_file)
+    ohlcv_df = _load_ohlcv(spot_ohlcv_path, horizons=[horizon])
+
+    close_next_col, ret_col = _realized_column_names(horizon)
 
     merged = history_df.merge(
-        ohlcv_df[["ts_hour", "close", "close_next_1h", "ret_1h_realized", "y_true"]],
+        ohlcv_df[["ts_hour", "close", close_next_col, ret_col]],
         on="ts_hour",
         how="left",
     )
-    merged = merged.dropna(subset=["y_true"]).copy()
+    merged = merged.rename(
+        columns={
+            close_next_col: "close_target",
+            ret_col: "ret_realized",
+        }
+    )
+    merged["y_true"] = (pd.to_numeric(merged["ret_realized"], errors="coerce") > 0).astype(float)
+    merged = merged.dropna(subset=["y_true", "ret_realized"]).copy()
     merged["y_true"] = merged["y_true"].astype(int)
     merged = _assign_fold(merged, fold_size)
     meta = {
@@ -274,9 +363,68 @@ def _build_from_history(
         "source_path": str(history_path),
         "history_rows": int(len(history_df)),
         "labeled_rows": int(len(merged)),
-        "spot_ohlcv_file": str(ohlcv_file),
+        "spot_ohlcv_file": str(spot_ohlcv_path),
     }
     return merged, meta
+
+
+def _build_multi_horizon_from_history(
+    history_path: Path,
+    horizons: List[str],
+    spot_ohlcv_path: Path,
+    fold_size: int,
+    lookback_rows: Optional[int],
+    lookback_hours: Optional[int],
+    include_reliability_snapshots: bool = False,
+) -> Tuple[pd.DataFrame, Dict[str, object]]:
+    normalized_horizons = [_format_horizon_label(_parse_horizon_hours(horizon)) for horizon in horizons]
+    ohlcv_df = _load_ohlcv(spot_ohlcv_path, horizons=normalized_horizons)
+
+    labeled_frames: List[pd.DataFrame] = []
+    horizon_rows: Dict[str, int] = {}
+    for horizon in normalized_horizons:
+        history_df = _load_history_rows(
+            history_path,
+            horizon,
+            include_reliability_snapshots=include_reliability_snapshots,
+        )
+        history_df = _apply_time_filters(history_df, lookback_rows=lookback_rows, lookback_hours=lookback_hours)
+        close_next_col, ret_col = _realized_column_names(horizon)
+        merged = history_df.merge(
+            ohlcv_df[["ts_hour", "close", close_next_col, ret_col]],
+            on="ts_hour",
+            how="left",
+        )
+        merged = merged.rename(
+            columns={
+                close_next_col: "close_target",
+                ret_col: "ret_realized",
+            }
+        )
+        merged["y_true"] = (pd.to_numeric(merged["ret_realized"], errors="coerce") > 0).astype(float)
+        merged = merged.dropna(subset=["y_true", "ret_realized"]).copy()
+        if merged.empty:
+            continue
+        merged["y_true"] = merged["y_true"].astype(int)
+        labeled_frames.append(merged)
+        horizon_rows[horizon] = int(len(merged))
+
+    if not labeled_frames:
+        raise RuntimeError("No labeled rows found for requested horizons from history+OHLCV.")
+
+    combined = pd.concat(labeled_frames, ignore_index=True)
+    combined = combined.sort_values(["ts", "horizon"]).reset_index(drop=True)
+    combined = _assign_fold(combined, fold_size)
+    meta = {
+        "source": "history_plus_ohlcv_multi_horizon",
+        "source_path": str(history_path),
+        "history_rows": int(len(combined)),
+        "labeled_rows": int(len(combined)),
+        "spot_ohlcv_file": str(spot_ohlcv_path),
+        "horizons": normalized_horizons,
+        "rows_by_horizon": horizon_rows,
+    }
+    return combined, meta
 
 
 def main() -> None:
@@ -311,7 +459,19 @@ def main() -> None:
         default=Path("data/spot_klines"),
         help="Parquet/CSV file or directory (latest parquet will be used).",
     )
+    parser.add_argument(
+        "--include-reliability-snapshots",
+        action="store_true",
+        help="Also merge archived artifacts/reliability/*/summary/live_predictions_snapshot.json entries into the history source.",
+    )
     parser.add_argument("--horizon", type=str, default="1h")
+    parser.add_argument(
+        "--horizons",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Optional list of horizons to label from prediction history, e.g. 1h 4h 8h 12h.",
+    )
     parser.add_argument("--fold-size", type=int, default=6)
     parser.add_argument(
         "--lookback-rows",
@@ -352,36 +512,53 @@ def main() -> None:
 
     labeled: pd.DataFrame
     meta: Dict[str, object]
-    if args.prefer_backtest:
+    requested_horizons = args.horizons or [args.horizon]
+    normalized_horizons = [_format_horizon_label(_parse_horizon_hours(horizon)) for horizon in requested_horizons]
+    multi_horizon_requested = len(normalized_horizons) > 1
+
+    if multi_horizon_requested:
+        labeled, meta = _build_multi_horizon_from_history(
+            history_path=args.history_path,
+            horizons=normalized_horizons,
+            spot_ohlcv_path=args.spot_ohlcv_path,
+            fold_size=args.fold_size,
+            lookback_rows=lookback_rows,
+            lookback_hours=lookback_hours,
+            include_reliability_snapshots=args.include_reliability_snapshots,
+        )
+    elif args.prefer_backtest:
         try:
             _ = _find_latest_backtest_csv(args.backtest_csv)
             backtest_csv = _select_best_backtest_candidate(args.backtest_csv, min_rows_hint=int(args.min_rows))
             labeled, meta = _build_from_backtest(
                 backtest_csv,
                 history_path=args.history_path,
-                horizon=args.horizon,
+                horizon=normalized_horizons[0],
                 fold_size=args.fold_size,
                 lookback_rows=lookback_rows,
                 lookback_hours=lookback_hours,
+                include_reliability_snapshots=args.include_reliability_snapshots,
             )
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             print(f"Warning: backtest-source build unavailable ({exc}); falling back to history+OHLCV.")
             labeled, meta = _build_from_history(
                 history_path=args.history_path,
-                horizon=args.horizon,
+                horizon=normalized_horizons[0],
                 spot_ohlcv_path=args.spot_ohlcv_path,
                 fold_size=args.fold_size,
                 lookback_rows=lookback_rows,
                 lookback_hours=lookback_hours,
+                include_reliability_snapshots=args.include_reliability_snapshots,
             )
     else:
         labeled, meta = _build_from_history(
             history_path=args.history_path,
-            horizon=args.horizon,
+            horizon=normalized_horizons[0],
             spot_ohlcv_path=args.spot_ohlcv_path,
             fold_size=args.fold_size,
             lookback_rows=lookback_rows,
             lookback_hours=lookback_hours,
+            include_reliability_snapshots=args.include_reliability_snapshots,
         )
 
     if len(labeled) < int(args.min_rows):
@@ -400,6 +577,8 @@ def main() -> None:
         "lookback_rows": lookback_rows,
         "lookback_hours": lookback_hours,
         "min_rows": int(args.min_rows),
+        "requested_horizons": normalized_horizons,
+        "include_reliability_snapshots": bool(args.include_reliability_snapshots),
         "columns": [str(c) for c in labeled.columns],
     }
     args.meta_output.parent.mkdir(parents=True, exist_ok=True)

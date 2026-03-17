@@ -10,7 +10,7 @@ targets:
 p_up_min: 0.45
 ret_min: 0.0
 direction_threshold: 0.6
-auto_direction_threshold: false
+auto_direction_threshold: true
 thresholds_json: artifacts/models/calibrated_thresholds_merged.json
 data_quality:
   enabled: false
@@ -36,6 +36,16 @@ uncertainty_policy:
   max_interval_width: 0.65
   require_center_cross: true
   min_component_count: 3
+forecast_coherence_policy:
+  enabled: true
+  horizons: [1, 4, 8, 12]
+  block_on_direction_ret_mismatch: true
+  block_on_direction_projected_price_mismatch: true
+  block_on_p_up_ret_mismatch: true
+  p_up_neutral_band: 0.02
+  min_p_up_edge: 0.05
+  min_abs_ret_pred: 0.0
+  exclude_blocked_horizons_from_voting: true
 spot_provider: binanceus
 write_artifacts: true
 disable_monitoring_latest: false

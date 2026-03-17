@@ -24,10 +24,15 @@ from src.scripts.run_reliability_workflow import (
     _is_supported_official_shadow_variant,
     _official_shadow_overlap_triggered_trade_diag_path,
     _load_reusable_selection_calibration_guard_rules,
+    _resolve_direction_output_shadow_horizons,
     _resolve_trade_decision_model_path_for_variant,
     _resolve_effective_champion_gate,
     _shadow_variant_uses_reference_feature_ablation_model,
     _summarize_trade_decision_stage_distribution,
+    _derive_trade_decision_regime_midband_candidate,
+    _write_trade_decision_midband_candidate_config,
+    _write_upstream_direction_candidate_config,
+    _write_direction_output_shadow_config,
 )
 
 
@@ -184,6 +189,240 @@ class ChampionGateAlignmentCheckTests(unittest.TestCase):
 
 
 class SelectionCalibrationGuardReuseTests(unittest.TestCase):
+    def test_resolve_direction_output_shadow_horizons_filters_invalid_values(self) -> None:
+        self.assertEqual(
+            _resolve_direction_output_shadow_horizons({"horizons": [1, "4", 0, "bad", -2, 1]}),
+            [1.0, 4.0],
+        )
+        self.assertEqual(_resolve_direction_output_shadow_horizons({}), [1.0])
+
+    def test_write_direction_output_shadow_config_writes_meta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            base_path = tmp_path / "base.yaml"
+            calib_path = tmp_path / "direction_output_isotonic_1h.json"
+            audit_path = tmp_path / "direction_marginal_1h.json"
+            output_path = tmp_path / "shadow.yaml"
+            meta_path = tmp_path / "shadow_meta.json"
+            base_path.write_text(
+                "regime_model_weights:\n  enabled: true\n  neutral:\n    '1': 'xgb:1.0,lstm:1.0'\nwrite_artifacts: true\n",
+                encoding="utf-8",
+            )
+            calib_path.write_text(
+                json.dumps({"1h": {"method": "isotonic", "x": [0.0, 1.0], "y": [0.0, 1.0]}}),
+                encoding="utf-8",
+            )
+            audit_path.write_text(
+                json.dumps({"weight_recommendations": {"recommended_weight_spec_1h": "xgb:1.5,lstm:1.0"}}),
+                encoding="utf-8",
+            )
+
+            payload = _write_direction_output_shadow_config(
+                base_config_path=base_path,
+                direction_output_calibration_path=calib_path,
+                output_path=output_path,
+                meta_output_path=meta_path,
+                marginal_audit_path=audit_path,
+                neutral_band=0.03,
+                horizons=[1.0],
+            )
+
+            self.assertTrue(output_path.exists())
+            self.assertTrue(meta_path.exists())
+            saved_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved_meta["output_path"], str(output_path))
+            self.assertTrue(payload["audit_weights_applied"])
+
+    def test_write_upstream_direction_candidate_config_updates_only_1h_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            base_path = tmp_path / "base.yaml"
+            audit_path = tmp_path / "direction_marginal_1h.json"
+            output_path = tmp_path / "candidate.yaml"
+            meta_path = tmp_path / "candidate_meta.json"
+            base_path.write_text(
+                "regime_model_weights:\n"
+                "  enabled: true\n"
+                "  neutral:\n"
+                "    '1': 'xgb:1.0,lstm:1.0'\n"
+                "    '4': 'xgb:0.5,lstm:1.5'\n"
+                "  trend_ignition:\n"
+                "    '1': 'xgb:1.0,lstm:1.0'\n"
+                "  chop:\n"
+                "    '1': 'xgb:1.0,lstm:1.0'\n",
+                encoding="utf-8",
+            )
+            audit_path.write_text(
+                json.dumps(
+                    {
+                        "weight_recommendations": {
+                            "recommended_weight_spec_1h": "gru:1.5,lstm:1.0,xgb:0.0,lgbm:0.0",
+                            "recommended_regime_weights_1h": {
+                                "neutral": "gru:1.5,lstm:1.0,xgb:0.0,lgbm:0.0",
+                                "trend_ignition": "gru:1.5,lstm:1.0,xgb:0.0,lgbm:0.0",
+                                "chop": "gru:1.5,lstm:1.0,xgb:0.0,lgbm:0.0"
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = _write_upstream_direction_candidate_config(
+                base_config_path=base_path,
+                marginal_audit_path=audit_path,
+                output_path=output_path,
+                meta_output_path=meta_path,
+                apply_to_paper_live=False,
+            )
+
+            rendered = output_path.read_text(encoding="utf-8")
+            saved_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(payload["internal_direction_weight_update_applied"])
+            self.assertEqual(saved_meta["output_path"], str(output_path))
+            self.assertIn("'1': gru:1.5,lstm:1.0,xgb:0.0,lgbm:0.0", rendered)
+            self.assertIn("'4': xgb:0.5,lstm:1.5", rendered)
+
+    def test_write_upstream_direction_candidate_config_can_override_chop_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            base_path = tmp_path / "base.yaml"
+            audit_path = tmp_path / "direction_marginal_1h.json"
+            output_path = tmp_path / "candidate.yaml"
+            meta_path = tmp_path / "candidate_meta.json"
+            base_path.write_text(
+                "regime_model_weights:\n"
+                "  enabled: true\n"
+                "  neutral:\n"
+                "    '1': 'xgb:1.5,lstm:1.5'\n"
+                "    '4': 'xgb:0.5,lstm:1.5'\n"
+                "  trend_ignition:\n"
+                "    '1': 'xgb:1.5,lstm:1.5'\n"
+                "  chop:\n"
+                "    '1': 'xgb:1.5,lstm:1.5'\n",
+                encoding="utf-8",
+            )
+            audit_path.write_text(
+                json.dumps(
+                    {
+                        "weight_recommendations": {
+                            "recommended_weight_spec_1h": "gru:1.5,lstm:1.0,xgb:0.0,lgbm:0.0",
+                            "recommended_regime_weights_1h": {
+                                "chop": "transformer:0.0,transformer_large:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0"
+                            },
+                            "apply_fallback_for_missing_regimes": False,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = _write_upstream_direction_candidate_config(
+                base_config_path=base_path,
+                marginal_audit_path=audit_path,
+                output_path=output_path,
+                meta_output_path=meta_path,
+                apply_to_paper_live=False,
+            )
+
+            rendered = output_path.read_text(encoding="utf-8")
+            saved_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(payload["internal_direction_weight_update_applied"])
+            self.assertFalse(bool(saved_meta["apply_fallback_for_missing_regimes"]))
+            self.assertIn("neutral:\n    '1': xgb:1.5,lstm:1.5", rendered)
+            self.assertIn("trend_ignition:\n    '1': xgb:1.5,lstm:1.5", rendered)
+            self.assertIn("chop:\n    '1': transformer:0.0,transformer_large:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0", rendered)
+            self.assertIn("'4': xgb:0.5,lstm:1.5", rendered)
+
+    def test_derive_trade_decision_regime_midband_candidate_builds_chop_band_from_recent_trades(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            candidate_path = tmp_path / "candidate.csv"
+            candidate_path.write_text(
+                "ts,signal_ensemble,p_up,ret_pred,ret_ensemble_net,regime_state,volatility_realized_24h\n"
+                "2026-03-01T00:00:00Z,1,0.412,-0.0002,-0.0020,chop,0.010\n"
+                "2026-03-01T01:00:00Z,1,0.497,-0.0030,-0.0010,chop,0.011\n"
+                "2026-03-01T02:00:00Z,1,0.556,0.0080,-0.0030,chop,0.012\n"
+                "2026-03-01T03:00:00Z,1,0.520,0.0020,0.0040,neutral,0.004\n",
+                encoding="utf-8",
+            )
+
+            payload = _derive_trade_decision_regime_midband_candidate(
+                candidate_path=candidate_path,
+                recent_window_rows=10,
+                signal_col="signal_ensemble",
+                p_col="p_up",
+                ret_pred_col="ret_pred",
+                return_col="ret_ensemble_net",
+                regime_col="regime_state",
+                min_regime_rows=2,
+                require_overall_regime_negative=True,
+            )
+
+            self.assertTrue(payload["enabled"])
+            self.assertEqual(payload["selected_regimes"], ["chop"])
+            self.assertEqual(payload["p_up_low"], 0.41)
+            self.assertEqual(payload["p_up_high"], 0.56)
+            self.assertEqual(payload["min_abs_ret_pred"], 0.0002)
+            self.assertIsNone(payload["max_abs_ret_pred"])
+
+    def test_write_trade_decision_midband_candidate_config_updates_only_midband_veto(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            base_path = tmp_path / "base.yaml"
+            candidate_path = tmp_path / "candidate.csv"
+            output_path = tmp_path / "suppression_candidate.yaml"
+            meta_path = tmp_path / "suppression_candidate_meta.json"
+            base_path.write_text(
+                "trade_decision_policy:\n"
+                "  enabled: true\n"
+                "  threshold: 0.55\n"
+                "  midband_veto:\n"
+                "    enabled: true\n"
+                "    p_up_low: 0.56\n"
+                "    p_up_high: 0.59\n"
+                "    high_inclusive: false\n"
+                "    min_abs_ret_pred: 0.001\n"
+                "    max_abs_ret_pred: null\n"
+                "    regime_states:\n"
+                "    - chop\n"
+                "regime_model_weights:\n"
+                "  enabled: true\n"
+                "  chop:\n"
+                "    '1': 'xgb:1.5,lstm:1.5'\n",
+                encoding="utf-8",
+            )
+            candidate_path.write_text(
+                "ts,signal_ensemble,p_up,ret_pred,ret_ensemble_net,regime_state,volatility_realized_24h\n"
+                "2026-03-01T00:00:00Z,1,0.412,-0.0002,-0.0020,chop,0.010\n"
+                "2026-03-01T01:00:00Z,1,0.497,-0.0030,-0.0010,chop,0.011\n"
+                "2026-03-01T02:00:00Z,1,0.556,0.0080,-0.0030,chop,0.012\n"
+                "2026-03-01T03:00:00Z,1,0.520,0.0020,0.0040,neutral,0.004\n",
+                encoding="utf-8",
+            )
+
+            payload = _write_trade_decision_midband_candidate_config(
+                base_config_path=base_path,
+                candidate_path=candidate_path,
+                output_path=output_path,
+                meta_output_path=meta_path,
+            )
+
+            rendered = output_path.read_text(encoding="utf-8")
+            saved_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(payload["trade_decision_midband_update_applied"])
+            self.assertEqual(saved_meta["output_path"], str(output_path))
+            self.assertIn("p_up_low: 0.41", rendered)
+            self.assertIn("p_up_high: 0.56", rendered)
+            self.assertIn("high_inclusive: true", rendered)
+            self.assertIn("min_abs_ret_pred: 0.0002", rendered)
+            self.assertIn("regime_states:\n    - chop", rendered)
+            self.assertIn("'1': xgb:1.5,lstm:1.5", rendered)
+
+
     def test_extract_trade_decision_reference_source_reads_incumbent_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             meta_path = Path(tmpdir) / "meta.json"

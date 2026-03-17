@@ -95,12 +95,17 @@ TARGET_RANGE_MODEL_DIR = Path("artifacts/models/target_ranges")
 TARGET_RANGE_DEFAULT_HORIZONS: tuple[float, ...] = (4.0, 8.0, 12.0)
 TARGET_RANGE_DEFAULT_OVERRIDE_RATIO = 0.01
 TARGET_RANGE_DEFAULT_CONFIDENCE_SCALE = 0.01
+REGIME_CALIBRATION_MIN_PLATT_SLOPE = 0.05
 CONFIDENCE_MIN_DEFAULT = 0.0
 POSITION_SIZE_FLOOR_DEFAULT = 0.0
 POSITION_SIZE_CAP_DEFAULT = 1.0
 MIN_DIRECTIONAL_RETURN_BUFFER = 0.001
 EXECUTION_POLICY_DEFAULT_LOOKBACK_BARS = 240
 EXECUTION_POLICY_DEFAULT_MIN_SAMPLES = 40
+EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_HORIZONS: tuple[float, ...] = (8.0, 12.0)
+EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_CONFIDENCE_MIN = 0.72
+EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_BUFFER_STD_MULT = 1.5
+EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_MIN_TIGHTEN_FRACTION = 0.1
 
 BREAKOUT_VOL_NORMALIZER = 0.05
 BREAKOUT_RET_NORMALIZER = 0.002
@@ -168,6 +173,8 @@ CONFIG_ALLOWED_KEYS = {
     "feature_coverage_policy",
     "confluence_policy",
     "execution_policy",
+    "forecast_coherence_policy",
+    "direction_output_policy",
 }
 # boolean config keys; converted with _bool_env
 CONFIG_BOOL_FIELDS = {
@@ -653,12 +660,124 @@ def _normalize_execution_policy_block(value: Mapping[str, Any]) -> Dict[str, Any
             if not isinstance(raw_value, Mapping):
                 raise ValueError(f"{key} in execution_policy must be a mapping")
             normalized[key] = dict(raw_value)
-        elif key in {"partial_take_profit", "trailing_stop", "analytics", "no_trade_guards"}:
+        elif key in {
+            "partial_take_profit",
+            "trailing_stop",
+            "analytics",
+            "no_trade_guards",
+            "adaptive_take_profit",
+            "target_range_stop_refinement",
+        }:
             if not isinstance(raw_value, Mapping):
                 raise ValueError(f"{key} in execution_policy must be a mapping")
             normalized[key] = dict(raw_value)
         else:
             print(f"Warning: Unknown execution_policy config key '{raw_key}' ignored.", file=sys.stderr)
+    return normalized
+
+
+def _normalize_forecast_coherence_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("forecast_coherence_policy config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key in {
+            "enabled",
+            "block_on_direction_ret_mismatch",
+            "block_on_direction_projected_price_mismatch",
+            "block_on_p_up_ret_mismatch",
+            "exclude_blocked_horizons_from_voting",
+        }:
+            normalized[key] = bool(raw_value)
+        elif key in {"p_up_neutral_band", "min_p_up_edge", "min_abs_ret_pred"}:
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key == "horizons":
+            if raw_value is None:
+                normalized[key] = None
+            elif isinstance(raw_value, str):
+                normalized[key] = parse_targets(raw_value)
+            elif isinstance(raw_value, Sequence):
+                normalized[key] = [_normalize_horizon_value(item) for item in raw_value]
+            else:
+                raise ValueError("horizons in forecast_coherence_policy must be a list/sequence")
+        else:
+            print(
+                f"Warning: Unknown forecast_coherence_policy config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
+    return normalized
+
+
+def _normalize_direction_output_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("direction_output_policy config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key in {"enabled", "use_trade_probability_fallback"}:
+            normalized[key] = bool(raw_value)
+        elif key == "neutral_band":
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key == "calibration_path":
+            normalized[key] = str(raw_value) if raw_value is not None else None
+        elif key == "marginal_rerank":
+            if raw_value is None:
+                normalized[key] = None
+            elif isinstance(raw_value, Mapping):
+                marginal_rerank: Dict[str, Any] = {}
+                for raw_marginal_key, raw_marginal_value in raw_value.items():
+                    marginal_key = str(raw_marginal_key).replace("-", "_")
+                    if marginal_key in {"enabled", "use_raw_probability_gate"}:
+                        marginal_rerank[marginal_key] = bool(raw_marginal_value)
+                    elif marginal_key in {"lower", "upper"}:
+                        marginal_rerank[marginal_key] = float(raw_marginal_value) if raw_marginal_value is not None else None
+                    elif marginal_key == "min_component_count":
+                        marginal_rerank[marginal_key] = int(raw_marginal_value) if raw_marginal_value is not None else None
+                    elif marginal_key == "horizons":
+                        if raw_marginal_value is None:
+                            marginal_rerank[marginal_key] = None
+                        elif isinstance(raw_marginal_value, str):
+                            marginal_rerank[marginal_key] = parse_targets(raw_marginal_value)
+                        elif isinstance(raw_marginal_value, Sequence):
+                            marginal_rerank[marginal_key] = [_normalize_horizon_value(item) for item in raw_marginal_value]
+                        else:
+                            raise ValueError("horizons in direction_output_policy.marginal_rerank must be a list/sequence")
+                    elif marginal_key == "weight_specs":
+                        if raw_marginal_value is None:
+                            marginal_rerank[marginal_key] = {}
+                        elif isinstance(raw_marginal_value, Mapping):
+                            marginal_rerank[marginal_key] = {
+                                str(name): str(spec)
+                                for name, spec in raw_marginal_value.items()
+                                if spec is not None
+                            }
+                        else:
+                            raise ValueError("weight_specs in direction_output_policy.marginal_rerank must be a mapping")
+                    else:
+                        print(
+                            f"Warning: Unknown direction_output_policy.marginal_rerank key '{raw_marginal_key}' ignored.",
+                            file=sys.stderr,
+                        )
+                normalized[key] = marginal_rerank
+            else:
+                raise ValueError("direction_output_policy.marginal_rerank must be a mapping")
+        elif key == "horizons":
+            if raw_value is None:
+                normalized[key] = None
+            elif isinstance(raw_value, str):
+                normalized[key] = parse_targets(raw_value)
+            elif isinstance(raw_value, Sequence):
+                normalized[key] = [_normalize_horizon_value(item) for item in raw_value]
+            else:
+                raise ValueError("horizons in direction_output_policy must be a list/sequence")
+        else:
+            print(
+                f"Warning: Unknown direction_output_policy config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
     return normalized
 
 
@@ -729,6 +848,10 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_confluence_policy_block(value)
         if name == "execution_policy" and value is not None:
             return _normalize_execution_policy_block(value)
+        if name == "forecast_coherence_policy" and value is not None:
+            return _normalize_forecast_coherence_policy_block(value)
+        if name == "direction_output_policy" and value is not None:
+            return _normalize_direction_output_policy_block(value)
         return value
     raise ValueError(f"Unsupported config key: {name}")
 
@@ -1303,6 +1426,12 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
         else {}
     )
     guards_cfg = cfg.get("no_trade_guards") if isinstance(cfg.get("no_trade_guards"), Mapping) else {}
+    adaptive_tp_cfg = cfg.get("adaptive_take_profit") if isinstance(cfg.get("adaptive_take_profit"), Mapping) else {}
+    target_range_stop_cfg = (
+        cfg.get("target_range_stop_refinement")
+        if isinstance(cfg.get("target_range_stop_refinement"), Mapping)
+        else {}
+    )
     raw_regime_templates = cfg.get("regime_templates") if isinstance(cfg.get("regime_templates"), Mapping) else {}
     regime_templates: Dict[str, Dict[str, float]] = {}
     for regime_name, raw_template in raw_regime_templates.items():
@@ -1370,7 +1499,132 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
             "max_entry_deviation_atr_mult": max(float(guards_cfg.get("max_entry_deviation_atr_mult") or 1.25), 0.0),
             "require_favorable_entry_zone": bool(guards_cfg.get("require_favorable_entry_zone", True)),
         },
+        "adaptive_take_profit": {
+            "enabled": bool(adaptive_tp_cfg.get("enabled", True)),
+            "min_rr_fraction_of_floor": max(
+                min(float(adaptive_tp_cfg.get("min_rr_fraction_of_floor") or 0.85), 1.0),
+                0.0,
+            ),
+        },
+        "target_range_stop_refinement": {
+            "enabled": bool(target_range_stop_cfg.get("enabled", False)),
+            "horizons": sorted(
+                {
+                    _normalize_horizon_value(v)
+                    for v in (
+                        target_range_stop_cfg.get("horizons")
+                        or EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_HORIZONS
+                    )
+                }
+            ),
+            "confidence_min": max(
+                min(
+                    float(
+                        target_range_stop_cfg.get("confidence_min")
+                        or EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_CONFIDENCE_MIN
+                    ),
+                    1.0,
+                ),
+                0.0,
+            ),
+            "buffer_std_mult": max(
+                float(
+                    target_range_stop_cfg.get("buffer_std_mult")
+                    or EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_BUFFER_STD_MULT
+                ),
+                0.0,
+            ),
+            "min_tighten_fraction": max(
+                min(
+                    float(
+                        target_range_stop_cfg.get("min_tighten_fraction")
+                        or EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_MIN_TIGHTEN_FRACTION
+                    ),
+                    1.0,
+                ),
+                0.0,
+            ),
+        },
         "regime_templates": regime_templates,
+    }
+
+
+def _resolve_forecast_coherence_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    cfg = config or {}
+    horizons = cfg.get("horizons") or [1.0, 4.0, 8.0, 12.0]
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "horizons": sorted({_normalize_horizon_value(v) for v in horizons}),
+        "block_on_direction_ret_mismatch": bool(cfg.get("block_on_direction_ret_mismatch", True)),
+        "block_on_direction_projected_price_mismatch": bool(cfg.get("block_on_direction_projected_price_mismatch", True)),
+        "block_on_p_up_ret_mismatch": bool(cfg.get("block_on_p_up_ret_mismatch", True)),
+        "p_up_neutral_band": max(float(cfg.get("p_up_neutral_band") or 0.02), 0.0),
+        "min_p_up_edge": max(float(cfg.get("min_p_up_edge") or 0.05), 0.0),
+        "min_abs_ret_pred": max(float(cfg.get("min_abs_ret_pred") or 0.0), 0.0),
+        "exclude_blocked_horizons_from_voting": bool(cfg.get("exclude_blocked_horizons_from_voting", True)),
+    }
+
+
+def _resolve_direction_output_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    def _parse_weight_spec(spec: Any) -> Dict[str, float]:
+        if isinstance(spec, Mapping):
+            resolved: Dict[str, float] = {}
+            for name, value in spec.items():
+                try:
+                    weight = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if weight > 0.0:
+                    resolved[str(name)] = weight
+            return resolved
+        if spec is None:
+            return {}
+        resolved: Dict[str, float] = {}
+        for raw_chunk in str(spec).split(","):
+            chunk = raw_chunk.strip()
+            if not chunk or ":" not in chunk:
+                continue
+            raw_name, raw_value = chunk.split(":", 1)
+            try:
+                weight = float(raw_value.strip())
+            except ValueError:
+                continue
+            if weight > 0.0:
+                resolved[raw_name.strip()] = weight
+        return resolved
+
+    cfg = config or {}
+    horizons = cfg.get("horizons") or [1.0]
+    calibration_map = cfg.get("calibration_map") if isinstance(cfg.get("calibration_map"), Mapping) else {}
+    marginal_rerank_cfg = cfg.get("marginal_rerank") if isinstance(cfg.get("marginal_rerank"), Mapping) else {}
+    marginal_weight_specs_raw = (
+        marginal_rerank_cfg.get("weight_specs") if isinstance(marginal_rerank_cfg.get("weight_specs"), Mapping) else {}
+    )
+    marginal_weight_specs = {
+        str(name): _parse_weight_spec(spec)
+        for name, spec in marginal_weight_specs_raw.items()
+    }
+    marginal_horizons = marginal_rerank_cfg.get("horizons") or horizons
+    lower = float(marginal_rerank_cfg.get("lower", 0.5) or 0.5)
+    upper = float(marginal_rerank_cfg.get("upper", 0.6) or 0.6)
+    if upper < lower:
+        lower, upper = upper, lower
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "horizons": sorted({_normalize_horizon_value(v) for v in horizons}),
+        "neutral_band": max(float(cfg.get("neutral_band") or 0.0), 0.0),
+        "use_trade_probability_fallback": bool(cfg.get("use_trade_probability_fallback", True)),
+        "calibration_path": str(cfg.get("calibration_path") or "") or None,
+        "calibration_map": calibration_map,
+        "marginal_rerank": {
+            "enabled": bool(marginal_rerank_cfg.get("enabled", False)) and bool(marginal_weight_specs),
+            "horizons": sorted({_normalize_horizon_value(v) for v in marginal_horizons}),
+            "lower": lower,
+            "upper": upper,
+            "min_component_count": max(int(marginal_rerank_cfg.get("min_component_count") or 2), 1),
+            "use_raw_probability_gate": bool(marginal_rerank_cfg.get("use_raw_probability_gate", True)),
+            "weight_specs": marginal_weight_specs,
+        },
     }
 
 
@@ -1434,6 +1688,208 @@ def _direction_vote(entry: Mapping[str, Any]) -> str:
     return "up" if str(entry.get("direction_next", "down")).lower() == "up" else "down"
 
 
+def _direction_from_ret_pred(value: Any) -> str:
+    numeric = _finite_float_or_none(value)
+    if numeric is None:
+        return "neutral"
+    if numeric > 0.0:
+        return "up"
+    if numeric < 0.0:
+        return "down"
+    return "neutral"
+
+
+def _direction_from_projected_price(close: Any, projected_price: Any) -> str:
+    close_value = _finite_float_or_none(close)
+    projected_value = _finite_float_or_none(projected_price)
+    if close_value is None or projected_value is None:
+        return "neutral"
+    if close_value <= 0.0 or projected_value <= 0.0:
+        return "neutral"
+    if projected_value > close_value:
+        return "up"
+    if projected_value < close_value:
+        return "down"
+    return "neutral"
+
+
+def _direction_from_probability(value: Any, *, neutral_band: float = 0.0) -> str:
+    numeric = _finite_float_or_none(value)
+    if numeric is None:
+        return "neutral"
+    if numeric >= 0.5 + neutral_band:
+        return "up"
+    if numeric <= 0.5 - neutral_band:
+        return "down"
+    return "neutral"
+
+
+def _resolve_direction_threshold_for_horizon(
+    *,
+    direction_threshold: float,
+    auto_direction_threshold: bool,
+    horizon_p_up: float,
+) -> float:
+    if not auto_direction_threshold:
+        return float(direction_threshold)
+    return max(0.5, float(horizon_p_up))
+
+
+def _compute_directional_stop_take_prices(
+    *,
+    close: float,
+    ret_pred: float,
+    residual_std: float,
+    direction_signal: int,
+) -> tuple[float, float]:
+    min_buffer = max(MIN_DIRECTIONAL_RETURN_BUFFER, residual_std * 0.1)
+    if int(direction_signal) >= 1:
+        stop_return = min(ret_pred - residual_std, -min_buffer)
+        take_return = max(ret_pred + residual_std, min_buffer)
+    else:
+        stop_return = max(ret_pred + residual_std, min_buffer)
+        take_return = min(ret_pred - residual_std, -min_buffer)
+    return _project_price(close, stop_return), _project_price(close, take_return)
+
+
+def _resolve_direction_signal_for_horizon(
+    *,
+    raw_probability: float,
+    calibrated_probability: float,
+    threshold: float,
+    close: float,
+    projected_price: float,
+    ret_pred: float,
+    calibration_key: str | None,
+    calibration_used_regime_key: bool,
+) -> int:
+    directional_threshold = max(float(threshold), 0.5)
+    calibrated_signal = int(float(calibrated_probability) >= directional_threshold)
+    raw_signal = int(float(raw_probability) >= directional_threshold)
+    raw_side = "up" if raw_signal == 1 else "down"
+    calibrated_side = "up" if calibrated_signal == 1 else "down"
+    ret_side = _direction_from_ret_pred(ret_pred)
+    projected_side = _direction_from_projected_price(close, projected_price)
+
+    # When both forecast views agree, let that consensus break classifier ties.
+    if ret_side == projected_side and ret_side in {"up", "down"}:
+        forecast_consensus_signal = 1 if ret_side == "up" else 0
+        if calibrated_side != ret_side:
+            return forecast_consensus_signal
+
+    if raw_signal == calibrated_signal:
+        return calibrated_signal
+
+    if ret_side == raw_side and projected_side == raw_side:
+        return raw_signal
+    if ret_side == calibrated_side and projected_side == calibrated_side:
+        return calibrated_signal
+
+    if calibration_key is None or calibration_used_regime_key:
+        return calibrated_signal
+    return calibrated_signal
+
+
+def _parse_horizon_label(value: str) -> float:
+    lowered = str(value).strip().lower()
+    if lowered.endswith("h"):
+        return float(lowered[:-1])
+    if lowered.endswith("m"):
+        return float(lowered[:-1]) / 60.0
+    return float(lowered)
+
+
+def _forecast_coherence_excluded(entry: Mapping[str, Any]) -> bool:
+    payload = entry.get("forecast_coherence")
+    return bool(isinstance(payload, Mapping) and payload.get("exclude_from_voting"))
+
+
+def _apply_forecast_coherence_policy(
+    summary: Dict[str, Dict[str, Any]],
+    policy: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    if not summary:
+        return summary
+
+    enabled = bool(policy.get("enabled", False))
+    scoped_horizons = set(policy.get("horizons", []))
+    neutral_band = float(policy.get("p_up_neutral_band", 0.02) or 0.0)
+    min_p_up_edge = float(policy.get("min_p_up_edge", 0.05) or 0.0)
+    min_abs_ret_pred = float(policy.get("min_abs_ret_pred", 0.0) or 0.0)
+    exclude_from_voting = bool(policy.get("exclude_blocked_horizons_from_voting", True))
+
+    for entry in summary.values():
+        horizon = _coerce_result_horizon(entry.get("horizon_hours"))
+        direction = _direction_vote(entry)
+        ret_side = _direction_from_ret_pred(entry.get("ret_pred"))
+        projected_side = _direction_from_projected_price(entry.get("close"), entry.get("projected_price"))
+        p_up_side = _direction_from_probability(entry.get("p_up"), neutral_band=neutral_band)
+        p_up_value = _finite_float_or_none(entry.get("p_up"))
+        ret_pred_value = abs(float(entry.get("ret_pred", 0.0)))
+
+        payload = {
+            "enabled": enabled,
+            "evaluated": bool(enabled and horizon in scoped_horizons),
+            "exclude_from_voting": False,
+            "direction_side": direction,
+            "ret_pred_side": ret_side,
+            "projected_price_side": projected_side,
+            "p_up_side": p_up_side,
+            "triggered": False,
+            "reasons": [],
+        }
+
+        if not enabled or horizon not in scoped_horizons:
+            entry["forecast_coherence"] = payload
+            continue
+
+        reasons: List[str] = []
+        if bool(policy.get("block_on_direction_ret_mismatch", True)) and ret_side != "neutral" and direction != ret_side:
+            reasons.append("direction_ret_mismatch")
+        if (
+            bool(policy.get("block_on_direction_projected_price_mismatch", True))
+            and projected_side != "neutral"
+            and direction != projected_side
+        ):
+            reasons.append("direction_projected_price_mismatch")
+        if (
+            bool(policy.get("block_on_p_up_ret_mismatch", True))
+            and p_up_side != "neutral"
+            and ret_side != "neutral"
+            and p_up_side != ret_side
+            and p_up_value is not None
+            and abs(p_up_value - 0.5) >= min_p_up_edge
+            and ret_pred_value >= min_abs_ret_pred
+        ):
+            reasons.append("p_up_ret_mismatch")
+
+        payload["reasons"] = reasons
+        payload["triggered"] = bool(reasons)
+        payload["exclude_from_voting"] = bool(reasons) and exclude_from_voting
+        entry["forecast_coherence"] = payload
+        if reasons:
+            entry["trade_action"] = "hold"
+            entry["signal_ensemble"] = 0
+            entry["direction_next_display"] = "neutral"
+            direction_output = entry.get("direction_output")
+            if isinstance(direction_output, dict):
+                direction_output["coherence_override"] = {
+                    "applied": True,
+                    "reason": "forecast_coherence_gate",
+                    "raw_direction": direction_output.get("direction"),
+                }
+                direction_output["direction"] = "neutral"
+            trade_decision = entry.get("trade_decision")
+            if isinstance(trade_decision, dict):
+                trade_decision["pre_forecast_coherence_triggered"] = bool(trade_decision.get("triggered", False))
+                trade_decision["triggered"] = False
+                trade_decision["blocked"] = True
+                trade_decision["blocking_reason"] = "forecast_coherence_gate"
+                trade_decision["forecast_coherence_gate_triggered"] = True
+                trade_decision["forecast_coherence_gate_reasons"] = reasons
+    return summary
+
+
 def _apply_confluence_policy(
     summary: Dict[str, Dict[str, Any]],
     policy: Mapping[str, Any],
@@ -1443,6 +1899,8 @@ def _apply_confluence_policy(
 
     labeled_entries: List[tuple[str, Dict[str, Any], float]] = []
     for label, entry in summary.items():
+        if _forecast_coherence_excluded(entry):
+            continue
         horizon = _coerce_result_horizon(entry.get("horizon_hours"))
         if horizon is None:
             continue
@@ -1797,6 +2255,8 @@ def _summarize_bias_context(
     bias_votes: List[str] = []
     execution_entries: List[tuple[str, Mapping[str, Any]]] = []
     for label, entry in summary.items():
+        if _forecast_coherence_excluded(entry):
+            continue
         horizon = _coerce_result_horizon(entry.get("horizon_hours"))
         if horizon is None:
             continue
@@ -2008,6 +2468,131 @@ def _resolve_stop_with_guardrails(
     }
 
 
+def _refine_stop_with_target_range(
+    *,
+    side: str,
+    planned_entry: float,
+    selected_stop: float,
+    risk_unit: float,
+    atr_distance: float,
+    horizon: float,
+    projected_high: float | None,
+    projected_low: float | None,
+    projected_high_confidence: float | None,
+    projected_low_confidence: float | None,
+    projected_high_residual_std: float | None,
+    projected_low_residual_std: float | None,
+    policy: Mapping[str, Any],
+    guards_cfg: Mapping[str, Any],
+) -> Dict[str, Any]:
+    refinement_cfg = (
+        policy.get("target_range_stop_refinement")
+        if isinstance(policy.get("target_range_stop_refinement"), Mapping)
+        else {}
+    )
+    if not refinement_cfg.get("enabled"):
+        return {
+            "applied": False,
+            "stop_loss": float(selected_stop),
+            "risk_unit": float(risk_unit),
+            "details": None,
+        }
+
+    scoped_horizons = set(refinement_cfg.get("horizons", []))
+    if scoped_horizons and _normalize_horizon_value(horizon) not in scoped_horizons:
+        return {
+            "applied": False,
+            "stop_loss": float(selected_stop),
+            "risk_unit": float(risk_unit),
+            "details": None,
+        }
+
+    if side == "long":
+        projected_adverse = _finite_float_or_none(projected_low)
+        confidence = _finite_float_or_none(projected_low_confidence)
+        residual_std = _finite_float_or_none(projected_low_residual_std)
+        projection_field = "projected_low"
+        tighten_only = projected_adverse is not None and projected_adverse > selected_stop and projected_adverse < planned_entry
+    else:
+        projected_adverse = _finite_float_or_none(projected_high)
+        confidence = _finite_float_or_none(projected_high_confidence)
+        residual_std = _finite_float_or_none(projected_high_residual_std)
+        projection_field = "projected_high"
+        tighten_only = projected_adverse is not None and projected_adverse < selected_stop and projected_adverse > planned_entry
+
+    if not tighten_only or confidence is None:
+        return {
+            "applied": False,
+            "stop_loss": float(selected_stop),
+            "risk_unit": float(risk_unit),
+            "details": None,
+        }
+
+    confidence_min = float(refinement_cfg.get("confidence_min", EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_CONFIDENCE_MIN))
+    if confidence < confidence_min:
+        return {
+            "applied": False,
+            "stop_loss": float(selected_stop),
+            "risk_unit": float(risk_unit),
+            "details": None,
+        }
+
+    residual_std_value = max(float(residual_std or 0.0), 0.0)
+    uncertainty_buffer = max(
+        planned_entry * residual_std_value * float(refinement_cfg.get("buffer_std_mult", EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_BUFFER_STD_MULT)),
+        atr_distance * 0.1,
+        1e-8,
+    )
+    if side == "long":
+        candidate_stop = min(float(projected_adverse) - uncertainty_buffer, planned_entry - 1e-8)
+        candidate_risk = planned_entry - candidate_stop
+    else:
+        candidate_stop = max(float(projected_adverse) + uncertainty_buffer, planned_entry + 1e-8)
+        candidate_risk = candidate_stop - planned_entry
+
+    min_stop = float(guards_cfg.get("min_stop_distance_atr_mult", 0.35)) * atr_distance if guards_cfg.get("enabled") else 0.0
+    candidate_risk = max(candidate_risk, min_stop, 1e-8)
+    candidate_stop = planned_entry - candidate_risk if side == "long" else planned_entry + candidate_risk
+
+    if candidate_risk >= risk_unit:
+        return {
+            "applied": False,
+            "stop_loss": float(selected_stop),
+            "risk_unit": float(risk_unit),
+            "details": None,
+        }
+
+    tighten_fraction = (float(risk_unit) - float(candidate_risk)) / max(float(risk_unit), 1e-8)
+    min_tighten_fraction = float(
+        refinement_cfg.get("min_tighten_fraction", EXECUTION_POLICY_DEFAULT_TARGET_RANGE_STOP_MIN_TIGHTEN_FRACTION)
+    )
+    if tighten_fraction < min_tighten_fraction:
+        return {
+            "applied": False,
+            "stop_loss": float(selected_stop),
+            "risk_unit": float(risk_unit),
+            "details": None,
+        }
+
+    return {
+        "applied": True,
+        "stop_loss": float(candidate_stop),
+        "risk_unit": float(candidate_risk),
+        "details": {
+            "applied": True,
+            "type": "target_range_stop_tightened",
+            "projection_field": projection_field,
+            "projected_level": float(projected_adverse),
+            "confidence": float(confidence),
+            "confidence_min": float(confidence_min),
+            "uncertainty_buffer": float(uncertainty_buffer),
+            "risk_unit_before": float(risk_unit),
+            "risk_unit_after": float(candidate_risk),
+            "tighten_fraction": float(tighten_fraction),
+        },
+    }
+
+
 def _apply_execution_policy(
     summary: Dict[str, Dict[str, Any]],
     contexts: Mapping[str, Dict[str, Any]],
@@ -2063,6 +2648,13 @@ def _apply_execution_policy(
             "stop_management": None,
         }
         if not bool(policy.get("enabled", False)):
+            entry["execution_plan"] = plan
+            continue
+
+        forecast_coherence = entry.get("forecast_coherence")
+        if isinstance(forecast_coherence, Mapping) and forecast_coherence.get("triggered"):
+            plan["status"] = "rejected"
+            plan["reason"] = "forecast_coherence_gate"
             entry["execution_plan"] = plan
             continue
 
@@ -2167,9 +2759,29 @@ def _apply_execution_policy(
         )
         selected_stop = float(stop_resolution["stop_loss"])
         risk_unit = float(stop_resolution["risk_unit"])
+        stop_refinement = _refine_stop_with_target_range(
+            side=side,
+            planned_entry=planned_entry,
+            selected_stop=selected_stop,
+            risk_unit=risk_unit,
+            atr_distance=atr_distance,
+            horizon=horizon,
+            projected_high=_finite_float_or_none(entry.get("projected_high")),
+            projected_low=_finite_float_or_none(entry.get("projected_low")),
+            projected_high_confidence=_finite_float_or_none(entry.get("projected_high_confidence")),
+            projected_low_confidence=_finite_float_or_none(entry.get("projected_low_confidence")),
+            projected_high_residual_std=_finite_float_or_none(entry.get("projected_high_residual_std")),
+            projected_low_residual_std=_finite_float_or_none(entry.get("projected_low_residual_std")),
+            policy=policy,
+            guards_cfg=guards_cfg,
+        )
+        if stop_refinement.get("applied"):
+            selected_stop = float(stop_refinement["stop_loss"])
+            risk_unit = float(stop_refinement["risk_unit"])
         plan["stop_management"] = {
             "source": stop_resolution.get("source"),
             "adjustment": stop_resolution.get("adjustment"),
+            "target_range_refinement": stop_refinement.get("details"),
         }
 
         if guards_cfg.get("enabled"):
@@ -2178,38 +2790,24 @@ def _apply_execution_policy(
                 plan["status"] = "rejected"
                 plan["reason"] = "entry_too_extended"
 
-        rr_floor = _lookup_horizon_value(policy.get("minimum_rr_by_horizon", {}), horizon, 1.0)
-        rr_floor *= float(regime_template.get("tp_multiplier", 1.0) or 1.0)
-        existing_reward = abs(existing_take - planned_entry)
-        projected_high = _finite_float_or_none(entry.get("projected_high"))
-        projected_low = _finite_float_or_none(entry.get("projected_low"))
-        projection_reward = 0.0
-        if side == "long" and projected_high is not None:
-            projection_reward = max(projected_high - planned_entry, 0.0)
-        elif side == "short" and projected_low is not None:
-            projection_reward = max(planned_entry - projected_low, 0.0)
-        analytic_mfe_reward = planned_entry * float(analytics_payload.get("mfe_distance") or 0.0)
-        min_reward = rr_floor * risk_unit
-        if analytics_payload.get("available") and analytic_mfe_reward > 0.0 and analytic_mfe_reward < min_reward:
+        target_resolution = _resolve_execution_target_reward(
+            side=side,
+            planned_entry=planned_entry,
+            existing_take=existing_take,
+            projected_high=_finite_float_or_none(entry.get("projected_high")),
+            projected_low=_finite_float_or_none(entry.get("projected_low")),
+            analytics_payload=analytics_payload,
+            risk_unit=risk_unit,
+            horizon=horizon,
+            policy=policy,
+            regime_template=regime_template,
+        )
+        selected_take = float(target_resolution["selected_take"])
+        risk_reward_ratio = float(target_resolution["risk_reward_ratio"])
+        plan["target_management"] = dict(target_resolution["target_management"])
+        if target_resolution["status"] != "pass":
             plan["status"] = "rejected"
-            plan["reason"] = "insufficient_mfe_headroom"
-        final_reward = min_reward
-        if analytics_payload.get("available") and analytic_mfe_reward > 0.0:
-            projection_cap_ratio = float(
-                ((analytics_cfg.get("regime_volatility_buckets") or {}).get("max_projection_mfe_ratio") or 1.25)
-            )
-            projection_reward = min(projection_reward, analytic_mfe_reward * projection_cap_ratio) if projection_reward > 0.0 else 0.0
-            final_reward = max(min_reward, analytic_mfe_reward, projection_reward)
-        else:
-            final_reward = max(existing_reward, projection_reward, min_reward)
-        if side == "long":
-            selected_take = planned_entry + final_reward
-        else:
-            selected_take = planned_entry - final_reward
-        risk_reward_ratio = final_reward / max(risk_unit, 1e-8)
-        if risk_reward_ratio < rr_floor:
-            plan["status"] = "rejected"
-            plan["reason"] = "risk_reward_below_floor"
+            plan["reason"] = str(target_resolution["reason"])
 
         partial_cfg = policy.get("partial_take_profit", {}) if isinstance(policy.get("partial_take_profit"), Mapping) else {}
         partial_take_profit = None
@@ -2279,7 +2877,7 @@ def _apply_execution_policy(
             "sample_count": analytics_payload_final.get("sample_count"),
             "stop_source": stop_management.get("source"),
             "stop_adjustment_type": (stop_management.get("adjustment") or {}).get("type") if stop_management else None,
-            "target_source": "analytics_mfe" if analytics_payload_final and analytics_payload_final.get("available") else "existing_or_projection",
+            "target_source": str((plan.get("target_management") or {}).get("source") or "existing_or_projection"),
         }
         entry["execution_plan"] = plan
 
@@ -2314,6 +2912,425 @@ def _build_execution_prior_summary(summary: Mapping[str, Mapping[str, Any]]) -> 
         "analytics_source_counts": analytics_source_counts,
         "stop_source_counts": stop_source_counts,
         "target_source_counts": target_source_counts,
+    }
+
+
+def _resolve_execution_target_reward(
+    *,
+    side: str,
+    planned_entry: float,
+    existing_take: float,
+    projected_high: float | None,
+    projected_low: float | None,
+    analytics_payload: Mapping[str, Any],
+    risk_unit: float,
+    horizon: float,
+    policy: Mapping[str, Any],
+    regime_template: Mapping[str, Any],
+) -> Dict[str, Any]:
+    rr_floor = _lookup_horizon_value(policy.get("minimum_rr_by_horizon", {}), horizon, 1.0)
+    rr_floor *= float(regime_template.get("tp_multiplier", 1.0) or 1.0)
+    effective_rr_floor = rr_floor
+    existing_reward = abs(existing_take - planned_entry)
+    projection_reward = 0.0
+    if side == "long" and projected_high is not None:
+        projection_reward = max(projected_high - planned_entry, 0.0)
+    elif side == "short" and projected_low is not None:
+        projection_reward = max(planned_entry - projected_low, 0.0)
+
+    analytics_available = bool(analytics_payload.get("available"))
+    analytic_mfe_reward = planned_entry * float(analytics_payload.get("mfe_distance") or 0.0)
+    if analytics_available and analytic_mfe_reward > 0.0:
+        projection_cap_ratio = float(
+            ((policy.get("analytics", {}).get("regime_volatility_buckets") or {}).get("max_projection_mfe_ratio") or 1.25)
+        )
+        projection_reward = min(projection_reward, analytic_mfe_reward * projection_cap_ratio) if projection_reward > 0.0 else 0.0
+
+    min_reward = rr_floor * risk_unit
+    adapted = False
+    status = "pass"
+    reason = "pass"
+
+    if analytics_available and analytic_mfe_reward > 0.0:
+        feasible_reward = max(analytic_mfe_reward, projection_reward)
+        if feasible_reward < min_reward:
+            adaptive_cfg = policy.get("adaptive_take_profit", {}) if isinstance(policy.get("adaptive_take_profit"), Mapping) else {}
+            adaptive_rr_floor = rr_floor * float(adaptive_cfg.get("min_rr_fraction_of_floor", 1.0) or 1.0)
+            feasible_rr = feasible_reward / max(risk_unit, 1e-8)
+            if bool(adaptive_cfg.get("enabled", False)) and feasible_rr >= adaptive_rr_floor:
+                adapted = True
+                effective_rr_floor = adaptive_rr_floor
+                final_reward = max(feasible_reward, adaptive_rr_floor * risk_unit)
+            else:
+                status = "rejected"
+                reason = "insufficient_mfe_headroom"
+                final_reward = max(feasible_reward, 0.0)
+        else:
+            final_reward = max(min_reward, analytic_mfe_reward, projection_reward)
+    else:
+        final_reward = max(existing_reward, projection_reward, min_reward)
+
+    risk_reward_ratio = final_reward / max(risk_unit, 1e-8)
+    if status == "pass" and risk_reward_ratio < effective_rr_floor:
+        status = "rejected"
+        reason = "risk_reward_below_floor"
+
+    selected_take = planned_entry + final_reward if side == "long" else planned_entry - final_reward
+    target_source = "existing_or_projection"
+    if analytics_available:
+        target_source = "analytics_mfe_adaptive" if adapted else "analytics_mfe"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "selected_take": float(selected_take),
+        "risk_reward_ratio": float(risk_reward_ratio),
+        "target_management": {
+            "source": target_source,
+            "adapted_to_mfe_headroom": adapted,
+            "analytics_available": analytics_available,
+            "original_rr_floor": float(rr_floor),
+            "effective_rr_floor": float(effective_rr_floor),
+            "analytic_mfe_reward": float(analytic_mfe_reward) if analytic_mfe_reward > 0.0 else None,
+            "projection_reward": float(projection_reward) if projection_reward > 0.0 else None,
+            "selected_reward": float(final_reward),
+        },
+    }
+
+
+def _confidence_level_from_score(value: Any) -> str:
+    score = _finite_float_or_none(value)
+    if score is None:
+        return "Low"
+    if score >= 0.66:
+        return "High"
+    if score >= 0.33:
+        return "Medium"
+    return "Low"
+
+
+def _prompt_direction_label(direction: str) -> str:
+    normalized = str(direction).strip().lower()
+    if normalized == "up":
+        return "Long"
+    if normalized == "down":
+        return "Short"
+    return "Neutral"
+
+
+def _format_usd_value(value: Any) -> str | None:
+    numeric = _finite_float_or_none(value)
+    if numeric is None:
+        return None
+    return f"${numeric:,.2f}"
+
+
+def _prompt_effective_direction(entry: Mapping[str, Any]) -> str:
+    coherence = entry.get("forecast_coherence") if isinstance(entry.get("forecast_coherence"), Mapping) else {}
+    direction_display = str(entry.get("direction_next_display") or "neutral").lower()
+    if bool(coherence.get("triggered")) and direction_display == "neutral":
+        internal_direction = str(entry.get("direction_next") or "neutral").lower()
+        if internal_direction in {"up", "down"}:
+            return internal_direction
+    return direction_display
+
+
+def _build_prompt_forecast_clause(label: str, entry: Mapping[str, Any]) -> str:
+    direction_display = _prompt_effective_direction(entry)
+    plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
+    coherence = entry.get("forecast_coherence") if isinstance(entry.get("forecast_coherence"), Mapping) else {}
+    projected_high = _format_usd_value(entry.get("projected_high"))
+    projected_low = _format_usd_value(entry.get("projected_low"))
+    projected_price = _format_usd_value(entry.get("projected_price"))
+
+    clause = f"{label}: {direction_display}"
+    if projected_high and projected_low:
+        clause += f", projected range {projected_low} to {projected_high}"
+    elif projected_price:
+        clause += f", projected price {projected_price}"
+
+    if coherence.get("triggered"):
+        clause += " (coherence blocked)"
+    elif plan.get("reason") not in {None, "pass", "upstream_model_hold", "await_pullback_entry_zone"}:
+        clause += f" ({plan.get('reason')})"
+    elif plan.get("status") == "bias_only_ready":
+        clause += " (bias ready, upstream hold)"
+    return clause
+
+
+def _prompt_status_rank(status: str) -> int:
+    return {
+        "ready": 0,
+        "waiting_pullback": 1,
+        "bias_only_ready": 2,
+        "analysis_only": 3,
+        "rejected": 4,
+        "no_trade": 5,
+    }.get(str(status or "rejected"), 6)
+
+
+def _prompt_reason_rank(reason: str | None) -> int:
+    return {
+        "pass": 0,
+        "await_pullback_entry_zone": 1,
+        "upstream_model_hold": 2,
+        "low_execution_confluence": 3,
+        "insufficient_mfe_headroom": 4,
+        "bias_direction_conflict": 5,
+        "forecast_coherence_gate": 6,
+    }.get(str(reason or "pass"), 7)
+
+
+def _prompt_confluence_rank(tier: str | None) -> int:
+    return {
+        "high": 0,
+        "medium": 1,
+        "low": 2,
+    }.get(str(tier or "low"), 3)
+
+
+def _prompt_entry_rank(label: str, entry: Mapping[str, Any]) -> tuple[int, int, int, int, float, float, float, float]:
+    horizon = _coerce_result_horizon(entry.get("horizon_hours"))
+    plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
+    status_rank = _prompt_status_rank(str(plan.get("status") or "rejected"))
+    reason_rank = _prompt_reason_rank(plan.get("reason"))
+    confluence_rank = _prompt_confluence_rank(plan.get("confluence_tier"))
+    execution_alignment = float(plan.get("execution_alignment_ratio") or 0.0)
+    bias_alignment = float(plan.get("bias_alignment_ratio") or 0.0)
+    confidence_score = float(_finite_float_or_none(entry.get("confidence_score")) or 0.0)
+    horizon_preference = {4.0: 0, 8.0: 1, 12.0: 2, 1.0: 3, 0.25: 4}
+    preference_rank = float(horizon_preference.get(horizon, 9.0))
+    return (
+        status_rank,
+        reason_rank,
+        confluence_rank,
+        -execution_alignment,
+        -bias_alignment,
+        -confidence_score,
+        preference_rank,
+        -(float(horizon) if horizon is not None else 0.0),
+    )
+
+
+def _select_prompt_candidate_entries(
+    summary: Mapping[str, Mapping[str, Any]],
+) -> List[tuple[tuple[int, int, int, float, float, float, float, float], str, Mapping[str, Any]]]:
+    ranked_entries: List[tuple[tuple[int, int, int, float, float, float, float, float], str, Mapping[str, Any]]] = []
+    directional_hourly_or_higher_present = False
+    for label, entry in summary.items():
+        if not isinstance(entry, Mapping):
+            continue
+        horizon = _coerce_result_horizon(entry.get("horizon_hours"))
+        if horizon is None:
+            continue
+        direction_display = _prompt_effective_direction(entry)
+        rank = _prompt_entry_rank(label, entry)
+        ranked_entries.append((rank, label, entry))
+        if direction_display in {"up", "down"} and horizon >= 1.0:
+            directional_hourly_or_higher_present = True
+
+    if directional_hourly_or_higher_present:
+        filtered_entries = []
+        for rank, label, entry in ranked_entries:
+            horizon = _coerce_result_horizon(entry.get("horizon_hours"))
+            direction_display = _prompt_effective_direction(entry)
+            if direction_display in {"up", "down"} and horizon is not None and horizon < 1.0:
+                continue
+            filtered_entries.append((rank, label, entry))
+        return filtered_entries
+    return ranked_entries
+
+
+def _select_prompt_preferred_entry(
+    summary: Mapping[str, Mapping[str, Any]],
+) -> tuple[str | None, Mapping[str, Any] | None, Dict[str, Any] | None]:
+    ranked_entries = _select_prompt_candidate_entries(summary)
+    side_entries: Dict[str, List[tuple[tuple[int, int, int, float, float, float, float, float], str, Mapping[str, Any]]]] = {
+        "up": [],
+        "down": [],
+    }
+    for rank, label, entry in ranked_entries:
+        direction_display = _prompt_effective_direction(entry)
+        if direction_display in side_entries:
+            side_entries[direction_display].append((rank, label, entry))
+
+    side_profiles: List[
+        tuple[
+            tuple[int, int, int, int, int, int, float, float, float, float],
+            str,
+            tuple[tuple[int, int, int, float, float, float, float, float], str, Mapping[str, Any]],
+            Dict[str, Any],
+        ]
+    ] = []
+    for side, entries in side_entries.items():
+        if not entries:
+            continue
+        ordered_entries = sorted(entries, key=lambda item: item[0])
+        ready_like_count = 0
+        high_timeframe_count = 0
+        avg_execution_alignment = 0.0
+        avg_bias_alignment = 0.0
+        support_horizons: List[str] = []
+        for _rank, label, entry in ordered_entries:
+            plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
+            status = str(plan.get("status") or "rejected")
+            if status in {"ready", "waiting_pullback", "bias_only_ready"}:
+                ready_like_count += 1
+            horizon = _coerce_result_horizon(entry.get("horizon_hours"))
+            if horizon is not None and horizon >= 8.0:
+                high_timeframe_count += 1
+            avg_execution_alignment += float(plan.get("execution_alignment_ratio") or 0.0)
+            avg_bias_alignment += float(plan.get("bias_alignment_ratio") or 0.0)
+            support_horizons.append(label)
+        avg_execution_alignment /= max(len(ordered_entries), 1)
+        avg_bias_alignment /= max(len(ordered_entries), 1)
+        best_rank, best_label, best_entry = ordered_entries[0]
+        side_rank = (
+            best_rank[0],
+            -ready_like_count,
+            -high_timeframe_count,
+            -len(ordered_entries),
+            best_rank[1],
+            best_rank[2],
+            -avg_execution_alignment,
+            -avg_bias_alignment,
+            best_rank[5],
+            best_rank[6],
+        )
+        side_profiles.append(
+            (
+                side_rank,
+                side,
+                (best_rank, best_label, best_entry),
+                {
+                    "side": side,
+                    "support_horizons": support_horizons,
+                    "support_count": len(ordered_entries),
+                    "high_timeframe_count": high_timeframe_count,
+                    "ready_like_count": ready_like_count,
+                    "avg_execution_alignment": float(avg_execution_alignment),
+                    "avg_bias_alignment": float(avg_bias_alignment),
+                    "conflict_present": sum(1 for entries in side_entries.values() if entries) > 1,
+                },
+            )
+        )
+
+    if side_profiles:
+        side_profiles.sort(key=lambda item: item[0])
+        _side_rank, _side, best_entry_tuple, side_profile = side_profiles[0]
+        _best_rank, best_label, best_entry = best_entry_tuple
+        return best_label, best_entry, side_profile
+
+    ranked_entries.sort(key=lambda item: item[0])
+    if ranked_entries:
+        _rank, preferred_label, preferred_entry = ranked_entries[0]
+        return preferred_label, preferred_entry, None
+    return None, None, None
+
+
+def _build_prompt_ready_summary(summary: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    preferred_label, preferred_entry, side_profile = _select_prompt_preferred_entry(summary)
+
+    trend_parts: List[str] = []
+    blocking_factors: List[str] = []
+    for label in sorted(summary.keys(), key=_horizon_sort_key):
+        entry = summary[label]
+        if not isinstance(entry, Mapping):
+            continue
+        plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
+        coherence = entry.get("forecast_coherence") if isinstance(entry.get("forecast_coherence"), Mapping) else {}
+        clause = _build_prompt_forecast_clause(label, entry)
+        if coherence.get("triggered"):
+            blocking_factors.extend(str(reason) for reason in coherence.get("reasons", []))
+        elif plan.get("reason") not in {None, "pass", "upstream_model_hold", "await_pullback_entry_zone"}:
+            blocking_factors.append(str(plan.get("reason")))
+        trend_parts.append(clause)
+
+    selected_direction = "Neutral"
+    preferred_horizon = None
+    confidence_level = "Low"
+    tradeable = False
+    execution_state = "no_trade"
+    entry_point = None
+    stop_loss = None
+    take_profit = None
+    risk_reward_ratio = None
+    rationale = "No horizon produced a coherent executable trade setup."
+
+    if preferred_entry is not None and preferred_label is not None:
+        direction_display = _prompt_effective_direction(preferred_entry)
+        plan = preferred_entry.get("execution_plan") if isinstance(preferred_entry.get("execution_plan"), Mapping) else {}
+        target_management = plan.get("target_management") if isinstance(plan.get("target_management"), Mapping) else {}
+        selected_direction = _prompt_direction_label(direction_display)
+        preferred_horizon = preferred_label
+        confidence_level = _confidence_level_from_score(preferred_entry.get("confidence_score"))
+        execution_state = str(plan.get("status") or "no_trade")
+        tradeable = execution_state in {"ready", "waiting_pullback"} and selected_direction != "Neutral"
+        if execution_state in {"ready", "waiting_pullback", "bias_only_ready"} and selected_direction != "Neutral":
+            entry_point = _finite_float_or_none(preferred_entry.get("entry_price"))
+            stop_loss = _finite_float_or_none(preferred_entry.get("stop_loss"))
+            take_profit = _finite_float_or_none(preferred_entry.get("take_profit"))
+            risk_reward_ratio = _finite_float_or_none(preferred_entry.get("risk_reward_ratio"))
+        rationale_parts = [f"Preferred horizon {preferred_label} carries the strongest post-policy bias."]
+        if side_profile and side_profile.get("conflict_present"):
+            support_horizons = side_profile.get("support_horizons") or []
+            support_text = ", ".join(str(value) for value in support_horizons)
+            rationale_parts[0] = (
+                f"Preferred horizon {preferred_label} wins side arbitration for {selected_direction.lower()} bias "
+                f"across {support_text}."
+            )
+        if plan.get("reason") == "forecast_coherence_gate":
+            rationale_parts.append("The forecast remains directional, but forecast coherence blocks it from execution.")
+        elif plan.get("status") == "bias_only_ready":
+            rationale_parts.append("The horizon is structurally aligned, but the upstream action remains hold.")
+        elif plan.get("status") == "waiting_pullback":
+            rationale_parts.append("Bias is valid, but price is outside the preferred entry zone.")
+        if target_management.get("adapted_to_mfe_headroom"):
+            rationale_parts.append("Take-profit was resized to empirical MFE headroom instead of rejecting the setup.")
+        elif plan.get("reason") not in {None, "pass"}:
+            rationale_parts.append(f"Current blocker: {plan.get('reason')}.")
+        rationale = " ".join(rationale_parts)
+
+    formatted_response = "\n".join(
+        [
+            "Market Outlook & Strategy",
+            f"Selected Direction: {selected_direction}",
+            f"Preferred Horizon: {preferred_horizon or 'None'}",
+            f"Confidence Level: {confidence_level}",
+            "",
+            "Trade Execution Plan (USD)",
+            f"Entry Point: {_format_usd_value(entry_point) or 'No trade'}",
+            f"Stop Loss: {_format_usd_value(stop_loss) or 'No trade'}",
+            f"Take Profit: {_format_usd_value(take_profit) or 'No trade'}",
+            f"Risk/Reward Ratio: {f'{risk_reward_ratio:.2f}' if risk_reward_ratio is not None else 'Not applicable'}",
+            "",
+            "Analysis Summary",
+            f"Trend Forecast: {'; '.join(trend_parts)}",
+            f"Rationale: {rationale}",
+        ]
+    )
+
+    blocking_factors = sorted({factor for factor in blocking_factors if factor})
+    return {
+        "market_outlook_strategy": {
+            "selected_direction": selected_direction,
+            "preferred_horizon": preferred_horizon,
+            "confidence_level": confidence_level,
+            "tradeable": tradeable,
+            "execution_state": execution_state,
+        },
+        "trade_execution_plan_usd": {
+            "entry_point": entry_point,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "risk_reward_ratio": risk_reward_ratio,
+        },
+        "analysis_summary": {
+            "trend_forecast": trend_parts,
+            "rationale": rationale,
+            "blocking_factors": blocking_factors,
+        },
+        "formatted_response": formatted_response,
     }
 
 
@@ -3173,6 +4190,10 @@ def _predict_target_range_prices(
         "projected_low": projected_low,
         "projected_high_confidence": _confidence_from_rmse(rmse_high, confidence_scale),
         "projected_low_confidence": _confidence_from_rmse(rmse_low, confidence_scale),
+        "projected_high_rmse": _finite_float_or_none(rmse_high),
+        "projected_low_rmse": _finite_float_or_none(rmse_low),
+        "projected_high_residual_std": _finite_float_or_none(high_payload.get("metrics", {}).get("val_residual_std")),
+        "projected_low_residual_std": _finite_float_or_none(low_payload.get("metrics", {}).get("val_residual_std")),
     }
 
 
@@ -4156,6 +5177,206 @@ def _apply_probability_calibration(p: float, params: Mapping[str, Any]) -> float
     return float(p_clip)
 
 
+def _resolve_probability_calibration(
+    platt_calibration: Mapping[str, Mapping[str, Any]] | None,
+    label: str,
+    regime_state: str,
+) -> tuple[str | None, Mapping[str, Any] | None, bool]:
+    if not platt_calibration:
+        return None, None, False
+    regime_key = f"{label}@{regime_state}"
+    regime_params = platt_calibration.get(regime_key)
+    if isinstance(regime_params, Mapping):
+        method = str(regime_params.get("method", "platt")).lower()
+        try:
+            slope = float(regime_params.get("a", 1.0))
+        except (TypeError, ValueError):
+            slope = 1.0
+        if method == "platt" and (abs(slope) < REGIME_CALIBRATION_MIN_PLATT_SLOPE or slope <= 0.0):
+            base_params = platt_calibration.get(label)
+            if isinstance(base_params, Mapping):
+                return label, base_params, False
+        return regime_key, regime_params, True
+    base_params = platt_calibration.get(label)
+    if isinstance(base_params, Mapping):
+        return label, base_params, False
+    return None, None, False
+
+
+def _build_direction_output(
+    *,
+    enabled: bool,
+    scoped: bool,
+    label: str,
+    regime_state: str,
+    signal_dir_only: int,
+    raw_probability: float,
+    trade_probability: float,
+    ret_pred: float | None,
+    close: float | None,
+    projected_price: float | None,
+    p_up_components: Mapping[str, Any],
+    policy: Mapping[str, Any],
+) -> Dict[str, Any]:
+    def _blend_probability_from_components(
+        components: Mapping[str, Any],
+        weights: Mapping[str, float],
+        *,
+        min_component_count: int,
+    ) -> tuple[float | None, Dict[str, float]]:
+        weighted_sum = 0.0
+        total_weight = 0.0
+        used: Dict[str, float] = {}
+        for name, weight in weights.items():
+            try:
+                component_probability = float(components.get(name))
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(component_probability):
+                continue
+            clipped_probability = min(max(component_probability, 0.0), 1.0)
+            weighted_sum += clipped_probability * float(weight)
+            total_weight += float(weight)
+            used[str(name)] = clipped_probability
+        if total_weight <= 0.0 or len(used) < int(min_component_count):
+            return None, used
+        return weighted_sum / total_weight, used
+
+    base_direction = "up" if int(signal_dir_only) == 1 else "down"
+    payload: Dict[str, Any] = {
+        "enabled": bool(enabled),
+        "evaluated": bool(enabled and scoped),
+        "direction": base_direction,
+        "probability": float(trade_probability),
+        "raw_probability": float(raw_probability),
+        "neutral_band": 0.0,
+        "source": "trade_probability",
+        "calibration": {
+            "requested_key": f"{label}@{regime_state}",
+            "applied_key": None,
+            "used_regime_key": False,
+            "fallback_to_trade_probability": True,
+            "skipped_due_to_marginal_rerank": False,
+        },
+        "marginal_rerank": {
+            "enabled": False,
+            "applied": False,
+            "weight_key": None,
+            "band": None,
+            "component_count": 0,
+            "components_used": {},
+        },
+    }
+    if not enabled or not scoped:
+        return payload
+
+    neutral_band = float(policy.get("neutral_band", 0.0) or 0.0)
+    internal_direction = base_direction
+    ret_side = _direction_from_ret_pred(ret_pred)
+    projected_side = _direction_from_projected_price(close, projected_price)
+    probability = float(trade_probability)
+    source = "trade_probability"
+    fallback_to_trade_probability = True
+    calibration_key = None
+    calibration_used_regime_key = False
+    calibration_skipped_due_to_marginal_rerank = False
+    calibration_map = policy.get("calibration_map") if isinstance(policy.get("calibration_map"), Mapping) else None
+    if calibration_map:
+        calibration_key, params, calibration_used_regime_key = _resolve_probability_calibration(
+            calibration_map,
+            label,
+            regime_state,
+        )
+        if isinstance(params, Mapping):
+            probability = _apply_probability_calibration(float(raw_probability), params)
+            source = "direction_output_calibration"
+            fallback_to_trade_probability = False
+        elif not bool(policy.get("use_trade_probability_fallback", True)):
+            probability = float(raw_probability)
+            source = "raw_probability"
+            fallback_to_trade_probability = False
+    elif not bool(policy.get("use_trade_probability_fallback", True)):
+        probability = float(raw_probability)
+        source = "raw_probability"
+        fallback_to_trade_probability = False
+
+    marginal_rerank_policy = policy.get("marginal_rerank") if isinstance(policy.get("marginal_rerank"), Mapping) else {}
+    marginal_horizons = set(marginal_rerank_policy.get("horizons", []))
+    if bool(marginal_rerank_policy.get("enabled", False)) and _parse_horizon_label(label) in marginal_horizons:
+        gate_probability = float(raw_probability) if bool(marginal_rerank_policy.get("use_raw_probability_gate", True)) else float(probability)
+        lower = float(marginal_rerank_policy.get("lower", 0.5) or 0.5)
+        upper = float(marginal_rerank_policy.get("upper", 0.6) or 0.6)
+        if lower <= gate_probability <= upper:
+            weight_specs = marginal_rerank_policy.get("weight_specs") if isinstance(marginal_rerank_policy.get("weight_specs"), Mapping) else {}
+            weight_key = regime_state if regime_state in weight_specs else "default"
+            weights = weight_specs.get(weight_key) if isinstance(weight_specs.get(weight_key), Mapping) else {}
+            reranked_probability, used_components = _blend_probability_from_components(
+                p_up_components,
+                weights,
+                min_component_count=int(marginal_rerank_policy.get("min_component_count", 2) or 2),
+            )
+            payload["marginal_rerank"] = {
+                "enabled": True,
+                "applied": reranked_probability is not None,
+                "weight_key": weight_key if weights else None,
+                "band": {
+                    "lower": lower,
+                    "upper": upper,
+                },
+                "component_count": int(len(used_components)),
+                "components_used": used_components,
+            }
+            if reranked_probability is not None:
+                probability = float(reranked_probability)
+                source = "direction_output_marginal_rerank"
+                fallback_to_trade_probability = False
+                calibration_key = None
+                calibration_used_regime_key = False
+                calibration_skipped_due_to_marginal_rerank = True
+
+    payload.update(
+        {
+            "direction": _direction_from_probability(probability, neutral_band=neutral_band),
+            "probability": float(probability),
+            "neutral_band": float(neutral_band),
+            "source": source,
+            "calibration": {
+                "requested_key": f"{label}@{regime_state}",
+                "applied_key": calibration_key,
+                "used_regime_key": calibration_used_regime_key,
+                "fallback_to_trade_probability": fallback_to_trade_probability,
+                "skipped_due_to_marginal_rerank": calibration_skipped_due_to_marginal_rerank,
+            },
+        }
+    )
+
+    display_direction = str(payload.get("direction", base_direction)).lower()
+    internal_support = 0
+    display_support = 0
+    for side in (ret_side, projected_side):
+        if side == internal_direction:
+            internal_support += 1
+        if side == display_direction:
+            display_support += 1
+
+    if (
+        display_direction not in {"neutral", internal_direction}
+        and internal_support > 0
+        and display_support == 0
+    ):
+        payload["forecast_alignment_override"] = {
+            "applied": True,
+            "reason": "fallback_to_internal_forecast_alignment",
+            "candidate_direction": display_direction,
+            "internal_direction": internal_direction,
+            "ret_pred_side": ret_side,
+            "projected_price_side": projected_side,
+        }
+        payload["direction"] = internal_direction
+
+    return payload
+
+
 def _load_prepared(dataset_path: Path, *, target_column: str, offline: bool = False) -> tuple:
     if offline:
         return _load_prepared_offline(dataset_path)
@@ -4257,6 +5478,8 @@ def run_predictions(
     regime_model_dirs: Mapping[str, Any] | None = None,
     confluence_policy: Mapping[str, Any] | None = None,
     execution_policy: Mapping[str, Any] | None = None,
+    forecast_coherence_policy: Mapping[str, Any] | None = None,
+    direction_output_policy: Mapping[str, Any] | None = None,
     latest_close: float | None = None,
     confidence_min: float = CONFIDENCE_MIN_DEFAULT,
     position_size_floor: float = POSITION_SIZE_FLOOR_DEFAULT,
@@ -4277,17 +5500,11 @@ def run_predictions(
     regime_model_dirs_policy = _resolve_regime_model_dirs_policy(regime_model_dirs)
     confluence_policy_resolved = _resolve_confluence_policy(confluence_policy)
     execution_policy_resolved = _resolve_execution_policy(execution_policy)
+    forecast_coherence_policy_resolved = _resolve_forecast_coherence_policy(forecast_coherence_policy)
+    direction_output_policy_resolved = _resolve_direction_output_policy(direction_output_policy)
     confidence_min = max(0.0, min(1.0, float(confidence_min)))
     position_size_floor = max(0.0, float(position_size_floor))
     position_size_cap = max(position_size_floor, float(position_size_cap))
-
-    # compute automatic direction threshold if requested
-    if auto_direction_threshold and thresholds_by_horizon:
-        # pick the largest calibrated p_up_min across selected targets
-        try:
-            direction_threshold = max(th["p_up_min"] for th in thresholds_by_horizon.values())
-        except Exception:
-            pass
 
     profiles: Dict[str, DatasetProfile] = {}
     target_profiles: Dict[float, str] = {}
@@ -4480,49 +5697,59 @@ def run_predictions(
             p_val = float(signal.get("p_up", 0.0))
         except Exception:
             p_val = 0.0
-        # some older versions of this file may not define direction_threshold as a
-        # parameter; fallback to 0.5 if it's missing.
-        thresh = locals().get("direction_threshold", 0.5)
+        thresh = _resolve_direction_threshold_for_horizon(
+            direction_threshold=float(locals().get("direction_threshold", 0.5)),
+            auto_direction_threshold=bool(auto_direction_threshold),
+            horizon_p_up=float(horizon_p_up),
+        )
         signal["signal_dir_only"] = int(p_val >= thresh)
         if latest_close is not None:
             signal['close'] = latest_close
             close = latest_close
 
         ret_pred = float(signal.get("ret_pred", 0.0))
-        p_up = float(signal.get("p_up", 0.0))
+        raw_p_up = float(signal.get("p_up", 0.0))
+        p_up = float(raw_p_up)
         signal_ts = str(signal.get("ts", ts_iso))
         signal_dir_only = int(signal.get("signal_dir_only", 0))
         signal_ensemble = int(signal.get("signal_ensemble", 0))
         residual_std = float(residual_std_by_horizon.get(horizon, DEFAULT_RESIDUAL_STD))
-        # SL/TP must follow direction semantics even when ret_pred disagrees with direction.
-        # For up/long: stop < entry and take > entry.
-        # For down/short: stop > entry and take < entry.
-        direction_signal = int(signal.get("signal_dir_only", 0))
-        min_buffer = max(MIN_DIRECTIONAL_RETURN_BUFFER, residual_std * 0.1)
-        if direction_signal >= 1:
-            stop_return = min(ret_pred - residual_std, -min_buffer)
-            take_return = max(ret_pred + residual_std, min_buffer)
-        else:
-            stop_return = max(ret_pred + residual_std, min_buffer)
-            take_return = min(ret_pred - residual_std, -min_buffer)
-        stop_loss_price = _project_price(close, stop_return)
-        take_profit_price = _project_price(close, take_return)
         expected_value = p_up * ret_pred - (1 - p_up) * residual_std
         ev_multiplier = float(horizon_thresholds.get("expected_value_multiplier", 1.0))
         expected_value *= ev_multiplier
         confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
+        calibration_key = None
+        calibration_used_regime_key = False
 
         # Apply optional horizon/regime calibration with support for platt/isotonic/beta payloads.
-        if platt_calibration:
-            regime_key = f"{label}@{regime_state}"
-            params = platt_calibration.get(regime_key) or platt_calibration.get(label)
-            if isinstance(params, Mapping):
+        calibration_key, params, calibration_used_regime_key = _resolve_probability_calibration(
+            platt_calibration,
+            label,
+            regime_state,
+        )
+        if isinstance(params, Mapping):
                 p_up = _apply_probability_calibration(float(p_up), params)
-                signal_dir_only = int(p_up >= thresh)
+                signal_dir_only = _resolve_direction_signal_for_horizon(
+                    raw_probability=raw_p_up,
+                    calibrated_probability=p_up,
+                    threshold=thresh,
+                    close=close,
+                    projected_price=_project_price(close, ret_pred),
+                    ret_pred=ret_pred,
+                    calibration_key=calibration_key,
+                    calibration_used_regime_key=calibration_used_regime_key,
+                )
                 signal_ensemble = int((p_up >= horizon_p_up) and (ret_pred >= horizon_ret) and (not bool(signal.get("volatility_flag"))))
                 expected_value = p_up * ret_pred - (1 - p_up) * residual_std
                 expected_value *= ev_multiplier
                 confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
+
+        stop_loss_price, take_profit_price = _compute_directional_stop_take_prices(
+            close=close,
+            ret_pred=ret_pred,
+            residual_std=residual_std,
+            direction_signal=signal_dir_only,
+        )
         position_size = _compute_position_size(
             confidence_score,
             confidence_min=confidence_min,
@@ -4595,6 +5822,12 @@ def run_predictions(
             "expected_value": expected_value,
             "thresholds": horizon_thresholds,
             "regime_state": regime_state,
+            "probability_calibration": {
+                "requested_key": f"{label}@{regime_state}",
+                "applied_key": calibration_key,
+                "used_regime_key": calibration_used_regime_key,
+                "fallback_to_base": bool(calibration_key) and not calibration_used_regime_key,
+            },
             "regime_weight_overrides": _get_active_regime_weight_override(
                 regime_state=regime_state,
                 horizon=horizon,
@@ -4608,6 +5841,10 @@ def run_predictions(
             "projected_low_confidence": target_projection.get("projected_low_confidence", 0.0)
             if target_projection
             else 0.0,
+            "projected_high_rmse": target_projection.get("projected_high_rmse") if target_projection else None,
+            "projected_low_rmse": target_projection.get("projected_low_rmse") if target_projection else None,
+            "projected_high_residual_std": target_projection.get("projected_high_residual_std") if target_projection else None,
+            "projected_low_residual_std": target_projection.get("projected_low_residual_std") if target_projection else None,
             "volatility": signal.get("volatility", {
                 "snapshot": volatility_snapshot,
                 "metric": None,
@@ -4616,6 +5853,23 @@ def run_predictions(
             }),
             "volatility_flag": bool(signal.get("volatility_flag")),
         }
+        direction_output_scoped = horizon in set(direction_output_policy_resolved.get("horizons", []))
+        direction_output = _build_direction_output(
+            enabled=bool(direction_output_policy_resolved.get("enabled", False)),
+            scoped=direction_output_scoped,
+            label=label,
+            regime_state=regime_state,
+            signal_dir_only=signal_dir_only,
+            raw_probability=raw_p_up,
+            trade_probability=p_up,
+            ret_pred=ret_pred,
+            close=close,
+            projected_price=_project_price(close, ret_pred),
+            p_up_components=signal.get("p_up_components", {}),
+            policy=direction_output_policy_resolved,
+        )
+        result["direction_output"] = direction_output
+        result["direction_next_display"] = direction_output.get("direction", result["direction_next"])
         for field in (
             "range_expansion_1h",
             "distance_from_session_high_8h",
@@ -4724,6 +5978,9 @@ def run_predictions(
     if direction_fallback_policy and pending_direction_fallback_ts:
         _write_direction_fallback_state(pending_direction_fallback_ts)
 
+    if forecast_coherence_policy_resolved.get("enabled"):
+        summary = _apply_forecast_coherence_policy(summary, forecast_coherence_policy_resolved)
+
     if confluence_policy_resolved.get("enabled"):
         summary = _apply_confluence_policy(summary, confluence_policy_resolved)
 
@@ -4745,14 +6002,16 @@ def run_predictions(
     return summary
 
 
-def write_summary(summary: Dict[str, Dict[str, float | str | int]]) -> dict[str, Any]:
+def write_summary(summary: Dict[str, Dict[str, Any]]) -> dict[str, Any]:
     LATEST_PREDICTION_PATH.parent.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
     execution_prior_summary = _build_execution_prior_summary(summary)
+    prompt_ready_summary = _build_prompt_ready_summary(summary)
     json_payload = {
         "generated_at": generated_at,
         "predictions": summary,
         "execution_prior_summary": execution_prior_summary,
+        "prompt_ready_summary": prompt_ready_summary,
     }
     LATEST_PREDICTION_PATH.write_text(json.dumps(json_payload, indent=2))
     print(json.dumps(json_payload, indent=2))
@@ -4761,6 +6020,7 @@ def write_summary(summary: Dict[str, Dict[str, float | str | int]]) -> dict[str,
         "generated_at": generated_at,
         "predictions": summary,
         "execution_prior_summary": execution_prior_summary,
+        "prompt_ready_summary": prompt_ready_summary,
     }
     history: List[Dict[str, object]] = []
     if HISTORY_PREDICTION_PATH.exists():
@@ -5192,6 +6452,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.confluence_policy = None
     if not hasattr(args, "execution_policy"):
         args.execution_policy = None
+    if not hasattr(args, "forecast_coherence_policy"):
+        args.forecast_coherence_policy = None
+    if not hasattr(args, "direction_output_policy"):
+        args.direction_output_policy = None
     if args.data_quality is None:
         args.data_quality = {}
     if args.data_quality_enabled:
@@ -5485,6 +6749,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     thresholds_path = args.thresholds_json or None
     platt_calibration = _load_platt_calibration(getattr(args, "platt_calibration", None))
+    direction_output_cfg = dict(getattr(args, "direction_output_policy", {}) or {})
+    direction_output_calibration_path = direction_output_cfg.get("calibration_path")
+    direction_output_cfg["calibration_map"] = _load_platt_calibration(direction_output_calibration_path)
     if args.target_range_models is None:
         target_range_meta = TARGET_RANGE_MODEL_DIR / "metadata.json"
         if target_range_meta.exists():
@@ -5532,6 +6799,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             regime_model_dirs=getattr(args, "regime_model_dirs", None),
             confluence_policy=getattr(args, "confluence_policy", None),
             execution_policy=getattr(args, "execution_policy", None),
+            forecast_coherence_policy=getattr(args, "forecast_coherence_policy", None),
+            direction_output_policy=direction_output_cfg,
             latest_close=latest_close,
             confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
             position_size_floor=float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),
