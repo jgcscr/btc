@@ -332,7 +332,7 @@ def _build_features_from_csv(
             file=sys.stderr,
         )
 
-    df = drop_non_binance_breakout_features(df)
+    df = _drop_non_binance_breakout_features(df)
     df, volatility_columns = add_volatility_columns(
         df,
         realized_windows=DEFAULT_REALIZED_WINDOWS,
@@ -401,7 +401,7 @@ def prepare_data_for_signals(
 
         df_all_sorted = df_all_raw.sort_values("ts").reset_index(drop=True)
         df_all_augmented = merge_curated_features(df_all_sorted, REG_PROCESSED_PATHS)
-        df_all_augmented = drop_non_binance_breakout_features(df_all_augmented)
+        df_all_augmented = _drop_non_binance_breakout_features(df_all_augmented)
         df_all_augmented = _augment_price_features(df_all_augmented)
         df_all_augmented, volatility_columns = add_volatility_columns(
             df_all_augmented,
@@ -436,7 +436,7 @@ def prepare_data_for_signals(
         if feature_names is None:
             feature_names = list(X_all.columns)
 
-    X_all = drop_non_binance_breakout_features(X_all)
+    X_all = _drop_non_binance_breakout_features(X_all)
     excluded_in_frame = [col for col in EXCLUDED_FEATURES if col in X_all.columns]
     if excluded_in_frame:
         X_all = X_all.drop(columns=excluded_in_frame)

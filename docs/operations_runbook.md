@@ -24,6 +24,11 @@ PYTHON_BIN=python ./scripts/run_cadence.sh daily
 
 The script resolves the latest trustworthy run by reading `artifacts/reliability/*/summary/edge_trustworthiness.json` and then uses that run's `calibrated_thresholds.json` and `platt_calibration.json` for prediction.
 
+Recommended runtime policy reference:
+
+- `configs/run_refresh_and_predict.default.yaml` is the trusted post-fix operating default.
+- `docs/trade_decision_post_fix_trust_basis_20260319.md` is the operator-facing record of the current trust basis and validation workflow.
+
 ## Exact Commands By Cadence
 
 ### Daily
@@ -97,13 +102,13 @@ Direct execution of `./scripts/run_cadence.sh <cadence>` is not supported in thi
 
 ## Rollback Criteria
 
-- Current active deployment: run `20260316T030147Z`, variant `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`, recorded in `artifacts/monitoring/reliability_promotion_deploy_manifest.json`.
-- Immediate rollback target: run `20260315T062250Z`, variant `selection_calibration_guard`.
+- Current active deployment: run `20260317T014743Z`, variant `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`, recorded in `artifacts/monitoring/reliability_promotion_deploy_manifest.json`.
+- Recommended runtime policy default: `configs/run_refresh_and_predict.default.yaml`, with trust basis documented in `docs/trade_decision_post_fix_trust_basis_20260319.md`.
 - Roll back if the next runtime reliability run keeps the active variant selected but records `summary/promotion_gate.json` with `promote = false` or any failed `trade_decision_model_shift_guard` checks.
 - Roll back if `summary/champion_gate_alignment_check.json` fails, because that indicates workflow routing drift rather than a trustworthy model-quality comparison.
 - Roll back if the active variant loses overlap-triggered support on the next qualified runtime run: `triggered_row_count < 10`, `triggered_net_return_total <= 0`, or `triggered_hit_rate < 0.45` in `summary/overlap_triggered_trade_diagnostics.json`.
 - Roll back if live refresh checks show a materially worse operational posture than the prior deployment, especially if a horizon flips from trade-decision-triggered to inactive for non-price reasons tied to reference-feature drift or policy gating instability.
-- Use the prior deployment artifacts from run `20260315T062250Z` as the manual restore source for `artifacts/models/trade_decision_model.json`, `artifacts/models/platt_calibration.json`, `artifacts/monitoring/labeled_backtest_1h*.json/csv`, and `artifacts/monitoring/promotion_gate_1h.json` if an emergency rollback is required.
+- Use the prior approved deployment artifacts referenced by your last known-good deploy manifest when an emergency rollback is required. The current checked-in runbook no longer hardcodes a single pre-fix rollback source because the active deploy manifest has advanced while the trusted post-fix runtime default is documented separately.
 
 ### Manual Rollback
 

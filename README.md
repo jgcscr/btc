@@ -133,10 +133,19 @@ Notes:
 
 - If `artifacts/models/target_ranges/metadata.json` exists, `run_refresh_and_predict` auto-enables target-range inference for supported horizons.
 - The default config currently requests targets `0.25,1,4,8,12`, so live output includes a 15m horizon in addition to hourly horizons.
-- `configs/run_refresh_and_predict.default.yaml` is the promoted default runtime profile.
+- `configs/run_refresh_and_predict.default.yaml` is the trusted post-fix runtime default documented in `docs/trade_decision_post_fix_trust_basis_20260319.md`.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml` remains the cadence/shadow wrapper profile and is still used by `scripts/run_cadence.sh` because it writes artifacts directly.
 - Live inference now resolves the best available versioned model artifact within a model family before loading it.
-- The current deployed bundle is recorded in `artifacts/monitoring/reliability_promotion_deploy_manifest.json`. At the time of this README update it points to run `20260316T030147Z` and variant `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`.
+- The current deployed bundle is recorded in `artifacts/monitoring/reliability_promotion_deploy_manifest.json`. In the current workspace it points to run `20260317T014743Z` and variant `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`.
+
+Post-fix trust basis:
+
+- `docs/trade_decision_post_fix_trust_basis_20260319.md` records why the current default is trusted for operation.
+- The main runtime fix was preserving confluence overrides such as `min_support_ratio_by_horizon` and `min_aligned_horizons_by_horizon` during policy normalization.
+- The main replay utilities for ongoing validation are:
+  - `artifacts/tmp_validation/run_pairwise_replay_matrix.py`
+  - `artifacts/tmp_validation/rebuild_pairwise_summary_from_snapshots.py`
+  - `artifacts/tmp_validation/score_pairwise_return_proxy.py`
 
 Execution plan quick guide:
 
@@ -338,6 +347,7 @@ Cadence automation:
 - Shell entrypoint: `scripts/run_cadence.sh`
 - GitHub Actions schedule: `.github/workflows/cadence.yml`
 - Operations runbook: `docs/operations_runbook.md`
+- Post-fix trust basis: `docs/trade_decision_post_fix_trust_basis_20260319.md`
 - Trade-decision operator handoff: `docs/trade_decision_operator_handoff_20260316.md`
 - Trade-decision final comparison: `docs/trade_decision_final_comparison_20260315.md`
 

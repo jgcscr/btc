@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+
+import pandas as pd
 
 from src.scripts.analyze_prediction_coherence import _iter_live_rows, _summarize_rows
 from src.scripts.run_refresh_and_predict import (
+    _resolve_abstention_expected_value,
+    _apply_confluence_policy,
+    _apply_execution_policy,
+    _resolve_confluence_policy,
     _apply_forecast_coherence_policy,
     _build_prompt_ready_summary,
     _build_direction_output,
@@ -18,6 +25,244 @@ from src.scripts.run_refresh_and_predict import (
 
 
 class PredictionCoherenceControlTests(unittest.TestCase):
+    def test_resolve_confluence_policy_preserves_horizon_specific_overrides(self) -> None:
+        resolved = _resolve_confluence_policy(
+            {
+                "enabled": True,
+                "short_horizons": [1.0],
+                "mid_horizons": [4.0, 8.0],
+                "min_support_ratio": 0.66,
+                "min_support_ratio_by_horizon": {"4": 1.0, "8": 0.75},
+                "min_aligned_horizons": 2,
+                "min_aligned_horizons_by_horizon": {"4": 3},
+            }
+        )
+
+        self.assertEqual(resolved["min_support_ratio_by_horizon"], {4.0: 1.0, 8.0: 0.75})
+        self.assertEqual(resolved["min_aligned_horizons_by_horizon"], {4.0: 3.0})
+
+    def test_confluence_policy_supports_horizon_specific_thresholds(self) -> None:
+        summary = {
+            "1h": {
+                "horizon_hours": 1.0,
+                "direction_next": "down",
+                "direction_next_display": "down",
+                "trade_action": "short",
+                "signal_ensemble": 1,
+                "trade_decision": {"enabled": True, "triggered": True},
+            },
+            "4h": {
+                "horizon_hours": 4.0,
+                "direction_next": "up",
+                "direction_next_display": "up",
+                "trade_action": "long",
+                "signal_ensemble": 1,
+                "trade_decision": {"enabled": True, "triggered": True},
+            },
+            "8h": {
+                "horizon_hours": 8.0,
+                "direction_next": "up",
+                "direction_next_display": "up",
+                "trade_action": "long",
+                "signal_ensemble": 1,
+                "trade_decision": {"enabled": True, "triggered": True},
+            },
+        }
+        policy = {
+            "enabled": True,
+            "short_horizons": [1.0],
+            "mid_horizons": [4.0, 8.0],
+            "min_support_ratio": 0.66,
+            "min_aligned_horizons": 2,
+            "min_support_ratio_by_horizon": {"4": 0.67},
+            "min_aligned_horizons_by_horizon": {"4": 3},
+            "require_mid_term_alignment": True,
+            "min_mid_term_ratio": 0.66,
+            "require_short_term_alignment": False,
+            "dominant_ratio_floor": 0.67,
+        }
+
+        updated = _apply_confluence_policy(summary, policy)
+
+        self.assertEqual(updated["4h"]["trade_action"], "hold")
+        self.assertTrue(updated["4h"]["confluence"]["triggered"])
+        self.assertIn("aligned_horizons_below_min", updated["4h"]["confluence"]["reasons"])
+        self.assertIn("support_ratio_below_min", updated["4h"]["confluence"]["reasons"])
+        self.assertEqual(updated["8h"]["trade_action"], "long")
+        self.assertFalse(updated["8h"]["confluence"]["triggered"])
+
+    def test_abstention_expected_value_prefers_trade_decision_expected_net(self) -> None:
+        value, source = _resolve_abstention_expected_value(
+            -0.012,
+            {
+                "enabled": True,
+                "expected_net": 0.0025,
+                "expected_net_valid": True,
+            },
+        )
+
+        self.assertEqual(value, 0.0025)
+        self.assertEqual(source, "trade_decision_expected_net")
+
+    def test_abstention_expected_value_falls_back_to_raw_expected_value(self) -> None:
+        value, source = _resolve_abstention_expected_value(
+            -0.012,
+            {
+                "enabled": True,
+                "expected_net": None,
+                "expected_net_valid": False,
+            },
+        )
+
+        self.assertEqual(value, -0.012)
+        self.assertEqual(source, "raw_expected_value")
+
+    def test_execution_policy_keeps_in_zone_pullback_setup_ready(self) -> None:
+        summary = {
+            "12h": {
+                "horizon_hours": 12.0,
+                "close": 100.0,
+                "entry_price": 100.0,
+                "stop_loss": 98.0,
+                "take_profit": 103.0,
+                "risk_reward_ratio": 1.5,
+                "direction_next": "up",
+                "direction_next_display": "up",
+                "trade_action": "long",
+                "signal_ensemble": 1,
+                "confluence_support_ratio": 0.7,
+                "confluence_mid_term_ratio": 0.75,
+                "regime_state": "neutral",
+                "forecast_coherence": {"triggered": False, "reasons": []},
+                "position_size": 1.0,
+            }
+        }
+        contexts = {
+            "12h": {
+                "prepared": SimpleNamespace(
+                    df_all=pd.DataFrame(
+                        {
+                            "high": [101.0, 101.0, 101.0],
+                            "low": [99.0, 99.0, 99.0],
+                            "close": [100.0, 100.0, 100.0],
+                            "volume": [1.0, 1.0, 1.0],
+                        }
+                    )
+                ),
+                "index": 2,
+                "horizon": 12.0,
+                "residual_std": 0.01,
+            }
+        }
+        policy = {
+            "enabled": True,
+            "bias_horizons": [12.0],
+            "execution_horizons": [12.0],
+            "require_bias_alignment": True,
+            "immediate_entry_min_support_ratio": 0.8,
+            "pullback_entry_min_support_ratio": 0.5,
+            "immediate_entry_min_mid_ratio": 1.0,
+            "pullback_entry_min_mid_ratio": 0.66,
+            "high_execution_alignment_ratio": 1.0,
+            "medium_execution_alignment_ratio": 0.5,
+            "entry_zone_atr_mult": 0.25,
+            "max_chase_atr_mult": 0.35,
+            "session_lookback_bars": 8,
+            "swing_lookback_bars": 6,
+            "structure_buffer_atr_mult": 0.2,
+            "minimum_rr_by_horizon": {"12": 1.25},
+            "time_stop_bars_by_horizon": {"12": 2},
+            "analytics": {"enabled": False},
+            "no_trade_guards": {"enabled": False},
+            "partial_take_profit": {"enabled": False},
+            "trailing_stop": {"enabled": False},
+            "adaptive_take_profit": {"enabled": False},
+            "regime_templates": {"neutral": {}},
+        }
+
+        updated = _apply_execution_policy(summary, contexts, policy)
+
+        self.assertEqual(updated["12h"]["execution_plan"]["entry_mode"], "pullback")
+        self.assertTrue(updated["12h"]["execution_plan"]["entry_ready"])
+        self.assertEqual(updated["12h"]["execution_plan"]["status"], "ready")
+        self.assertEqual(updated["12h"]["execution_plan"]["reason"], "pass")
+        self.assertEqual(updated["12h"]["trade_action"], "long")
+
+    def test_execution_policy_labels_confluence_gated_upstream_hold(self) -> None:
+        summary = {
+            "12h": {
+                "horizon_hours": 12.0,
+                "close": 100.0,
+                "entry_price": 100.0,
+                "stop_loss": 98.0,
+                "take_profit": 103.0,
+                "risk_reward_ratio": 1.5,
+                "direction_next": "up",
+                "direction_next_display": "up",
+                "trade_action": "hold",
+                "signal_ensemble": 0,
+                "confluence_support_ratio": 0.7,
+                "confluence_mid_term_ratio": 0.75,
+                "regime_state": "neutral",
+                "forecast_coherence": {"triggered": False, "reasons": []},
+                "trade_decision": {
+                    "enabled": True,
+                    "triggered": True,
+                    "confluence_gate_triggered": True,
+                    "confluence_gate_reasons": ["aligned_horizons_below_min"],
+                },
+                "position_size": 1.0,
+            }
+        }
+        contexts = {
+            "12h": {
+                "prepared": SimpleNamespace(
+                    df_all=pd.DataFrame(
+                        {
+                            "high": [101.0, 101.0, 101.0],
+                            "low": [99.0, 99.0, 99.0],
+                            "close": [100.0, 100.0, 100.0],
+                            "volume": [1.0, 1.0, 1.0],
+                        }
+                    )
+                ),
+                "index": 2,
+                "horizon": 12.0,
+                "residual_std": 0.01,
+            }
+        }
+        policy = {
+            "enabled": True,
+            "bias_horizons": [12.0],
+            "execution_horizons": [12.0],
+            "require_bias_alignment": True,
+            "immediate_entry_min_support_ratio": 0.8,
+            "pullback_entry_min_support_ratio": 0.5,
+            "immediate_entry_min_mid_ratio": 1.0,
+            "pullback_entry_min_mid_ratio": 0.66,
+            "high_execution_alignment_ratio": 1.0,
+            "medium_execution_alignment_ratio": 0.5,
+            "entry_zone_atr_mult": 0.25,
+            "max_chase_atr_mult": 0.35,
+            "session_lookback_bars": 8,
+            "swing_lookback_bars": 6,
+            "structure_buffer_atr_mult": 0.2,
+            "minimum_rr_by_horizon": {"12": 1.25},
+            "time_stop_bars_by_horizon": {"12": 2},
+            "analytics": {"enabled": False},
+            "no_trade_guards": {"enabled": False},
+            "partial_take_profit": {"enabled": False},
+            "trailing_stop": {"enabled": False},
+            "adaptive_take_profit": {"enabled": False},
+            "regime_templates": {"neutral": {}},
+        }
+
+        updated = _apply_execution_policy(summary, contexts, policy)
+
+        self.assertEqual(updated["12h"]["execution_plan"]["status"], "bias_only_ready")
+        self.assertEqual(updated["12h"]["execution_plan"]["reason"], "confluence_gate")
+        self.assertEqual(updated["12h"]["trade_action"], "hold")
+
     def test_probability_calibration_prefers_regime_specific_key(self) -> None:
         key, params, used_regime_key = _resolve_probability_calibration(
             {
@@ -686,6 +931,7 @@ class PredictionCoherenceControlTests(unittest.TestCase):
                     "execution_plan": {
                         "status": "bias_only_ready",
                         "reason": "upstream_model_hold",
+                        "pending_trade_action": "long",
                         "target_management": {"adapted_to_mfe_headroom": True},
                     },
                 },
@@ -695,7 +941,9 @@ class PredictionCoherenceControlTests(unittest.TestCase):
         self.assertEqual(payload["market_outlook_strategy"]["selected_direction"], "Long")
         self.assertEqual(payload["market_outlook_strategy"]["preferred_horizon"], "4h")
         self.assertEqual(payload["market_outlook_strategy"]["execution_state"], "bias_only_ready")
+        self.assertEqual(payload["market_outlook_strategy"]["pending_trade_action"], "long")
         self.assertEqual(payload["trade_execution_plan_usd"]["entry_point"], 100.0)
+        self.assertIn("Pending Trade Action: Long", payload["formatted_response"])
         self.assertIn("Take-profit was resized to empirical MFE headroom", payload["analysis_summary"]["rationale"])
 
     def test_prompt_ready_summary_includes_projected_range_in_trend_forecast(self) -> None:
@@ -813,6 +1061,7 @@ class PredictionCoherenceControlTests(unittest.TestCase):
                     "execution_plan": {
                         "status": "waiting_pullback",
                         "reason": "await_pullback_entry_zone",
+                        "pending_trade_action": "short",
                         "confluence_tier": "medium",
                         "bias_alignment_ratio": 2.0 / 3.0,
                         "execution_alignment_ratio": 0.75,
@@ -837,6 +1086,8 @@ class PredictionCoherenceControlTests(unittest.TestCase):
         self.assertEqual(payload["market_outlook_strategy"]["selected_direction"], "Short")
         self.assertEqual(payload["market_outlook_strategy"]["preferred_horizon"], "4h")
         self.assertEqual(payload["market_outlook_strategy"]["execution_state"], "waiting_pullback")
+        self.assertEqual(payload["market_outlook_strategy"]["pending_trade_action"], "short")
+        self.assertIn("Pending Trade Action: Short", payload["formatted_response"])
         self.assertNotIn("Preferred horizon 15m", payload["analysis_summary"]["rationale"])
 
     def test_prompt_ready_summary_keeps_blocked_high_timeframe_bias_for_outlook(self) -> None:

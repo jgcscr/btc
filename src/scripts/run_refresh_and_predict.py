@@ -1386,15 +1386,43 @@ def _resolve_confluence_policy(config: Mapping[str, Any] | None) -> Dict[str, An
     cfg = config or {}
     short_horizons = cfg.get("short_horizons") or [0.25, 1.0]
     mid_horizons = cfg.get("mid_horizons") or [4.0, 8.0, 12.0]
+
+    def _normalize_horizon_map(raw: Any, *, minimum: float = 0.0, maximum: float | None = None) -> Dict[float, float]:
+        if not isinstance(raw, Mapping):
+            return {}
+        resolved: Dict[float, float] = {}
+        for key, value in raw.items():
+            horizon = _coerce_numeric_horizon(key)
+            if horizon is None:
+                continue
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            numeric_value = max(numeric_value, minimum)
+            if maximum is not None:
+                numeric_value = min(numeric_value, maximum)
+            resolved[horizon] = numeric_value
+        return resolved
+
     return {
         "enabled": bool(cfg.get("enabled", False)),
         "short_horizons": sorted({_normalize_horizon_value(v) for v in short_horizons}),
         "mid_horizons": sorted({_normalize_horizon_value(v) for v in mid_horizons}),
         "min_support_ratio": max(min(float(cfg.get("min_support_ratio") or 0.6), 1.0), 0.0),
+        "min_support_ratio_by_horizon": _normalize_horizon_map(
+            cfg.get("min_support_ratio_by_horizon"),
+            minimum=0.0,
+            maximum=1.0,
+        ),
         "min_mid_term_ratio": max(min(float(cfg.get("min_mid_term_ratio") or 0.5), 1.0), 0.0),
         "min_short_term_ratio": max(min(float(cfg.get("min_short_term_ratio") or 0.5), 1.0), 0.0),
         "dominant_ratio_floor": max(min(float(cfg.get("dominant_ratio_floor") or 0.55), 1.0), 0.0),
         "min_aligned_horizons": max(int(cfg.get("min_aligned_horizons") or 2), 1),
+        "min_aligned_horizons_by_horizon": _normalize_horizon_map(
+            cfg.get("min_aligned_horizons_by_horizon"),
+            minimum=1.0,
+        ),
         "require_mid_term_alignment": bool(cfg.get("require_mid_term_alignment", True)),
         "require_short_term_alignment": bool(cfg.get("require_short_term_alignment", False)),
     }
@@ -1951,6 +1979,20 @@ def _apply_confluence_policy(
         aligned = [(other_label, other_entry, other_h) for other_label, other_entry, other_h in labeled_entries if _direction_vote(other_entry) == current_direction]
         aligned_count = len(aligned)
         support_ratio = aligned_count / len(labeled_entries)
+        min_aligned_horizons = int(
+            round(
+                _lookup_horizon_value(
+                    policy.get("min_aligned_horizons_by_horizon", {}) if isinstance(policy.get("min_aligned_horizons_by_horizon"), Mapping) else {},
+                    horizon,
+                    float(policy.get("min_aligned_horizons", 2)),
+                )
+            )
+        )
+        min_support_ratio = _lookup_horizon_value(
+            policy.get("min_support_ratio_by_horizon", {}) if isinstance(policy.get("min_support_ratio_by_horizon"), Mapping) else {},
+            horizon,
+            float(policy.get("min_support_ratio", 0.6)),
+        )
 
         short_entries = [item for item in labeled_entries if item[2] in short_horizons]
         mid_entries = [item for item in labeled_entries if item[2] in mid_horizons]
@@ -1966,10 +2008,10 @@ def _apply_confluence_policy(
         confluence_triggered = False
         reasons: List[str] = []
         if str(entry.get("trade_action", "hold")) != "hold":
-            if aligned_count < int(policy.get("min_aligned_horizons", 2)):
+            if aligned_count < min_aligned_horizons:
                 confluence_triggered = True
                 reasons.append("aligned_horizons_below_min")
-            if support_ratio < float(policy.get("min_support_ratio", 0.6)):
+            if support_ratio < min_support_ratio:
                 confluence_triggered = True
                 reasons.append("support_ratio_below_min")
             if (
@@ -2026,6 +2068,30 @@ def _lookup_horizon_value(mapping: Mapping[float, float], horizon: float, defaul
         if abs(float(key) - numeric_horizon) <= 1e-6:
             return float(value)
     return float(default)
+
+
+def _resolve_execution_upstream_hold_reason(entry: Mapping[str, Any]) -> str:
+    trade_decision = entry.get("trade_decision") if isinstance(entry.get("trade_decision"), Mapping) else {}
+    if trade_decision.get("confluence_gate_triggered"):
+        return "confluence_gate"
+
+    blocking_reason = str(trade_decision.get("blocking_reason") or "").strip()
+    if blocking_reason:
+        return blocking_reason
+
+    weak_band_veto = trade_decision.get("weak_band_veto") if isinstance(trade_decision.get("weak_band_veto"), Mapping) else {}
+    if weak_band_veto.get("triggered"):
+        return str(weak_band_veto.get("reason") or "weak_band_veto")
+
+    midband_veto = trade_decision.get("midband_veto") if isinstance(trade_decision.get("midband_veto"), Mapping) else {}
+    if midband_veto.get("triggered"):
+        return str(midband_veto.get("reason") or "midband_veto")
+
+    abstention = entry.get("abstention") if isinstance(entry.get("abstention"), Mapping) else {}
+    if abstention.get("triggered"):
+        return str(abstention.get("reason") or "abstention_gate")
+
+    return "upstream_model_hold"
 
 
 def _execution_side(entry: Mapping[str, Any]) -> str:
@@ -2869,8 +2935,12 @@ def _apply_execution_policy(
         }
 
         if plan["status"] == "ready" and entry_mode == "pullback":
-            plan["status"] = "waiting_pullback"
-            plan["reason"] = "await_pullback_entry_zone"
+            if bool(entry_zone["entry_ready"]):
+                plan["status"] = "ready"
+                plan["reason"] = "pass"
+            else:
+                plan["status"] = "waiting_pullback"
+                plan["reason"] = "await_pullback_entry_zone"
         elif plan["status"] == "ready" and entry_mode == "blocked":
             plan["status"] = "rejected"
             plan["reason"] = "low_execution_confluence"
@@ -2907,7 +2977,7 @@ def _apply_execution_policy(
 
         if upstream_hold and plan["status"] == "ready":
             plan["status"] = "bias_only_ready"
-            plan["reason"] = "upstream_model_hold"
+            plan["reason"] = _resolve_execution_upstream_hold_reason(entry)
             entry["trade_action"] = "hold"
             entry["signal_ensemble"] = 0
         elif plan["status"] != "ready":
@@ -3075,10 +3145,11 @@ def _build_prompt_forecast_clause(label: str, entry: Mapping[str, Any]) -> str:
 
     if coherence.get("triggered"):
         clause += " (coherence blocked)"
-    elif plan.get("reason") not in {None, "pass", "upstream_model_hold", "await_pullback_entry_zone"}:
+    elif plan.get("reason") not in {None, "pass", "upstream_model_hold", "confluence_gate", "await_pullback_entry_zone"}:
         clause += f" ({plan.get('reason')})"
     elif plan.get("status") == "bias_only_ready":
-        clause += " (bias ready, upstream hold)"
+        hold_reason = "confluence gate" if plan.get("reason") == "confluence_gate" else "upstream hold"
+        clause += f" (bias ready, {hold_reason})"
     return clause
 
 
@@ -3098,6 +3169,7 @@ def _prompt_reason_rank(reason: str | None) -> int:
         "pass": 0,
         "await_pullback_entry_zone": 1,
         "upstream_model_hold": 2,
+        "confluence_gate": 2,
         "low_execution_confluence": 3,
         "insufficient_mfe_headroom": 4,
         "bias_direction_conflict": 5,
@@ -3266,7 +3338,7 @@ def _build_prompt_ready_summary(summary: Mapping[str, Mapping[str, Any]]) -> Dic
         clause = _build_prompt_forecast_clause(label, entry)
         if coherence.get("triggered"):
             blocking_factors.extend(str(reason) for reason in coherence.get("reasons", []))
-        elif plan.get("reason") not in {None, "pass", "upstream_model_hold", "await_pullback_entry_zone"}:
+        elif plan.get("reason") not in {None, "pass", "upstream_model_hold", "confluence_gate", "await_pullback_entry_zone"}:
             blocking_factors.append(str(plan.get("reason")))
         trend_parts.append(clause)
 
@@ -3275,6 +3347,7 @@ def _build_prompt_ready_summary(summary: Mapping[str, Mapping[str, Any]]) -> Dic
     confidence_level = "Low"
     tradeable = False
     execution_state = "no_trade"
+    pending_trade_action = None
     entry_point = None
     stop_loss = None
     take_profit = None
@@ -3289,6 +3362,7 @@ def _build_prompt_ready_summary(summary: Mapping[str, Mapping[str, Any]]) -> Dic
         preferred_horizon = preferred_label
         confidence_level = _confidence_level_from_score(preferred_entry.get("confidence_score"))
         execution_state = str(plan.get("status") or "no_trade")
+        pending_trade_action = str(plan.get("pending_trade_action") or "").lower() or None
         tradeable = execution_state in {"ready", "waiting_pullback"} and selected_direction != "Neutral"
         if execution_state in {"ready", "waiting_pullback", "bias_only_ready"} and selected_direction != "Neutral":
             entry_point = _finite_float_or_none(preferred_entry.get("entry_price"))
@@ -3321,6 +3395,7 @@ def _build_prompt_ready_summary(summary: Mapping[str, Mapping[str, Any]]) -> Dic
             f"Selected Direction: {selected_direction}",
             f"Preferred Horizon: {preferred_horizon or 'None'}",
             f"Confidence Level: {confidence_level}",
+            f"Pending Trade Action: {(pending_trade_action or 'hold').title() if selected_direction != 'Neutral' else 'Hold'}",
             "",
             "Trade Execution Plan (USD)",
             f"Entry Point: {_format_usd_value(entry_point) or 'No trade'}",
@@ -3340,6 +3415,7 @@ def _build_prompt_ready_summary(summary: Mapping[str, Mapping[str, Any]]) -> Dic
             "selected_direction": selected_direction,
             "preferred_horizon": preferred_horizon,
             "confidence_level": confidence_level,
+            "pending_trade_action": pending_trade_action,
             "tradeable": tradeable,
             "execution_state": execution_state,
         },
@@ -4034,6 +4110,24 @@ def _apply_abstention_policy(
         return True, "probability_in_hold_band"
 
     return False, "pass"
+
+
+def _resolve_abstention_expected_value(
+    expected_value: float,
+    trade_decision: Mapping[str, Any] | None,
+) -> tuple[float, str]:
+    if isinstance(trade_decision, Mapping):
+        expected_net = trade_decision.get("expected_net")
+        expected_net_valid = bool(trade_decision.get("expected_net_valid", False))
+        if expected_net_valid and expected_net is not None:
+            try:
+                resolved = float(expected_net)
+            except (TypeError, ValueError):
+                resolved = expected_value
+            else:
+                if math.isfinite(resolved):
+                    return resolved, "trade_decision_expected_net"
+    return expected_value, "raw_expected_value"
 
 
 def _apply_uncertainty_abstention(
@@ -6031,11 +6125,16 @@ def run_predictions(
         if fallback_triggered:
             pending_direction_fallback_ts = signal_ts
 
+        abstention_expected_value, abstention_expected_value_source = _resolve_abstention_expected_value(
+            expected_value,
+            result.get("trade_decision") if isinstance(result.get("trade_decision"), Mapping) else None,
+        )
+
         abstain, abstain_reason = _apply_abstention_policy(
             trade_action=str(result["trade_action"]),
             p_up=p_up,
             confidence_score=confidence_score,
-            expected_value=expected_value,
+            expected_value=abstention_expected_value,
             fee_bps=float(DEFAULT_FEE_BPS),
             slippage_bps=float(DEFAULT_SLIPPAGE_BPS),
             policy=abstention_policy_resolved,
@@ -6044,6 +6143,8 @@ def run_predictions(
             "enabled": bool(abstention_policy_resolved.get("enabled", False)),
             "triggered": bool(abstain),
             "reason": abstain_reason,
+            "expected_value_used": float(abstention_expected_value),
+            "expected_value_source": abstention_expected_value_source,
         }
         if abstain:
             result["trade_action"] = "hold"
