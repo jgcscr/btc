@@ -22,6 +22,11 @@ Practical implication:
 - the system is trusted for live trading,
 - but `8h` should carry less capital than `4h` or `12h` until additional covered evidence improves it.
 
+Supporting operator references:
+
+- `docs/live_operator_checklist_20260320.md`
+- `docs/trade_decision_8h_hardening_memo_20260320.md`
+
 ## Conservative Risk Limits
 
 The live rollout profile enforces these limits:
@@ -55,18 +60,22 @@ Inspect these after each live refresh:
 
 - `artifacts/predictions/latest.json`
 - `artifacts/monitoring/latest.json`
-- `artifacts/monitoring/trade_ready_summary.json`
+- `artifacts/monitoring/trade_ready_summary.json` when the selected run path rewrites artifact-writing summaries
 
 Primary fields:
 
-- `prompt_ready_summary.market_outlook_strategy.selected_direction`
-- `prompt_ready_summary.market_outlook_strategy.preferred_horizon`
-- `prompt_ready_summary.market_outlook_strategy.execution_state`
-- `prompt_ready_summary.market_outlook_strategy.tradeable`
+- request-level `local_feature_overrides.feature_coverage.ok`
+- request-level `local_feature_overrides.source_freshness`
 - per-horizon `trade_decision.expected_net`
 - per-horizon `execution_plan.reason`
+- per-horizon `execution_plan.status`
 - per-horizon `position_size`
 - request-level `position_size_cap_by_horizon`
+
+Current workspace note:
+
+- direct conservative refreshes should be interpreted from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
+- the `prompt_ready_summary.market_outlook_strategy` fields are not the primary live read path in the current workspace snapshot
 
 ## Live Escalation Rules
 
@@ -98,3 +107,15 @@ What is active now:
 - keep the validated default signal logic,
 - harden live deployment by reducing `8h` capital exposure instead of forcing a weaker routing rule,
 - continue collecting covered post-fix evidence before making another structural `8h` policy change.
+
+Latest direct operator-caution extraction from the covered `8h` added-trade set:
+
+- `11` trades
+- average signed return proxy `-0.004160029236862267`
+- `8h` longs: `7` trades, average `-0.005096512073318341`
+- `8h` shorts: `4` trades, average `-0.0025211842730641365`
+
+Operational consequence:
+
+- keep `8h` enabled but underweighted,
+- do not manually force standalone `8h` longs when `4h` is not ready or when the `8h` execution reason is `insufficient_mfe_headroom`.

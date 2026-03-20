@@ -37,11 +37,18 @@ Primary entrypoint:
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict --targets 0.25,1,4,8,12
 ```
 
-Config-driven run with the current promoted default profile:
+Config-driven run with the trusted post-fix research baseline:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
   --config configs/run_refresh_and_predict.default.yaml
+```
+
+Approved conservative live rollout run:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.live_conservative.yaml
 ```
 
 Run explicitly against the currently deployed shared bundle:
@@ -134,9 +141,16 @@ Notes:
 - If `artifacts/models/target_ranges/metadata.json` exists, `run_refresh_and_predict` auto-enables target-range inference for supported horizons.
 - The default config currently requests targets `0.25,1,4,8,12`, so live output includes a 15m horizon in addition to hourly horizons.
 - `configs/run_refresh_and_predict.default.yaml` is the trusted post-fix runtime default documented in `docs/trade_decision_post_fix_trust_basis_20260319.md`.
+- `configs/run_refresh_and_predict.live_conservative.yaml` is the approved initial live trading profile documented in `docs/live_trading_rollout_20260320.md`.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml` remains the cadence/shadow wrapper profile and is still used by `scripts/run_cadence.sh` because it writes artifacts directly.
 - Live inference now resolves the best available versioned model artifact within a model family before loading it.
 - The current deployed bundle is recorded in `artifacts/monitoring/reliability_promotion_deploy_manifest.json`. In the current workspace it points to run `20260317T014743Z` and variant `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`.
+
+New agent starting point:
+
+- `docs/agent_system_handoff_20260320.md` is the shortest end-to-end handoff for a new agent.
+- `docs/operations_runbook.md` is the primary operating reference.
+- `docs/live_operator_checklist_20260320.md` is the shortest live execution checklist.
 
 Post-fix trust basis:
 
@@ -170,6 +184,7 @@ Prediction configs:
 
 - `configs/run_refresh_and_predict.default.yaml` - promoted runtime policy with trade-decision, confluence, feature-coverage, adaptive-threshold, regime-model, target-range, and execution-policy blocks.
 - `configs/run_refresh_and_predict.default.yaml` now also carries a `forecast_coherence_policy` block that can force `hold` and exclude incoherent higher-horizon forecasts from confluence/bias voting.
+- `configs/run_refresh_and_predict.live_conservative.yaml` - approved initial live trading profile with horizon-specific size caps and a stricter confidence floor.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml` - shadow/cadence profile that mirrors the promoted policy while writing artifacts by default.
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`
 
@@ -192,7 +207,7 @@ Current active data source is Binance spot klines.
 Active command used by refresh/prediction flow:
 
 ```bash
-/workspaces/btc/.venv/bin/python -m data.ingestors.binance_us_spot
+/workspaces/btc/.venv/bin/python -m src.ingest_spot_klines --interval 1h --hours 360
 ```
 
 ```bash
@@ -291,6 +306,19 @@ Example:
 
 ## 7. Reliability and Evaluation
 
+### Agent Handoff And Operating Docs
+
+Read these in order if you are a new operator or coding agent:
+
+1. `docs/agent_system_handoff_20260320.md`
+2. `docs/operations_runbook.md`
+3. `docs/trade_decision_post_fix_trust_basis_20260319.md`
+4. `docs/live_trading_rollout_20260320.md`
+5. `docs/live_operator_checklist_20260320.md`
+6. `docs/trade_decision_8h_hardening_memo_20260320.md`
+
+These documents reflect the current workspace state and the live-vs-default policy split.
+
 Reliability workflow:
 
 ```bash
@@ -347,7 +375,10 @@ Cadence automation:
 - Shell entrypoint: `scripts/run_cadence.sh`
 - GitHub Actions schedule: `.github/workflows/cadence.yml`
 - Operations runbook: `docs/operations_runbook.md`
+- Agent handoff: `docs/agent_system_handoff_20260320.md`
 - Post-fix trust basis: `docs/trade_decision_post_fix_trust_basis_20260319.md`
+- Live rollout policy: `docs/live_trading_rollout_20260320.md`
+- Live operator checklist: `docs/live_operator_checklist_20260320.md`
 - Trade-decision operator handoff: `docs/trade_decision_operator_handoff_20260316.md`
 - Trade-decision final comparison: `docs/trade_decision_final_comparison_20260315.md`
 

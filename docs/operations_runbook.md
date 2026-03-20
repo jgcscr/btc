@@ -30,6 +30,9 @@ Recommended runtime policy reference:
 - `configs/run_refresh_and_predict.live_conservative.yaml` is the conservative live rollout profile with horizon-specific size caps.
 - `docs/trade_decision_post_fix_trust_basis_20260319.md` is the operator-facing record of the current trust basis and validation workflow.
 - `docs/live_trading_rollout_20260320.md` is the operator-facing live rollout policy and monitoring guide.
+- `docs/live_operator_checklist_20260320.md` is the shortest pre-run and post-run operator checklist for live use.
+- `docs/trade_decision_8h_hardening_memo_20260320.md` records the current `8h` caution stance and the safest next hardening direction.
+- `docs/agent_system_handoff_20260320.md` is the new-agent handoff for safely running the system end to end.
 
 ## Exact Commands By Cadence
 
@@ -165,9 +168,9 @@ After the copy completes, replace `artifacts/monitoring/reliability_promotion_de
 
 ## Weekly Monitoring Checklist
 
-For the next weekly runtime run after deployment `20260316T030147Z`, inspect these items in order:
+For the next weekly runtime run after deployment `20260317T014743Z`, inspect these items in order:
 
-- Confirm `artifacts/monitoring/reliability_promotion_deploy_manifest.json` still points at run `20260316T030147Z` before starting, unless an approved rollback was executed.
+- Confirm `artifacts/monitoring/reliability_promotion_deploy_manifest.json` still points at run `20260317T014743Z` before starting, unless an approved rollback was executed.
 - Run the weekly workflow and read `summary/champion_gate_alignment_check.json` first; it must stay `passed = true` with `selected_source = policy_aligned`.
 - Read `summary/promotion_gate.json`; treat any failed `trade_decision_model_shift_guard` check as an immediate rollback candidate, not a soft warning.
 - Read `summary/overlap_triggered_trade_diagnostics.json`; keep the deployment only if the triggered slice remains at least `10` trades, positive net return, and hit rate at or above `0.45`.
