@@ -37,31 +37,46 @@ Observed result:
 - completed portion of the previously bad 4h leak window produced `0` added trades,
 - which is consistent with the fixed runtime blocking the leaked 4h chop additions.
 
-### Broader post-fix extension slice
+### Dataset-covered post-fix extension slices
 
 Artifacts:
 
+- `artifacts/tmp_validation/default_profile_pairwise_extension6_954_post_fix_20260320/summary.json`
+- `artifacts/tmp_validation/default_profile_pairwise_extension6_954_post_fix_20260320/return_proxy_summary.json`
+- `artifacts/tmp_validation/default_profile_pairwise_extension960_1152_post_fix_20260319/summary.json`
+- `artifacts/tmp_validation/default_profile_pairwise_extension960_1152_post_fix_20260319/return_proxy_summary.json`
 - `artifacts/tmp_validation/default_profile_pairwise_extension1158_1410_post_fix_20260319/summary.json`
 - `artifacts/tmp_validation/default_profile_pairwise_extension1158_1410_post_fix_20260319/return_proxy_summary.json`
 
-Current scored checkpoint from that directory:
+Current scored checkpoints:
 
-- offset count: `38`
-- aligned rows: `28`
-- added trades: `7`
-- added-trade average signed return proxy: `+0.003697181029045688`
-- positive vs nonpositive added trades: `4` vs `3`
+- `6`-`954`: `159` offsets, `123` aligned rows, `26` added trades, average signed return proxy `+0.006205112119250071`
+- `960`-`1152`: `33` offsets, `33` aligned rows, `12` added trades, average signed return proxy `+0.001547706492904884`
+- `1158`-`1410`: `43` offsets, `28` aligned rows, `7` added trades, average signed return proxy `+0.003697181029045688`
 
-By horizon:
+Combined dataset-covered post-fix aggregate:
 
-- `12h`: `3` added trades, average `+0.006069614241520564`
-- `4h`: `4` added trades, average `+0.0019178561196895316`
+- added trades: `45`
+- added-trade average signed return proxy: `+0.004573014671526228`
+- positive vs nonpositive added trades: `29` vs `16`
+
+By horizon across the combined covered aggregate:
+
+- `12h`: `12` added trades, average `+0.015200327994534746`
+- `4h`: `22` added trades, average `+0.0018605283310700377`
+- `8h`: `11` added trades, average `-0.001595445363570682`
+
+Coverage note:
+
+- `artifacts/tmp_validation/default_profile_pairwise_extension1416_1608_post_fix_20260319/summary.json` is a clean replay-only extension with `33` offsets and `32` aligned rows,
+- but its timestamps fall earlier than the local return-label dataset coverage, so it should not be used as scored trust evidence.
 
 Interpretation:
 
 - post-fix evidence is positive overall,
 - `12h` remains the strongest contributor,
-- `4h` remains positive in aggregate instead of being the drag that invalidated the earlier pre-fix fresh slice.
+- `4h` remains positive in aggregate instead of being the drag that invalidated the earlier pre-fix fresh slice,
+- `8h` is now much closer to neutral than it appeared in the early small slices, but it still remains the weakest horizon in the combined covered aggregate.
 
 ## Operating Conclusion
 
@@ -71,7 +86,9 @@ Trust statement:
 
 - predictions are trusted for operation relative to the prepromotion baseline,
 - the profile is considered post-fix trusted,
-- broader replay validation should continue, but no broad policy rollback is justified by the current evidence.
+- broader replay validation should continue, but no broad policy rollback is justified by the current evidence,
+- the current evidence is sufficient to justify live trading with conservative risk discipline,
+- horizon-aware monitoring should remain in place because `8h` continues to lag `4h` and `12h` in the covered post-fix aggregate.
 
 ## Validation Workflow Going Forward
 

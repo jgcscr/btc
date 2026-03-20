@@ -164,6 +164,7 @@ CONFIG_ALLOWED_KEYS = {
     "confidence_min",
     "position_size_floor",
     "position_size_cap",
+    "position_size_cap_by_horizon",
     "abstention_policy",
     "uncertainty_policy",
     "trade_decision_policy",
@@ -608,6 +609,10 @@ def _normalize_confluence_policy_block(value: Mapping[str, Any]) -> Dict[str, An
             normalized[key] = float(raw_value) if raw_value is not None else None
         elif key == "min_aligned_horizons":
             normalized[key] = int(raw_value) if raw_value is not None else None
+        elif key in {"min_support_ratio_by_horizon", "min_aligned_horizons_by_horizon"}:
+            if not isinstance(raw_value, Mapping):
+                raise ValueError(f"{key} in confluence_policy must be a mapping")
+            normalized[key] = dict(raw_value)
         elif key in {"short_horizons", "mid_horizons"}:
             if raw_value is None:
                 normalized[key] = None
@@ -852,6 +857,8 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_forecast_coherence_policy_block(value)
         if name == "direction_output_policy" and value is not None:
             return _normalize_direction_output_policy_block(value)
+        if name == "position_size_cap_by_horizon" and value is not None:
+            return _normalize_horizon_float_map(value, minimum=0.0, maximum=1.0)
         return value
     raise ValueError(f"Unsupported config key: {name}")
 
@@ -970,6 +977,25 @@ def _coerce_numeric_horizon(value: int | float | str) -> float | None:
                 return None
             return round(minutes / 60.0, HORIZON_PRECISION)
     return None
+
+
+def _normalize_horizon_float_map(raw: Any, *, minimum: float = 0.0, maximum: float | None = None) -> Dict[float, float]:
+    if not isinstance(raw, Mapping):
+        return {}
+    resolved: Dict[float, float] = {}
+    for key, value in raw.items():
+        horizon = _coerce_numeric_horizon(key)
+        if horizon is None:
+            continue
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        numeric_value = max(numeric_value, minimum)
+        if maximum is not None:
+            numeric_value = min(numeric_value, maximum)
+        resolved[horizon] = numeric_value
+    return resolved
 
 
 def _resolve_thresholds_for_horizon(
@@ -3775,6 +3801,7 @@ def _apply_trade_decision_model(
         "ret_pred": float(result.get("ret_pred", 0.0)),
         "expected_value_proxy": float(result.get("p_up", 0.0)) * float(result.get("ret_pred", 0.0)),
         "abs_ret_pred": abs(float(result.get("ret_pred", 0.0))),
+        "residual_std": float(residual_std),
         "confidence_score": float(result.get("confidence_score", 0.0)),
         "position_size": float(result.get("position_size", 0.0)),
         "volatility_realized_24h": float(vol_snapshot.get("volatility_realized_24h", 0.0) or 0.0),
@@ -5671,6 +5698,7 @@ def run_predictions(
     confidence_min: float = CONFIDENCE_MIN_DEFAULT,
     position_size_floor: float = POSITION_SIZE_FLOOR_DEFAULT,
     position_size_cap: float = POSITION_SIZE_CAP_DEFAULT,
+    position_size_cap_by_horizon: Mapping[float | int | str, float] | None = None,
 ) -> Dict[str, Dict[str, float | str | int]]:
     normalized_targets = sorted({_normalize_horizon_value(h) for h in targets})
     if not normalized_targets:
@@ -5692,6 +5720,11 @@ def run_predictions(
     confidence_min = max(0.0, min(1.0, float(confidence_min)))
     position_size_floor = max(0.0, float(position_size_floor))
     position_size_cap = max(position_size_floor, float(position_size_cap))
+    position_size_cap_by_horizon_resolved = _normalize_horizon_float_map(
+        position_size_cap_by_horizon,
+        minimum=position_size_floor,
+        maximum=position_size_cap,
+    )
 
     profiles: Dict[str, DatasetProfile] = {}
     target_profiles: Dict[float, str] = {}
@@ -5941,11 +5974,16 @@ def run_predictions(
             residual_std=residual_std,
             direction_signal=signal_dir_only,
         )
+        effective_position_size_cap = _lookup_horizon_value(
+            position_size_cap_by_horizon_resolved,
+            horizon,
+            position_size_cap,
+        )
         position_size = _compute_position_size(
             confidence_score,
             confidence_min=confidence_min,
             size_floor=position_size_floor,
-            size_cap=position_size_cap,
+            size_cap=effective_position_size_cap,
         )
         trend_prob = float(signal.get("p_trend_ignition", 0.0))
         ignition_state = 0
@@ -6007,6 +6045,7 @@ def run_predictions(
             "confidence_score": confidence_score,
             "position_size": position_size,
             "confidence_min": confidence_min,
+            "position_size_cap": effective_position_size_cap,
             "p_up_components": signal.get("p_up_components", {}),
             "stop_loss": stop_loss_price,
             "take_profit": take_profit_price,
@@ -6251,6 +6290,12 @@ def _build_trade_ready_monitoring_payload(predictions_payload: dict[str, Any], a
         "position_size_floor": float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),
         "position_size_cap": float(getattr(args, "position_size_cap", POSITION_SIZE_CAP_DEFAULT)),
     }
+    position_size_cap_by_horizon = getattr(args, "position_size_cap_by_horizon", None)
+    if isinstance(position_size_cap_by_horizon, Mapping) and position_size_cap_by_horizon:
+        request["position_size_cap_by_horizon"] = {
+            _format_horizon_label(float(key)): float(value)
+            for key, value in sorted(position_size_cap_by_horizon.items(), key=lambda item: float(item[0]))
+        }
     data_quality_cfg = getattr(args, "data_quality", None)
     if isinstance(data_quality_cfg, Mapping):
         request["data_quality"] = dict(data_quality_cfg)
@@ -6655,6 +6700,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.forecast_coherence_policy = None
     if not hasattr(args, "direction_output_policy"):
         args.direction_output_policy = None
+    if not hasattr(args, "position_size_cap_by_horizon"):
+        args.position_size_cap_by_horizon = None
     if args.data_quality is None:
         args.data_quality = {}
     if args.data_quality_enabled:
@@ -7004,6 +7051,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
             position_size_floor=float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),
             position_size_cap=float(getattr(args, "position_size_cap", POSITION_SIZE_CAP_DEFAULT)),
+            position_size_cap_by_horizon=getattr(args, "position_size_cap_by_horizon", None),
         )
     except Exception as exc:  # pragma: no cover - runtime safety
         print(f"Prediction step failed: {exc}", file=sys.stderr)

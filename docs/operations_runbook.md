@@ -27,7 +27,9 @@ The script resolves the latest trustworthy run by reading `artifacts/reliability
 Recommended runtime policy reference:
 
 - `configs/run_refresh_and_predict.default.yaml` is the trusted post-fix operating default.
+- `configs/run_refresh_and_predict.live_conservative.yaml` is the conservative live rollout profile with horizon-specific size caps.
 - `docs/trade_decision_post_fix_trust_basis_20260319.md` is the operator-facing record of the current trust basis and validation workflow.
+- `docs/live_trading_rollout_20260320.md` is the operator-facing live rollout policy and monitoring guide.
 
 ## Exact Commands By Cadence
 

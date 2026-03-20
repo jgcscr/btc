@@ -14,8 +14,10 @@ from src.scripts.run_refresh_and_predict import (
     _apply_forecast_coherence_policy,
     _build_prompt_ready_summary,
     _build_direction_output,
+    _compute_position_size,
     _compute_directional_stop_take_prices,
     _refine_stop_with_target_range,
+    _lookup_horizon_value,
     _resolve_execution_target_reward,
     _resolve_direction_signal_for_horizon,
     _resolve_probability_calibration,
@@ -25,6 +27,18 @@ from src.scripts.run_refresh_and_predict import (
 
 
 class PredictionCoherenceControlTests(unittest.TestCase):
+    def test_position_size_cap_can_be_lowered_by_horizon(self) -> None:
+        effective_cap = _lookup_horizon_value({4.0: 0.35, 8.0: 0.2}, 8.0, 0.5)
+        size = _compute_position_size(
+            0.9,
+            confidence_min=0.33,
+            size_floor=0.0,
+            size_cap=effective_cap,
+        )
+
+        self.assertAlmostEqual(effective_cap, 0.2)
+        self.assertLessEqual(size, 0.2)
+
     def test_resolve_confluence_policy_preserves_horizon_specific_overrides(self) -> None:
         resolved = _resolve_confluence_policy(
             {
