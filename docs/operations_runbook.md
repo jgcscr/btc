@@ -11,15 +11,15 @@ This repo uses three operating cadences:
 Use the shell entrypoint from the repository root:
 
 ```bash
-batch ./scripts/run_cadence.sh daily
-batch ./scripts/run_cadence.sh weekly
-batch ./scripts/run_cadence.sh monthly
+bash ./scripts/run_cadence.sh daily
+bash ./scripts/run_cadence.sh weekly
+bash ./scripts/run_cadence.sh monthly
 ```
 
 In CI or other environments without the local `.venv`, set `PYTHON_BIN` explicitly if needed:
 
 ```bash
-PYTHON_BIN=python ./scripts/run_cadence.sh daily
+PYTHON_BIN=python bash ./scripts/run_cadence.sh daily
 ```
 
 The script resolves the latest trustworthy run by reading `artifacts/reliability/*/summary/edge_trustworthiness.json` and then uses that run's `calibrated_thresholds.json` and `platt_calibration.json` for prediction.
@@ -72,7 +72,7 @@ python -m src.scripts.run_reliability_workflow \
   --config configs/reliability_workflow.runtime.yaml \
   --continue-on-promotion-fail
 
-batch ./scripts/run_cadence.sh daily
+bash ./scripts/run_cadence.sh daily
 ```
 
 ### Monthly
@@ -84,10 +84,10 @@ python -m src.scripts.run_reliability_workflow \
   --config configs/reliability_workflow.default.yaml \
   --continue-on-promotion-fail
 
-batch ./scripts/run_cadence.sh daily
+bash ./scripts/run_cadence.sh daily
 ```
 
-Direct execution of `./scripts/run_cadence.sh <cadence>` is not supported in this workspace. Use the `batch` prefix for all cadence invocations.
+Direct execution of `./scripts/run_cadence.sh <cadence>` is not supported in this workspace because the script is not executable as checked in. Invoke it through `bash`.
 
 ## Promotion Handoff And Gate Alignment
 
@@ -186,6 +186,17 @@ For the next weekly runtime run after deployment `20260317T014743Z`, inspect the
 - `rejected` means a hard guard failed; the most common reasons in recent replay checks were `bias_direction_conflict`, `stop_too_tight_near_invalidation`, and `stop_too_wide`.
 - Treat `upstream_model_hold` as informational rather than a structural failure; treat the stop- and RR-related reasons as execution-quality failures.
 - `execution_plan.stop_management` shows whether the execution layer expanded, capped, or replaced the selected stop to keep it inside the configured ATR guardrails.
+- `execution_plan.pullback_quality` records the pullback score, the minimum score required for that horizon/regime, and the VWAP and candle-expansion diagnostics that can force a downgrade from immediate entry to pullback-only or a full rejection.
+- `execution_plan.disagreement_severity` records the short-term versus mid-term directional conflict score. When it crosses the configured block threshold the horizon is rejected as `short_term_disagreement`; lower scores can still force pullback-only entry.
+- `bias_score`, `execution_score`, `bias_support_horizons`, and `bias_support_is_8h_standalone` expose how the weighted horizon vote was built and whether the surviving bias is leaning too heavily on `8h` alone.
+
+## Reading New Monitoring Fields
+
+- `artifacts/predictions/latest.json` now includes `blocked_trade_analytics`, `degradation_monitoring`, and `prompt_ready_summary.operator_summary_compact` at the top level.
+- `blocked_trade_analytics` is the quickest way to see whether the current snapshot is being blocked mainly by forecast coherence, short-term disagreement, pullback quality, or baseline risk/reward guards.
+- `degradation_monitoring` is snapshot-history based rather than realized-PnL based. Treat it as an operational posture alarm, not as a substitute for trade replay or live outcome review.
+- `operator_summary_compact` is the fastest operator-facing digest: it reports market bias, preferred horizon, recommended action, primary blocker, supporting horizons, and caution flags.
+- `artifacts/monitoring/latest.json` mirrors these top-level prediction summaries so operators can inspect them from one monitoring payload.
 
 Replay workflow for cached hourly bars:
 
@@ -217,6 +228,13 @@ After a successful run, inspect:
 - `artifacts/monitoring/trade_ready_summary.json`
 - `artifacts/reliability/<run-id>/summary/edge_trustworthiness.json`
 - `artifacts/reliability/<run-id>/summary/walkforward_labeled_reconciliation.json`
+
+Within `artifacts/predictions/latest.json`, check these top-level sections before acting on a setup:
+
+- `prompt_ready_summary.market_outlook_strategy`
+- `prompt_ready_summary.operator_summary_compact`
+- `blocked_trade_analytics`
+- `degradation_monitoring`
 
 ## Codespaces Note
 

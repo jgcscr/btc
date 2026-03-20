@@ -126,6 +126,12 @@ Main outputs:
 
 The top-level payload also includes `execution_prior_summary`, which aggregates whether execution priors came from global history, regime/volatility buckets, and the stop/target source mix used by the current snapshot.
 
+The top-level payload now also includes:
+
+- `blocked_trade_analytics`, which counts ready, pullback-waiting, bias-only, and rejected horizons plus the dominant rejection reasons.
+- `degradation_monitoring`, which evaluates recent snapshot history as a proxy-health check and raises per-horizon alarms when ready ratio, blocked ratio, confidence, or expected net drift beyond configured floors.
+- `prompt_ready_summary.operator_summary_compact`, which is the operator-facing digest of market bias, preferred horizon, recommended action, primary blocker, supporting horizons, and caution flags.
+
 `execution_plan.stop_management` records whether stop guardrails widened, capped, or swapped the selected stop candidate to keep the stop width inside the configured ATR band.
 
 `probability_calibration` records the requested horizon/regime calibration key, the key actually applied, whether runtime fell back to the base horizon calibration, and any `forecast_alignment_guard` fallback used when a regime-specific calibration would have flipped a raw probability that already agreed with both forecast branches.
@@ -133,6 +139,10 @@ The top-level payload also includes `execution_prior_summary`, which aggregates 
 `direction_output` is a user-facing direction payload. It can apply a separate direction-only calibration/remap, expose the probability used for display, and emit `neutral` inside the configured band without changing `trade_action` or the internal `direction_next` used by policy gates.
 
 `forecast_coherence` now distinguishes hard gating from advisory low-trust conflicts. Strong disagreements still populate `reasons`, force `hold`, and can neutralize display direction. Low-edge `p_up` conflicts that are already non-tradable instead populate `advisory_reasons`, set `low_trust: true`, and exclude that horizon from confluence/bias voting without rewriting the numeric probability.
+
+`execution_plan` now carries weighted-bias and execution scores, pullback-quality diagnostics, and short-vs-mid disagreement severity. In the current runtime this is what drives rejections like `short_term_disagreement` and `pullback_quality_insufficient`, and it is also what feeds the compact operator summary.
+
+`uncertainty.effective_policy` records the horizon/regime-specific uncertainty settings actually applied after override resolution.
 
 `artifacts/monitoring/latest.json` also includes local feature alignment diagnostics under `request.local_feature_overrides.feature_alignment`, source freshness under `request.local_feature_overrides.source_freshness`, and feature-coverage enforcement results under `request.local_feature_overrides.feature_coverage`.
 
@@ -166,14 +176,14 @@ Execution plan quick guide:
 - `bias_only_ready`: the execution layer found an acceptable setup, but the upstream model still abstained so the final `trade_action` remains `hold`.
 - `waiting_pullback`: bias and confluence are acceptable, but price is outside the preferred entry zone and the plan is waiting for a retest.
 - `rejected`: a hard guard blocked the setup; inspect `execution_plan.reason` before overriding it.
-- Common reasons are `bias_direction_conflict`, `stop_too_tight_near_invalidation`, `stop_too_wide`, `risk_reward_below_floor`, `low_execution_confluence`, and `upstream_model_hold`.
+- Common reasons are `bias_direction_conflict`, `forecast_coherence_gate`, `short_term_disagreement`, `pullback_quality_insufficient`, `stop_too_tight_near_invalidation`, `stop_too_wide`, `risk_reward_below_floor`, `low_execution_confluence`, and `upstream_model_hold`.
 
 Cadence entrypoint:
 
 ```bash
-batch ./scripts/run_cadence.sh daily
-batch ./scripts/run_cadence.sh weekly
-batch ./scripts/run_cadence.sh monthly
+bash ./scripts/run_cadence.sh daily
+bash ./scripts/run_cadence.sh weekly
+bash ./scripts/run_cadence.sh monthly
 ```
 
 That wrapper resolves the latest trustworthy reliability run for daily predictions, runs the runtime reliability profile for weekly refreshes, and runs the full default reliability profile for monthly retraining before refreshing predictions.
@@ -184,6 +194,7 @@ Prediction configs:
 
 - `configs/run_refresh_and_predict.default.yaml` - promoted runtime policy with trade-decision, confluence, feature-coverage, adaptive-threshold, regime-model, target-range, and execution-policy blocks.
 - `configs/run_refresh_and_predict.default.yaml` now also carries a `forecast_coherence_policy` block that can force `hold` and exclude incoherent higher-horizon forecasts from confluence/bias voting.
+- The default and live conservative profiles now also define horizon/regime uncertainty overrides, weighted horizon bias voting, short-term arbitration thresholds, pullback-quality scoring, disagreement-severity guards, regime-specific entry-mode templates, and snapshot-based degradation monitoring.
 - `configs/run_refresh_and_predict.live_conservative.yaml` - approved initial live trading profile with horizon-specific size caps and a stricter confidence floor.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml` - shadow/cadence profile that mirrors the promoted policy while writing artifacts by default.
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`
@@ -659,8 +670,9 @@ For unattended cadence execution and the exact daily/weekly/monthly command brea
 
 ## 11. Troubleshooting / Usage Notes
 
-- `scripts/run_cadence.sh` must be invoked with the batch prefix in this workspace: `batch ./scripts/run_cadence.sh daily`.
-- Do not run `./scripts/run_cadence.sh daily` directly. Direct execution fails and is not the supported invocation for future agents or users.
+- `scripts/run_cadence.sh` is not executable as checked in, so invoke it through `bash ./scripts/run_cadence.sh daily`.
+- Do not run `./scripts/run_cadence.sh daily` directly unless you first add the executable bit yourself.
+- If you need a different interpreter, use `PYTHON_BIN=python bash ./scripts/run_cadence.sh daily`.
 - Historical replay is available for hourly horizons with cached artifacts:
 
 ```bash
