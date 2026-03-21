@@ -1835,14 +1835,60 @@ def _materialize_trade_decision_feature_frame(
     working = df.copy()
     ret_pred_series = pd.to_numeric(working.get("ret_pred", 0.0), errors="coerce").fillna(0.0)
     p_up_series = pd.to_numeric(working.get("p_up", working.get("p_up_meta", 0.5)), errors="coerce").fillna(0.5)
+    raw_p_up_series = pd.to_numeric(working.get("raw_p_up", p_up_series), errors="coerce").fillna(p_up_series)
+    close_source = working.get("close")
+    if close_source is None:
+        close_source = pd.Series(0.0, index=working.index, dtype=float)
+    close_series = pd.to_numeric(close_source, errors="coerce").fillna(0.0)
+    projected_source = working.get("projected_price")
+    if projected_source is None:
+        projected_source = close_series
+    projected_price_series = pd.to_numeric(projected_source, errors="coerce").fillna(close_series)
+    direction_series = working.get("direction_next", pd.Series(index=working.index, dtype=object)).map(
+        lambda value: str(value).strip().lower() if pd.notna(value) else "neutral"
+    )
     regime_series = working.get("regime_state", pd.Series(index=working.index, dtype=object)).map(
         lambda value: str(value).strip().lower() if pd.notna(value) else "missing"
     )
+
+    ret_side = pd.Series("neutral", index=working.index, dtype=object)
+    ret_side.loc[ret_pred_series > 0.0] = "up"
+    ret_side.loc[ret_pred_series < 0.0] = "down"
+    projected_side = pd.Series("neutral", index=working.index, dtype=object)
+    valid_prices = (close_series > 0.0) & (projected_price_series > 0.0)
+    projected_side.loc[valid_prices & (projected_price_series > close_series)] = "up"
+    projected_side.loc[valid_prices & (projected_price_series < close_series)] = "down"
+    raw_side = pd.Series("neutral", index=working.index, dtype=object)
+    raw_side.loc[raw_p_up_series >= 0.52] = "up"
+    raw_side.loc[raw_p_up_series <= 0.48] = "down"
+    resolved_side = pd.Series("neutral", index=working.index, dtype=object)
+    resolved_side.loc[p_up_series >= 0.52] = "up"
+    resolved_side.loc[p_up_series <= 0.48] = "down"
     for column in feature_columns:
         if column == "expected_value_proxy":
             working[column] = p_up_series * ret_pred_series
         elif column == "abs_ret_pred":
             working[column] = ret_pred_series.abs()
+        elif column == "raw_p_up":
+            working[column] = raw_p_up_series
+        elif column == "raw_calibrated_probability_gap":
+            working[column] = p_up_series - raw_p_up_series
+        elif column == "probability_alignment_gap":
+            working[column] = (p_up_series - raw_p_up_series).abs()
+        elif column == "raw_p_up_ret_mismatch":
+            working[column] = ((raw_side != "neutral") & (ret_side != "neutral") & (raw_side != ret_side)).astype(float)
+        elif column == "p_up_ret_mismatch":
+            working[column] = ((resolved_side != "neutral") & (ret_side != "neutral") & (resolved_side != ret_side)).astype(float)
+        elif column == "raw_p_up_direction_mismatch":
+            working[column] = ((raw_side != "neutral") & (direction_series != "neutral") & (raw_side != direction_series)).astype(float)
+        elif column == "p_up_direction_mismatch":
+            working[column] = ((resolved_side != "neutral") & (direction_series != "neutral") & (resolved_side != direction_series)).astype(float)
+        elif column == "ret_projected_price_consensus":
+            working[column] = ((ret_side == projected_side) & (ret_side != "neutral")).astype(float)
+        elif column == "probability_calibration_guard_applied":
+            working[column] = pd.to_numeric(working.get(column, 0.0), errors="coerce").fillna(0.0)
+        elif column == "probability_calibration_used_regime_key":
+            working[column] = pd.to_numeric(working.get(column, 0.0), errors="coerce").fillna(0.0)
         elif column == "regime_is_trend":
             working[column] = (regime_series == "trend_ignition").astype(float)
         elif column == "regime_is_neutral":

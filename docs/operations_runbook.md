@@ -1,10 +1,11 @@
 # Operations Runbook
 
-This repo uses three operating cadences:
+This repo uses four operating cadences:
 
 - `daily`: refresh live predictions from the latest trustworthy reliability run
 - `weekly`: run the runtime reliability workflow, then refresh live predictions
 - `monthly`: run the full default reliability workflow, then refresh live predictions
+- `shadow`: run simplified vs chop-suppression shadow profiles and archive comparison artifacts
 
 ## Single Entrypoint
 
@@ -14,6 +15,7 @@ Use the shell entrypoint from the repository root:
 bash ./scripts/run_cadence.sh daily
 bash ./scripts/run_cadence.sh weekly
 bash ./scripts/run_cadence.sh monthly
+bash ./scripts/run_cadence.sh shadow
 ```
 
 In CI or other environments without the local `.venv`, set `PYTHON_BIN` explicitly if needed:
@@ -86,6 +88,40 @@ python -m src.scripts.run_reliability_workflow \
 
 bash ./scripts/run_cadence.sh daily
 ```
+
+### Shadow
+
+Runs the current shadow-vs-shadow comparison workflow between:
+
+- `configs/run_refresh_and_predict.shadow_simplified.yaml`
+- `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`
+
+Use it through the cadence wrapper:
+
+```bash
+bash ./scripts/run_cadence.sh shadow
+```
+
+Important behavior:
+
+- the shadow run uses the latest trustworthy reliability bundle for thresholds and Platt calibration,
+- the shadow comparison run id is timestamped independently from the source reliability run id,
+- the manifest records the source reliability run separately as `source_reliability_run_id`,
+- repeated shadow cadence runs should append new comparison points instead of overwriting the prior comparison artifact.
+
+Inspect these outputs after each shadow run:
+
+- `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.json`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
+
+Interpretation rules:
+
+- treat the Markdown summary as the fastest operator-facing snapshot,
+- treat the CSV as the quickest per-run history export,
+- treat the longitudinal JSON as the source of truth for automation and backfills,
+- do not interpret score-only differences as operational changes unless the summary starts showing operational or decision-state deltas.
 
 Direct execution of `./scripts/run_cadence.sh <cadence>` is not supported in this workspace because the script is not executable as checked in. Invoke it through `bash`.
 
@@ -235,6 +271,11 @@ Within `artifacts/predictions/latest.json`, check these top-level sections befor
 - `prompt_ready_summary.operator_summary_compact`
 - `blocked_trade_analytics`
 - `degradation_monitoring`
+
+For shadow cadence reviews, also inspect:
+
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
 
 ## Codespaces Note
 

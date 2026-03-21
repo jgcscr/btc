@@ -107,6 +107,10 @@ forecast_coherence_policy:
   p_up_neutral_band: 0.02
   min_p_up_edge: 0.05
   min_abs_ret_pred: 0.0
+  allow_consensus_p_up_ret_relief: true
+  consensus_relief_horizons: [1, 4]
+  consensus_relief_max_p_up_edge: 0.12
+  consensus_relief_exclude_from_voting: false
   exclude_blocked_horizons_from_voting: true
 confluence_policy:
   enabled: true

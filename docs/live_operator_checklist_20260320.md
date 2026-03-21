@@ -9,6 +9,23 @@ Use it together with:
 - `docs/live_trading_rollout_20260320.md`
 - `docs/trade_decision_8h_hardening_memo_20260320.md`
 
+## Scope Boundary
+
+This checklist applies only to the approved live conservative path:
+
+- `configs/run_refresh_and_predict.live_conservative.yaml`
+
+Do not mix in observational shadow comparison outputs when making a live decision from this checklist.
+
+The following artifacts are shadow-only diagnostics and are not live trade-authorization inputs:
+
+- `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.json`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
+
+Use them to judge whether the chop-suppression candidate is drifting operationally from `shadow_simplified`, not to override the current live conservative execution state.
+
 ## Latest Fresh Conservative Snapshot
 
 Fresh run used for this checklist:
@@ -72,6 +89,7 @@ Current workspace note:
 
 - direct conservative refreshes should be read from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json` may lag if the selected run path does not rewrite the artifact-writing summary outputs
+- shadow comparison summaries are observational only and should not be used as a substitute for the direct conservative refresh artifacts above
 
 ## Execution Decision Tree
 

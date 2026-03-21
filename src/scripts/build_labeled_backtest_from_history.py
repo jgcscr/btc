@@ -151,7 +151,10 @@ def _load_ohlcv(path: Path, horizons: Optional[List[str]] = None) -> pd.DataFram
         out[close_next_col] = out["close"].shift(-horizon_steps)
         out[ret_col] = np.log(out[close_next_col] / out["close"])
 
-    default_close_next_col, default_ret_col = _realized_column_names("1h")
+    default_horizon = "1h"
+    if default_horizon not in target_horizons:
+        default_horizon = target_horizons[0]
+    default_close_next_col, default_ret_col = _realized_column_names(default_horizon)
     out["close_next_1h"] = out[default_close_next_col]
     out["ret_1h_realized"] = out[default_ret_col]
     out["y_true"] = (out["ret_1h_realized"] > 0).astype(int)

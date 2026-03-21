@@ -21,12 +21,13 @@ cd "$ROOT_DIR"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run_cadence.sh <daily|weekly|monthly>
+Usage: scripts/run_cadence.sh <daily|weekly|monthly|shadow>
 
 Cadences:
   daily    Run fresh predictions from the latest trustworthy reliability run.
   weekly   Run the runtime reliability workflow, then refresh predictions.
   monthly  Run the full default reliability workflow, then refresh predictions.
+  shadow   Run simplified vs chop-suppression shadow profiles and archive a comparison artifact.
 EOF
 }
 
@@ -68,6 +69,20 @@ run_predictions() {
     --write-artifacts
 }
 
+run_shadow_comparison() {
+  local reliable_run_id="$1"
+  echo "Using trustworthy run for shadow comparison: $reliable_run_id"
+  "$PYTHON_BIN" -m src.scripts.run_shadow_profile_comparison \
+    --lhs-config configs/run_refresh_and_predict.shadow_simplified.yaml \
+    --rhs-config configs/run_refresh_and_predict.shadow_chop_suppression.yaml \
+    --lhs-label shadow_simplified \
+    --rhs-label shadow_chop_suppression \
+    --targets 0.25,1,4,8,12 \
+    --thresholds-json "artifacts/reliability/${reliable_run_id}/summary/calibrated_thresholds.json" \
+    --platt-calibration "artifacts/reliability/${reliable_run_id}/summary/platt_calibration.json" \
+    --restore-latest-to rhs
+}
+
 run_reliability() {
   local config_path="$1"
   "$PYTHON_BIN" -m src.scripts.run_reliability_workflow \
@@ -100,6 +115,14 @@ case "$CADENCE" in
     run_reliability "configs/reliability_workflow.default.yaml"
     RUN_ID="$(find_latest_trustworthy_run)"
     run_predictions "$RUN_ID"
+    ;;
+  shadow)
+    RUN_ID="$(find_latest_trustworthy_run)"
+    if [[ -z "$RUN_ID" ]]; then
+      echo "No trustworthy reliability run found under artifacts/reliability" >&2
+      exit 1
+    fi
+    run_shadow_comparison "$RUN_ID"
     ;;
   *)
     usage >&2

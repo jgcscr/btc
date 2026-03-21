@@ -142,6 +142,72 @@ class BuildLabeledBacktestFromHistoryTests(unittest.TestCase):
         self.assertEqual(loaded.iloc[0]["horizon"], "4h")
         self.assertEqual(loaded.iloc[0]["regime_state"], "trend_ignition")
 
+    def test_build_multi_horizon_history_labels_support_non_1h_only_requests(self) -> None:
+        history_payload = [
+            {
+                "generated_at": "2026-01-01T00:05:00Z",
+                "predictions": {
+                    "4h": {
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "p_up": 0.58,
+                        "ret_pred": 0.02,
+                        "signal_dir_only": 1.0,
+                        "expected_value": 0.003,
+                        "regime_state": "trend_ignition",
+                    },
+                },
+            },
+            {
+                "generated_at": "2026-01-01T01:05:00Z",
+                "predictions": {
+                    "4h": {
+                        "timestamp": "2026-01-01T01:00:00Z",
+                        "p_up": 0.47,
+                        "ret_pred": 0.015,
+                        "signal_dir_only": 1.0,
+                        "expected_value": 0.002,
+                        "regime_state": "neutral",
+                    },
+                },
+            },
+        ]
+        ohlcv = pd.DataFrame(
+            {
+                "ts": [
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T01:00:00Z",
+                    "2026-01-01T02:00:00Z",
+                    "2026-01-01T03:00:00Z",
+                    "2026-01-01T04:00:00Z",
+                    "2026-01-01T05:00:00Z",
+                ],
+                "close": [100.0, 99.0, 101.0, 102.0, 103.0, 104.0],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            history_path = tmp_path / "history.json"
+            ohlcv_path = tmp_path / "ohlcv.csv"
+            history_path.write_text(json.dumps(history_payload), encoding="utf-8")
+            ohlcv.to_csv(ohlcv_path, index=False)
+
+            labeled, meta = _build_multi_horizon_from_history(
+                history_path=history_path,
+                horizons=["4h"],
+                spot_ohlcv_path=ohlcv_path,
+                fold_size=2,
+                lookback_rows=None,
+                lookback_hours=None,
+            )
+
+        self.assertEqual(set(labeled["horizon"]), {"4h"})
+        self.assertEqual(set(labeled["horizon_hours"]), {4.0})
+        self.assertIn("ret_realized", labeled.columns)
+        self.assertIn("close_target", labeled.columns)
+        self.assertEqual(meta["rows_by_horizon"], {"4h": 2})
+        self.assertTrue((labeled["ret_realized"] > 0).all())
+
 
 if __name__ == "__main__":
     unittest.main()

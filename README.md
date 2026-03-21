@@ -105,6 +105,13 @@ Main outputs:
 - `artifacts/monitoring/direction_fallback_state.json`
 - `artifacts/monitoring/data_quality_latest.json`
 
+Shadow comparison outputs written by `bash ./scripts/run_cadence.sh shadow`:
+
+- `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.json`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
+
 `artifacts/predictions/latest.json` includes per-horizon:
 
 - `entry_price`
@@ -184,19 +191,21 @@ Cadence entrypoint:
 bash ./scripts/run_cadence.sh daily
 bash ./scripts/run_cadence.sh weekly
 bash ./scripts/run_cadence.sh monthly
+bash ./scripts/run_cadence.sh shadow
 ```
 
-That wrapper resolves the latest trustworthy reliability run for daily predictions, runs the runtime reliability profile for weekly refreshes, and runs the full default reliability profile for monthly retraining before refreshing predictions.
+That wrapper resolves the latest trustworthy reliability run for daily predictions, runs the runtime reliability profile for weekly refreshes, runs the full default reliability profile for monthly retraining before refreshing predictions, and can also run the shadow comparison workflow between `shadow_simplified` and `shadow_chop_suppression`.
 
 ## 3. Config Files
 
 Prediction configs:
 
 - `configs/run_refresh_and_predict.default.yaml` - promoted runtime policy with trade-decision, confluence, feature-coverage, adaptive-threshold, regime-model, target-range, and execution-policy blocks.
-- `configs/run_refresh_and_predict.default.yaml` now also carries a `forecast_coherence_policy` block that can force `hold` and exclude incoherent higher-horizon forecasts from confluence/bias voting.
-- The default and live conservative profiles now also define horizon/regime uncertainty overrides, weighted horizon bias voting, short-term arbitration thresholds, pullback-quality scoring, disagreement-severity guards, regime-specific entry-mode templates, and snapshot-based degradation monitoring.
+- `configs/run_refresh_and_predict.default.yaml` now also carries a `forecast_coherence_policy` block with consensus-relief controls for low-edge `p_up` conflicts and an execution-policy `coherence_weighting` block for weighted bias voting.
+- The default and live conservative profiles now also define horizon/regime uncertainty overrides, weighted horizon bias voting, minimum bias-alignment thresholds, short-term arbitration thresholds, pullback-quality scoring, disagreement-severity guards, regime-specific entry-mode templates, and snapshot-based degradation monitoring.
 - `configs/run_refresh_and_predict.live_conservative.yaml` - approved initial live trading profile with horizon-specific size caps and a stricter confidence floor.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml` - shadow/cadence profile that mirrors the promoted policy while writing artifacts by default.
+- `configs/run_refresh_and_predict.shadow_chop_suppression.yaml` - shadow-only chop-regime suppression candidate used by the comparison cadence.
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`
 
 Reliability configs:
@@ -306,6 +315,10 @@ Probability-branch alignment helper:
 
 - `src.scripts.analyze_probability_branch_alignment` writes `artifacts/analysis/probability_branch_alignment_latest.json` so you can compare raw classifier probability, calibrated trade probability, and the regression branch by horizon. The report highlights when calibration fixes a classifier-vs-return mismatch and when it introduces one.
 
+Probability calibration alignment helper:
+
+- `src.scripts.analyze_probability_calibration_alignment` writes `artifacts/analysis/probability_calibration_alignment_latest.json` so you can audit raw-vs-resolved probability deltas, mismatch rates, and forecast-alignment-guard usage across prediction history.
+
 Example:
 
 ```bash
@@ -313,6 +326,8 @@ Example:
   --include-reliability-snapshots
 
 /workspaces/btc/.venv/bin/python -m src.scripts.analyze_probability_branch_alignment
+
+/workspaces/btc/.venv/bin/python -m src.scripts.analyze_probability_calibration_alignment
 ```
 
 ## 7. Reliability and Evaluation
@@ -398,6 +413,14 @@ The GitHub Actions workflow supports manual dispatch plus three UTC cadences:
 - daily at `01:15`
 - weekly on Monday at `02:30`
 - monthly on day 1 at `03:45`
+
+Shadow comparison workflow:
+
+- `src.scripts.compare_live_profile_snapshots` compares two archived `artifacts/predictions/latest.json` snapshots and classifies differences as operational, decision-state-only, or score-only.
+- `src.scripts.run_shadow_profile_comparison` runs `shadow_simplified` and `shadow_chop_suppression`, archives both snapshots, writes a pairwise comparison JSON, updates the longitudinal JSON, and refreshes the JSON, Markdown, and CSV summaries.
+- `src.scripts.update_shadow_profile_comparison_longitudinal` maintains `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json` and uses `generated_at` rather than lexicographic `run_id` ordering when deciding `latest`.
+- `src.scripts.summarize_shadow_profile_comparison_longitudinal` emits the compact JSON summary, operator-facing Markdown summary, and per-run CSV export from the longitudinal artifact.
+- Use `bash ./scripts/run_cadence.sh shadow` for the supported end-to-end path; it compares `configs/run_refresh_and_predict.shadow_simplified.yaml` vs `configs/run_refresh_and_predict.shadow_chop_suppression.yaml` and records `source_reliability_run_id` separately from the shadow comparison run id.
 
 Standalone trigger check:
 

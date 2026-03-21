@@ -63,7 +63,7 @@ Inspect immediately after the run:
 Use the cadence wrapper:
 
 ```bash
-batch ./scripts/run_cadence.sh daily
+bash ./scripts/run_cadence.sh daily
 ```
 
 Important behavior:
@@ -71,6 +71,28 @@ Important behavior:
 - the cadence script resolves the latest trustworthy reliability run,
 - it refreshes predictions with `configs/run_refresh_and_predict.shadow_simplified.yaml`,
 - it is for scheduled operating cadence, not for the conservative discretionary live rollout.
+
+### 2a. Shadow comparison cadence
+
+Use this when you need repeated observational comparison between the simplified shadow profile and the chop-suppression candidate:
+
+```bash
+bash ./scripts/run_cadence.sh shadow
+```
+
+Inspect immediately after the run:
+
+1. `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
+2. `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
+3. `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
+
+Important behavior:
+
+- the shadow cadence compares `shadow_simplified` vs `shadow_chop_suppression`,
+- the comparison run id is timestamped independently from the trustworthy reliability source,
+- the manifest records the source bundle as `source_reliability_run_id`,
+- the latest shadow run is determined by `generated_at`, not by lexicographic `run_id`,
+- the current decision-useful operator digest is the Markdown summary, not the raw pairwise comparison JSON.
 
 ### 3. Reliability workflow refresh
 
@@ -114,6 +136,7 @@ Runtime config and policy:
 - `configs/run_refresh_and_predict.default.yaml`
 - `configs/run_refresh_and_predict.live_conservative.yaml`
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`
+- `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`
 
 Reliability workflow control:
 
@@ -127,6 +150,10 @@ Runtime outputs:
 - `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json` when the selected path refreshes artifact-writing summaries
 - `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.json`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
 
 Reliability outputs:
 

@@ -15,9 +15,19 @@ from sklearn.model_selection import TimeSeriesSplit
 
 FEATURE_COLUMNS = [
     "p_up",
+    "raw_p_up",
     "ret_pred",
     "expected_value_proxy",
     "abs_ret_pred",
+    "raw_calibrated_probability_gap",
+    "probability_alignment_gap",
+    "raw_p_up_ret_mismatch",
+    "p_up_ret_mismatch",
+    "raw_p_up_direction_mismatch",
+    "p_up_direction_mismatch",
+    "ret_projected_price_consensus",
+    "probability_calibration_guard_applied",
+    "probability_calibration_used_regime_key",
     "confidence_score",
     "position_size",
     "volatility_realized_24h",
@@ -154,16 +164,78 @@ def parse_args() -> argparse.Namespace:
 
 
 def _extract_features(df: pd.DataFrame) -> pd.DataFrame:
-    def _series(name: str, default: float = 0.0) -> pd.Series:
+    def _series(name: str, default: float | pd.Series = 0.0) -> pd.Series:
         if name in df.columns:
-            return pd.to_numeric(df[name], errors="coerce").fillna(float(default))
+            series = pd.to_numeric(df[name], errors="coerce")
+            if isinstance(default, pd.Series):
+                fallback = pd.to_numeric(default, errors="coerce").reindex(df.index).fillna(0.0)
+                return series.fillna(fallback)
+            return series.fillna(float(default))
+        if isinstance(default, pd.Series):
+            return pd.to_numeric(default, errors="coerce").reindex(df.index).fillna(0.0)
         return pd.Series(float(default), index=df.index, dtype=float)
+
+    def _direction_from_ret_pred(series: pd.Series) -> pd.Series:
+        out = pd.Series("neutral", index=series.index, dtype=object)
+        out.loc[series > 0.0] = "up"
+        out.loc[series < 0.0] = "down"
+        return out
+
+    def _direction_from_price(close_series: pd.Series, projected_series: pd.Series) -> pd.Series:
+        out = pd.Series("neutral", index=close_series.index, dtype=object)
+        valid = (close_series > 0.0) & (projected_series > 0.0)
+        out.loc[valid & (projected_series > close_series)] = "up"
+        out.loc[valid & (projected_series < close_series)] = "down"
+        return out
+
+    def _direction_from_probability(series: pd.Series, neutral_band: float = 0.02) -> pd.Series:
+        out = pd.Series("neutral", index=series.index, dtype=object)
+        out.loc[series >= 0.5 + neutral_band] = "up"
+        out.loc[series <= 0.5 - neutral_band] = "down"
+        return out
 
     out = pd.DataFrame(index=df.index)
     out["p_up"] = _series("p_up", 0.0)
+    out["raw_p_up"] = _series("raw_p_up", 0.0)
     out["ret_pred"] = _series("ret_pred", 0.0)
     out["expected_value_proxy"] = out["p_up"] * out["ret_pred"]
     out["abs_ret_pred"] = out["ret_pred"].abs()
+    out["raw_calibrated_probability_gap"] = _series("raw_calibrated_probability_gap", out["p_up"] - out["raw_p_up"])
+    out["probability_alignment_gap"] = _series("probability_alignment_gap", out["raw_calibrated_probability_gap"].abs())
+
+    ret_side = _direction_from_ret_pred(out["ret_pred"])
+    close_series = _series("close", 0.0)
+    projected_series = _series("projected_price", close_series)
+    projected_side = _direction_from_price(close_series, projected_series)
+    raw_side = _direction_from_probability(out["raw_p_up"])
+    resolved_side = _direction_from_probability(out["p_up"])
+    direction_series = df.get("direction_next")
+    if direction_series is None:
+        direction_series = pd.Series(["up" if value >= 0.5 else "down" for value in out["p_up"]], index=df.index)
+    direction_series = direction_series.astype(str).str.lower().fillna("neutral")
+
+    out["raw_p_up_ret_mismatch"] = _series(
+        "raw_p_up_ret_mismatch",
+        ((raw_side != "neutral") & (ret_side != "neutral") & (raw_side != ret_side)).astype(float),
+    )
+    out["p_up_ret_mismatch"] = _series(
+        "p_up_ret_mismatch",
+        ((resolved_side != "neutral") & (ret_side != "neutral") & (resolved_side != ret_side)).astype(float),
+    )
+    out["raw_p_up_direction_mismatch"] = _series(
+        "raw_p_up_direction_mismatch",
+        ((raw_side != "neutral") & (direction_series != "neutral") & (raw_side != direction_series)).astype(float),
+    )
+    out["p_up_direction_mismatch"] = _series(
+        "p_up_direction_mismatch",
+        ((resolved_side != "neutral") & (direction_series != "neutral") & (resolved_side != direction_series)).astype(float),
+    )
+    out["ret_projected_price_consensus"] = _series(
+        "ret_projected_price_consensus",
+        ((ret_side == projected_side) & (ret_side != "neutral")).astype(float),
+    )
+    out["probability_calibration_guard_applied"] = _series("probability_calibration_guard_applied", 0.0)
+    out["probability_calibration_used_regime_key"] = _series("probability_calibration_used_regime_key", 0.0)
     out["confidence_score"] = _series("confidence_score", 0.0)
     out["position_size"] = _series("position_size", 0.0)
     out["volatility_realized_24h"] = _series("volatility_realized_24h", 0.0)

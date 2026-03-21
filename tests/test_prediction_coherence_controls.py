@@ -498,6 +498,105 @@ class PredictionCoherenceControlTests(unittest.TestCase):
         self.assertIn("direction_ret_mismatch", updated["1h"]["forecast_coherence"]["reasons"])
         self.assertNotIn("direction_projected_price_mismatch", updated["1h"]["forecast_coherence"]["reasons"])
 
+    def test_forecast_coherence_policy_allows_consensus_relief_for_1h_and_4h_probability_conflicts(self) -> None:
+        summary = {
+            "1h": {
+                "horizon_hours": 1.0,
+                "close": 100.0,
+                "projected_price": 101.0,
+                "ret_pred": 0.01,
+                "p_up": 0.38,
+                "direction_next": "up",
+                "direction_next_display": "up",
+                "trade_action": "long",
+                "signal_ensemble": 1,
+                "trade_decision": {"enabled": True, "triggered": True},
+            },
+            "4h": {
+                "horizon_hours": 4.0,
+                "close": 100.0,
+                "projected_price": 101.5,
+                "ret_pred": 0.015,
+                "p_up": 0.39,
+                "direction_next": "up",
+                "direction_next_display": "up",
+                "trade_action": "long",
+                "signal_ensemble": 1,
+                "trade_decision": {"enabled": True, "triggered": True},
+            },
+        }
+        policy = {
+            "enabled": True,
+            "horizons": [1.0, 4.0],
+            "block_on_direction_ret_mismatch": True,
+            "block_on_direction_projected_price_mismatch": True,
+            "block_on_p_up_ret_mismatch": True,
+            "p_up_neutral_band": 0.02,
+            "min_p_up_edge": 0.05,
+            "min_abs_ret_pred": 0.0,
+            "allow_consensus_p_up_ret_relief": True,
+            "consensus_relief_horizons": [1.0, 4.0],
+            "consensus_relief_max_p_up_edge": 0.12,
+            "consensus_relief_exclude_from_voting": False,
+            "exclude_blocked_horizons_from_voting": True,
+        }
+
+        updated = _apply_forecast_coherence_policy(summary, policy)
+
+        self.assertFalse(updated["1h"]["forecast_coherence"]["triggered"])
+        self.assertTrue(updated["1h"]["forecast_coherence"]["low_trust"])
+        self.assertTrue(updated["1h"]["forecast_coherence"]["consensus_relief_applied"])
+        self.assertFalse(updated["1h"]["forecast_coherence"]["exclude_from_voting"])
+        self.assertIn(
+            "consensus_p_up_ret_mismatch_relief",
+            updated["1h"]["forecast_coherence"]["advisory_reasons"],
+        )
+        self.assertEqual(updated["1h"]["trade_action"], "long")
+        self.assertEqual(updated["1h"]["signal_ensemble"], 1)
+        self.assertTrue(updated["1h"]["trade_decision"]["forecast_coherence_low_trust"])
+        self.assertFalse(updated["4h"]["forecast_coherence"]["triggered"])
+        self.assertTrue(updated["4h"]["forecast_coherence"]["consensus_relief_applied"])
+        self.assertFalse(updated["4h"]["forecast_coherence"]["exclude_from_voting"])
+
+    def test_forecast_coherence_policy_keeps_strong_probability_conflicts_blocked(self) -> None:
+        summary = {
+            "1h": {
+                "horizon_hours": 1.0,
+                "close": 100.0,
+                "projected_price": 101.0,
+                "ret_pred": 0.01,
+                "p_up": 0.24,
+                "direction_next": "up",
+                "direction_next_display": "up",
+                "trade_action": "long",
+                "signal_ensemble": 1,
+                "trade_decision": {"enabled": True, "triggered": True},
+            }
+        }
+        policy = {
+            "enabled": True,
+            "horizons": [1.0],
+            "block_on_direction_ret_mismatch": True,
+            "block_on_direction_projected_price_mismatch": True,
+            "block_on_p_up_ret_mismatch": True,
+            "p_up_neutral_band": 0.02,
+            "min_p_up_edge": 0.05,
+            "min_abs_ret_pred": 0.0,
+            "allow_consensus_p_up_ret_relief": True,
+            "consensus_relief_horizons": [1.0],
+            "consensus_relief_max_p_up_edge": 0.12,
+            "consensus_relief_exclude_from_voting": False,
+            "exclude_blocked_horizons_from_voting": True,
+        }
+
+        updated = _apply_forecast_coherence_policy(summary, policy)
+
+        self.assertTrue(updated["1h"]["forecast_coherence"]["triggered"])
+        self.assertFalse(updated["1h"]["forecast_coherence"]["consensus_relief_applied"])
+        self.assertIn("p_up_ret_mismatch", updated["1h"]["forecast_coherence"]["reasons"])
+        self.assertEqual(updated["1h"]["trade_action"], "hold")
+        self.assertEqual(updated["1h"]["signal_ensemble"], 0)
+
     def test_prediction_coherence_summary_captures_hourly_mismatch_rates(self) -> None:
         history = [
             {

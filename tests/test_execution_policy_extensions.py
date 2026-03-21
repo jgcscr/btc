@@ -54,6 +54,81 @@ class ExecutionPolicyExtensionTests(unittest.TestCase):
         self.assertGreater(context["bias_alignment_ratio"], 0.5)
         self.assertEqual(context["direction_support_horizons"]["down"], ["4h", "12h"])
 
+    def test_bias_context_penalizes_low_trust_horizon_votes(self) -> None:
+        summary = {
+            "4h": {
+                "horizon_hours": 4.0,
+                "direction_next": "up",
+                "direction_next_display": "up",
+                "confidence_score": 1.0,
+                "forecast_coherence": {
+                    "triggered": False,
+                    "low_trust": True,
+                    "ret_pred_side": "down",
+                    "projected_price_side": "down",
+                    "p_up_side": "up",
+                },
+                "ret_pred": -0.01,
+                "projected_price": 99.0,
+                "close": 100.0,
+                "p_up": 0.7,
+            },
+            "8h": {
+                "horizon_hours": 8.0,
+                "direction_next": "down",
+                "direction_next_display": "down",
+                "confidence_score": 0.7,
+                "forecast_coherence": {
+                    "triggered": False,
+                    "low_trust": False,
+                    "ret_pred_side": "down",
+                    "projected_price_side": "down",
+                    "p_up_side": "down",
+                },
+                "ret_pred": -0.01,
+                "projected_price": 99.0,
+                "close": 100.0,
+                "p_up": 0.3,
+            },
+            "12h": {
+                "horizon_hours": 12.0,
+                "direction_next": "down",
+                "direction_next_display": "down",
+                "confidence_score": 0.7,
+                "forecast_coherence": {
+                    "triggered": False,
+                    "low_trust": False,
+                    "ret_pred_side": "down",
+                    "projected_price_side": "down",
+                    "p_up_side": "down",
+                },
+                "ret_pred": -0.01,
+                "projected_price": 99.0,
+                "close": 100.0,
+                "p_up": 0.3,
+            },
+        }
+        policy = _resolve_execution_policy(
+            {
+                "enabled": True,
+                "bias_horizons": [4.0, 8.0, 12.0],
+                "execution_horizons": [4.0, 8.0, 12.0],
+                "horizon_bias_weights": {"4": 1.0, "8": 1.0, "12": 1.0},
+                "coherence_weighting": {
+                    "enabled": True,
+                    "low_trust_penalty": 0.75,
+                    "p_up_conflict_penalty": 0.3,
+                    "consensus_bonus": 0.05,
+                },
+            }
+        )
+
+        context = _summarize_bias_context(summary, policy)
+
+        self.assertEqual(context["bias_direction"], "down")
+        four_hour_detail = next(detail for detail in context["bias_scores"]["details"] if detail["label"] == "4h")
+        self.assertLess(four_hour_detail["coherence_multiplier"], 1.0)
+
     def test_uncertainty_policy_uses_horizon_regime_override(self) -> None:
         policy = _resolve_uncertainty_policy(
             {

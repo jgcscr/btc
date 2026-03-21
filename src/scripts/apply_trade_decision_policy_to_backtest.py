@@ -336,6 +336,7 @@ def main() -> None:
 
         result = {
             "p_up": p_up,
+            "raw_p_up": _as_float(row.get("raw_p_up", p_up), p_up),
             "ret_pred": ret_pred,
             "expected_value": _as_float(row.get("expected_value", p_up * ret_pred), p_up * ret_pred),
             "signal_dir_only": signal_dir_only,
@@ -343,6 +344,15 @@ def main() -> None:
             "incumbent_signal_reference": _as_float(row.get("incumbent_signal_reference", 0.0), 0.0),
             "candidate_only_reference": _as_float(row.get("candidate_only_reference", 0.0), 0.0),
             "candidate_incumbent_disagreement": _as_float(row.get("candidate_incumbent_disagreement", 0.0), 0.0),
+            "raw_calibrated_probability_gap": _as_float(row.get("raw_calibrated_probability_gap", 0.0), 0.0),
+            "probability_alignment_gap": _as_float(row.get("probability_alignment_gap", 0.0), 0.0),
+            "raw_p_up_ret_mismatch": _as_float(row.get("raw_p_up_ret_mismatch", 0.0), 0.0),
+            "p_up_ret_mismatch": _as_float(row.get("p_up_ret_mismatch", 0.0), 0.0),
+            "raw_p_up_direction_mismatch": _as_float(row.get("raw_p_up_direction_mismatch", 0.0), 0.0),
+            "p_up_direction_mismatch": _as_float(row.get("p_up_direction_mismatch", 0.0), 0.0),
+            "ret_projected_price_consensus": _as_float(row.get("ret_projected_price_consensus", 0.0), 0.0),
+            "probability_calibration_guard_applied": _as_float(row.get("probability_calibration_guard_applied", 0.0), 0.0),
+            "probability_calibration_used_regime_key": _as_float(row.get("probability_calibration_used_regime_key", 0.0), 0.0),
             "trade_action": str(row.get("trade_action", "hold")),
             "volatility": {
                 "snapshot": {
@@ -424,6 +434,9 @@ def main() -> None:
         out["trade_decision_triggered"] = bool(payload.get("triggered", False))
         out["trade_decision_direction_ret_aligned"] = bool(payload.get("direction_ret_aligned", False))
         out["trade_decision_expected_net_raw"] = _as_float(payload.get("expected_net_raw", result.get("expected_value", 0.0)), 0.0)
+        feature_snapshot = payload.get("feature_snapshot") if isinstance(payload.get("feature_snapshot"), dict) else {}
+        for feature_name, feature_value in feature_snapshot.items():
+            out[feature_name] = _as_float(feature_value, 0.0)
         out_rows.append(out)
         trade_decision_payloads.append(payload)
         if signal == 1:

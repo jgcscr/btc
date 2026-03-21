@@ -27,6 +27,13 @@ Supporting operator references:
 - `docs/live_operator_checklist_20260320.md`
 - `docs/trade_decision_8h_hardening_memo_20260320.md`
 
+Shadow comparison outputs remain observational only:
+
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
+
+They are useful for candidate monitoring and drift review, but they are not part of the live conservative authorization path.
+
 ## Conservative Risk Limits
 
 The live rollout profile enforces these limits:
@@ -76,6 +83,7 @@ Current workspace note:
 
 - direct conservative refreshes should be interpreted from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
 - the `prompt_ready_summary.market_outlook_strategy` fields are not the primary live read path in the current workspace snapshot
+- shadow comparison artifacts under `artifacts/predictions/comparisons/` should not be used to override the live conservative read path
 
 ## Live Escalation Rules
 

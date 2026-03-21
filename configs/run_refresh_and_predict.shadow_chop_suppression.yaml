@@ -1,3 +1,6 @@
+# Shadow-only config for chop-regime trade-decision suppression.
+# Derived from the 20260320 reliability run candidate. Keep this out of live promotion
+# until active-signal calibration clears the recent ECE gate.
 hours: 360
 targets:
   - 0.25
@@ -16,15 +19,9 @@ data_quality:
   max_missing_ratio: 0.01
   max_zero_volume_ratio: 0.2
   min_rows: 120
-confidence_min: 0.33
+confidence_min: 0.0
 position_size_floor: 0.0
-position_size_cap: 0.35
-position_size_cap_by_horizon:
-  "0.25": 0.0
-  "1": 0.15
-  "4": 0.35
-  "8": 0.2
-  "12": 0.35
+position_size_cap: 1.0
 abstention_policy:
   enabled: true
   min_confidence: 0.2
@@ -40,51 +37,10 @@ uncertainty_policy:
   max_interval_width: 0.75
   require_center_cross: true
   min_component_count: 3
-  thresholds_by_horizon_regime:
-    "1":
-      neutral:
-        max_interval_width: 0.6
-        require_center_cross: true
-      chop:
-        max_interval_width: 0.5
-        require_center_cross: true
-      trend_ignition:
-        max_interval_width: 0.65
-        require_center_cross: true
-    "4":
-      neutral:
-        max_interval_width: 0.8
-        require_center_cross: true
-      chop:
-        max_interval_width: 0.7
-        require_center_cross: true
-      trend_ignition:
-        max_interval_width: 0.85
-        require_center_cross: false
-    "8":
-      neutral:
-        max_interval_width: 0.85
-        require_center_cross: false
-      chop:
-        max_interval_width: 0.75
-        require_center_cross: true
-      trend_ignition:
-        max_interval_width: 0.95
-        require_center_cross: false
-    "12":
-      neutral:
-        max_interval_width: 0.95
-        require_center_cross: false
-      chop:
-        max_interval_width: 0.8
-        require_center_cross: true
-      trend_ignition:
-        max_interval_width: 1.0
-        require_center_cross: false
 trade_decision_policy:
   enabled: true
   model_path: artifacts/models/trade_decision_model.json
-  threshold: 0.5495
+  threshold: 0.55
   use_oof_expected_value: true
   oof_expected_value_mode: max_with_raw_calibrated
   enforce_positive_oof_envelope: true
@@ -100,12 +56,30 @@ trade_decision_policy:
   require_direction_ret_alignment: true
   midband_veto:
     enabled: true
-    p_up_low: 0.56
-    p_up_high: 0.59
-    high_inclusive: false
-    min_abs_ret_pred: 0.001
+    p_up_low: 0.39
+    p_up_high: 0.56
+    high_inclusive: true
+    min_abs_ret_pred: 0.0
     max_abs_ret_pred: null
     regime_states: [chop]
+direction_output_policy:
+  enabled: true
+  horizons: [1]
+  neutral_band: 0.02
+  calibration_path: artifacts/models/direction_output_isotonic_1h.json
+  use_trade_probability_fallback: true
+  marginal_rerank:
+    enabled: true
+    horizons: [1]
+    lower: 0.5
+    upper: 0.6
+    min_component_count: 2
+    use_raw_probability_gate: true
+    weight_specs:
+      default: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
+      trend_ignition: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
+      neutral: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
+      chop: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
 feature_coverage_policy:
   enabled: true
   max_imputed_zero_columns: 12
@@ -139,66 +113,21 @@ forecast_coherence_policy:
   consensus_relief_max_p_up_edge: 0.12
   consensus_relief_exclude_from_voting: false
   exclude_blocked_horizons_from_voting: true
-direction_output_policy:
-  enabled: true
-  horizons: [1]
-  neutral_band: 0.02
-  calibration_path: artifacts/models/direction_output_isotonic_1h.json
-  use_trade_probability_fallback: true
-  marginal_rerank:
-    enabled: true
-    horizons: [1]
-    lower: 0.5
-    upper: 0.6
-    min_component_count: 2
-    use_raw_probability_gate: true
-    weight_specs:
-      default: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
-      trend_ignition: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
-      neutral: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
-      chop: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
 confluence_policy:
   enabled: true
   short_horizons: [1]
   mid_horizons: [4, 8, 12]
-  min_support_ratio: 0.66
-  min_support_ratio_by_horizon:
-    "4": 1.0
-    "8": 1.0
-  min_aligned_horizons: 2
-  min_aligned_horizons_by_horizon:
-    "4": 3
+  min_support_ratio: 0.67
+  min_aligned_horizons: 3
   require_mid_term_alignment: true
-  min_mid_term_ratio: 0.66
-  require_short_term_alignment: false
+  min_mid_term_ratio: 0.67
+  require_short_term_alignment: true
   min_short_term_ratio: 1.0
   dominant_ratio_floor: 0.67
 execution_policy:
   enabled: true
   bias_horizons: [4, 8, 12]
   execution_horizons: [1, 4, 8, 12]
-  horizon_bias_weights:
-    "1": 0.7
-    "4": 1.0
-    "8": 0.5
-    "12": 1.2
-  min_bias_alignment_ratio: 0.57
-  coherence_weighting:
-    enabled: true
-    low_trust_penalty: 0.5
-    blocked_penalty: 1.0
-    p_up_conflict_penalty: 0.3
-    consensus_bonus: 0.08
-    neutral_band: 0.02
-    min_multiplier: 0.1
-    by_horizon:
-      "1": 0.85
-      "4": 1.0
-      "8": 0.9
-      "12": 1.05
-  short_term_strict_horizons: [1]
-  short_term_min_mid_ratio: 0.8
-  short_term_min_support_ratio: 0.8
   require_bias_alignment: true
   immediate_entry_min_support_ratio: 0.8
   pullback_entry_min_support_ratio: 0.5
@@ -256,23 +185,6 @@ execution_policy:
   adaptive_take_profit:
     enabled: true
     min_rr_fraction_of_floor: 0.85
-  pullback_quality:
-    enabled: true
-    min_score_by_horizon:
-      "1": 0.6
-      "4": 0.5
-      "8": 0.45
-      "12": 0.4
-    max_vwap_deviation_atr: 1.25
-    max_candle_expansion_ratio: 1.8
-    candle_expansion_window: 8
-    range_expansion_penalty_threshold: 1.1
-  disagreement_severity:
-    enabled: true
-    block_threshold: 0.65
-    pullback_threshold: 0.4
-    vwap_extension_penalty_atr: 0.7
-    range_expansion_penalty_threshold: 0.9
   target_range_stop_refinement:
     enabled: true
     horizons: [8, 12]
@@ -284,45 +196,16 @@ execution_policy:
       tp_multiplier: 0.85
       time_stop_multiplier: 0.75
       size_multiplier: 0.75
-      entry_mode_by_tier:
-        high: pullback
-        medium: blocked
-        low: blocked
-      entry_zone_atr_mult: 0.2
-      max_chase_atr_mult: 0.2
-      pullback_quality_floor: 0.5
     neutral:
       tp_multiplier: 1.0
       time_stop_multiplier: 1.0
       size_multiplier: 1.0
-      entry_mode_by_tier:
-        high: immediate
-        medium: pullback
-        low: blocked
-      entry_zone_atr_mult: 0.22
-      max_chase_atr_mult: 0.28
-      pullback_quality_floor: 0.45
     trend_ignition:
       tp_multiplier: 1.25
       time_stop_multiplier: 1.5
       size_multiplier: 1.1
-      entry_mode_by_tier:
-        high: immediate
-        medium: pullback
-        low: blocked
-      entry_zone_atr_mult: 0.28
-      max_chase_atr_mult: 0.38
-      pullback_quality_floor: 0.4
-degradation_monitoring:
-  enabled: true
-  lookback_snapshots: 30
-  min_snapshots: 10
-  min_ready_ratio: 0.12
-  max_blocked_ratio: 0.85
-  min_expected_net: 0.0
-  min_confidence: 0.25
 spot_provider: binanceus
-write_artifacts: false
+write_artifacts: true
 disable_monitoring_latest: false
 dir_model_weights: transformer:0.0,transformer_large:0.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.0,lgbm:1.0
 trend_ignition:
@@ -351,17 +234,17 @@ adaptive_thresholds:
 regime_model_weights:
   enabled: true
   trend_ignition:
-    "1": "transformer:0.0,transformer_large:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5,lgbm:0.0"
+    "1": "transformer:0.0,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.0"
     "4": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.0"
     "8": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.0"
     "12": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.0"
   neutral:
-    "1": "transformer:0.0,transformer_large:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5,lgbm:0.0"
+    "1": "transformer:0.0,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.5"
     "4": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.5"
     "8": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.5"
     "12": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.5"
   chop:
-    "1": "transformer:0.0,transformer_large:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5,lgbm:0.0"
+    "1": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5,lgbm:1.5"
     "4": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5,lgbm:1.5"
     "8": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5,lgbm:1.5"
     "12": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5,lgbm:1.5"
@@ -382,14 +265,3 @@ regime_model_dirs:
     "4h": artifacts/models/xgb_dir4h_v2
     "8h": artifacts/models/xgb_dir8h_v2
     "12h": artifacts/models/xgb_dir12h_v2
-intrabar_aggregation:
-  enabled: true
-  interval: 15m
-  hours_multiplier: 4
-  max_rows: 4000
-target_range_models:
-  enabled: true
-  model_dir: artifacts/models/target_ranges
-  horizons: [4, 8, 12]
-  override_ratio: 0.01
-  confidence_rmse_scale: 0.01

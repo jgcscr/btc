@@ -733,11 +733,18 @@ def _normalize_forecast_coherence_policy_block(value: Mapping[str, Any]) -> Dict
             "block_on_direction_projected_price_mismatch",
             "block_on_p_up_ret_mismatch",
             "exclude_blocked_horizons_from_voting",
+            "allow_consensus_p_up_ret_relief",
+            "consensus_relief_exclude_from_voting",
         }:
             normalized[key] = bool(raw_value)
-        elif key in {"p_up_neutral_band", "min_p_up_edge", "min_abs_ret_pred"}:
+        elif key in {
+            "p_up_neutral_band",
+            "min_p_up_edge",
+            "min_abs_ret_pred",
+            "consensus_relief_max_p_up_edge",
+        }:
             normalized[key] = float(raw_value) if raw_value is not None else None
-        elif key == "horizons":
+        elif key in {"horizons", "consensus_relief_horizons"}:
             if raw_value is None:
                 normalized[key] = None
             elif isinstance(raw_value, str):
@@ -1549,6 +1556,7 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
 
     pullback_quality_cfg = cfg.get("pullback_quality") if isinstance(cfg.get("pullback_quality"), Mapping) else {}
     disagreement_cfg = cfg.get("disagreement_severity") if isinstance(cfg.get("disagreement_severity"), Mapping) else {}
+    coherence_weighting_cfg = cfg.get("coherence_weighting") if isinstance(cfg.get("coherence_weighting"), Mapping) else {}
 
     return {
         "enabled": bool(cfg.get("enabled", False)),
@@ -1564,6 +1572,7 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
             cfg.get("short_term_min_mid_ratio_by_horizon"),
             minimum=0.0,
         ),
+        "min_bias_alignment_ratio": max(min(float(cfg.get("min_bias_alignment_ratio") or 0.0), 1.0), 0.0),
         "short_term_min_support_ratio_by_horizon": _normalize_float_map(
             cfg.get("short_term_min_support_ratio_by_horizon"),
             minimum=0.0,
@@ -1681,6 +1690,16 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
             "vwap_extension_penalty_atr": max(float(disagreement_cfg.get("vwap_extension_penalty_atr") or 0.75), 0.0),
             "range_expansion_penalty_threshold": max(float(disagreement_cfg.get("range_expansion_penalty_threshold") or 1.0), 0.0),
         },
+        "coherence_weighting": {
+            "enabled": bool(coherence_weighting_cfg.get("enabled", False)),
+            "low_trust_penalty": max(min(float(coherence_weighting_cfg.get("low_trust_penalty") or 0.35), 1.0), 0.0),
+            "blocked_penalty": max(min(float(coherence_weighting_cfg.get("blocked_penalty") or 1.0), 1.0), 0.0),
+            "p_up_conflict_penalty": max(min(float(coherence_weighting_cfg.get("p_up_conflict_penalty") or 0.2), 1.0), 0.0),
+            "consensus_bonus": max(float(coherence_weighting_cfg.get("consensus_bonus") or 0.1), 0.0),
+            "neutral_band": max(float(coherence_weighting_cfg.get("neutral_band") or 0.02), 0.0),
+            "min_multiplier": max(min(float(coherence_weighting_cfg.get("min_multiplier") or 0.1), 1.0), 0.0),
+            "by_horizon": _normalize_float_map(coherence_weighting_cfg.get("by_horizon"), minimum=0.0),
+        },
         "regime_templates": regime_templates,
     }
 
@@ -1688,6 +1707,7 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
 def _resolve_forecast_coherence_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
     cfg = config or {}
     horizons = cfg.get("horizons") or [1.0, 4.0, 8.0, 12.0]
+    consensus_relief_horizons = cfg.get("consensus_relief_horizons") or [1.0, 4.0]
     return {
         "enabled": bool(cfg.get("enabled", False)),
         "horizons": sorted({_normalize_horizon_value(v) for v in horizons}),
@@ -1697,6 +1717,10 @@ def _resolve_forecast_coherence_policy(config: Mapping[str, Any] | None) -> Dict
         "p_up_neutral_band": max(float(cfg.get("p_up_neutral_band") or 0.02), 0.0),
         "min_p_up_edge": max(float(cfg.get("min_p_up_edge") or 0.05), 0.0),
         "min_abs_ret_pred": max(float(cfg.get("min_abs_ret_pred") or 0.0), 0.0),
+        "allow_consensus_p_up_ret_relief": bool(cfg.get("allow_consensus_p_up_ret_relief", False)),
+        "consensus_relief_horizons": sorted({_normalize_horizon_value(v) for v in consensus_relief_horizons}),
+        "consensus_relief_max_p_up_edge": max(float(cfg.get("consensus_relief_max_p_up_edge") or 0.12), 0.0),
+        "consensus_relief_exclude_from_voting": bool(cfg.get("consensus_relief_exclude_from_voting", False)),
         "exclude_blocked_horizons_from_voting": bool(cfg.get("exclude_blocked_horizons_from_voting", True)),
     }
 
@@ -1940,6 +1964,92 @@ def _forecast_coherence_excluded(entry: Mapping[str, Any]) -> bool:
     return bool(isinstance(payload, Mapping) and payload.get("exclude_from_voting"))
 
 
+def _coherence_weight_multiplier(
+    entry: Mapping[str, Any],
+    *,
+    horizon: float,
+    policy: Mapping[str, Any],
+) -> float:
+    weighting_cfg = policy.get("coherence_weighting") if isinstance(policy.get("coherence_weighting"), Mapping) else {}
+    base_multiplier = _lookup_horizon_value(
+        weighting_cfg.get("by_horizon", {}) if isinstance(weighting_cfg.get("by_horizon"), Mapping) else {},
+        horizon,
+        1.0,
+    )
+    base_multiplier = max(float(base_multiplier), 0.0)
+    if not bool(weighting_cfg.get("enabled", False)):
+        return base_multiplier
+
+    multiplier = base_multiplier
+    min_multiplier = max(min(float(weighting_cfg.get("min_multiplier", 0.1) or 0.1), 1.5), 0.0)
+    coherence = entry.get("forecast_coherence") if isinstance(entry.get("forecast_coherence"), Mapping) else {}
+    low_trust_penalty = max(min(float(weighting_cfg.get("low_trust_penalty", 0.35) or 0.35), 1.0), 0.0)
+    blocked_penalty = max(min(float(weighting_cfg.get("blocked_penalty", 1.0) or 1.0), 1.0), 0.0)
+    p_up_conflict_penalty = max(min(float(weighting_cfg.get("p_up_conflict_penalty", 0.2) or 0.2), 1.0), 0.0)
+    consensus_bonus = max(float(weighting_cfg.get("consensus_bonus", 0.1) or 0.1), 0.0)
+
+    if bool(coherence.get("triggered")):
+        multiplier *= max(0.0, 1.0 - blocked_penalty)
+    elif bool(coherence.get("low_trust")):
+        multiplier *= max(0.0, 1.0 - low_trust_penalty)
+
+    ret_side = str(coherence.get("ret_pred_side") or _direction_from_ret_pred(entry.get("ret_pred")))
+    projected_side = str(
+        coherence.get("projected_price_side")
+        or _direction_from_projected_price(entry.get("close"), entry.get("projected_price"))
+    )
+    p_up_side = str(
+        coherence.get("p_up_side")
+        or _direction_from_probability(entry.get("p_up"), neutral_band=float(weighting_cfg.get("neutral_band", 0.02) or 0.02))
+    )
+    consensus_side = ret_side if ret_side == projected_side and ret_side in {"up", "down"} else None
+    if consensus_side is not None and p_up_side in {"up", "down"}:
+        if p_up_side != consensus_side:
+            multiplier *= max(0.0, 1.0 - p_up_conflict_penalty)
+        else:
+            multiplier *= 1.0 + consensus_bonus
+
+    return max(float(multiplier), min_multiplier)
+
+
+def _derive_probability_alignment_features(
+    *,
+    close: float,
+    projected_price: float,
+    ret_pred: float,
+    raw_probability: float,
+    resolved_probability: float,
+    direction: str,
+    neutral_band: float,
+    probability_guard: Mapping[str, Any] | None,
+    calibration_used_regime_key: bool,
+) -> Dict[str, float | str]:
+    direction_side = str(direction).strip().lower()
+    ret_side = _direction_from_ret_pred(ret_pred)
+    projected_side = _direction_from_projected_price(close, projected_price)
+    raw_side = _direction_from_probability(raw_probability, neutral_band=neutral_band)
+    resolved_side = _direction_from_probability(resolved_probability, neutral_band=neutral_band)
+    consensus_side = ret_side if ret_side == projected_side and ret_side in {"up", "down"} else "neutral"
+    raw_gap = float(resolved_probability) - float(raw_probability)
+    return {
+        "raw_p_up": float(raw_probability),
+        "raw_calibrated_probability_gap": float(raw_gap),
+        "probability_alignment_gap": float(abs(raw_gap)),
+        "raw_p_up_side": raw_side,
+        "resolved_p_up_side": resolved_side,
+        "ret_pred_side": ret_side,
+        "projected_price_side": projected_side,
+        "forecast_consensus_side": consensus_side,
+        "raw_p_up_ret_mismatch": float(raw_side in {"up", "down"} and ret_side in {"up", "down"} and raw_side != ret_side),
+        "p_up_ret_mismatch": float(resolved_side in {"up", "down"} and ret_side in {"up", "down"} and resolved_side != ret_side),
+        "raw_p_up_direction_mismatch": float(raw_side in {"up", "down"} and direction_side in {"up", "down"} and raw_side != direction_side),
+        "p_up_direction_mismatch": float(resolved_side in {"up", "down"} and direction_side in {"up", "down"} and resolved_side != direction_side),
+        "ret_projected_price_consensus": float(consensus_side in {"up", "down"}),
+        "probability_calibration_guard_applied": float(bool(isinstance(probability_guard, Mapping) and probability_guard.get("applied"))),
+        "probability_calibration_used_regime_key": float(bool(calibration_used_regime_key)),
+    }
+
+
 def _apply_forecast_coherence_policy(
     summary: Dict[str, Dict[str, Any]],
     policy: Mapping[str, Any],
@@ -1953,6 +2063,10 @@ def _apply_forecast_coherence_policy(
     min_p_up_edge = float(policy.get("min_p_up_edge", 0.05) or 0.0)
     min_abs_ret_pred = float(policy.get("min_abs_ret_pred", 0.0) or 0.0)
     exclude_from_voting = bool(policy.get("exclude_blocked_horizons_from_voting", True))
+    allow_consensus_relief = bool(policy.get("allow_consensus_p_up_ret_relief", False))
+    consensus_relief_horizons = set(policy.get("consensus_relief_horizons", []))
+    consensus_relief_max_p_up_edge = float(policy.get("consensus_relief_max_p_up_edge", 0.12) or 0.0)
+    consensus_relief_exclude_from_voting = bool(policy.get("consensus_relief_exclude_from_voting", False))
 
     for entry in summary.values():
         horizon = _coerce_result_horizon(entry.get("horizon_hours"))
@@ -1962,6 +2076,8 @@ def _apply_forecast_coherence_policy(
         p_up_side = _direction_from_probability(entry.get("p_up"), neutral_band=neutral_band)
         p_up_value = _finite_float_or_none(entry.get("p_up"))
         ret_pred_value = abs(float(entry.get("ret_pred", 0.0)))
+        p_up_edge = abs(p_up_value - 0.5) if p_up_value is not None else None
+        consensus_relief_applied = False
 
         payload = {
             "enabled": enabled,
@@ -1975,6 +2091,7 @@ def _apply_forecast_coherence_policy(
             "reasons": [],
             "advisory_reasons": [],
             "low_trust": False,
+            "consensus_relief_applied": False,
         }
 
         if not enabled or horizon not in scoped_horizons:
@@ -1995,23 +2112,34 @@ def _apply_forecast_coherence_policy(
             and p_up_side != "neutral"
             and ret_side != "neutral"
             and p_up_side != ret_side
-            and p_up_value is not None
-            and abs(p_up_value - 0.5) >= min_p_up_edge
+            and p_up_edge is not None
+            and p_up_edge >= min_p_up_edge
             and ret_pred_value >= min_abs_ret_pred
         ):
-            reasons.append("p_up_ret_mismatch")
+            consensus_relief_applied = bool(
+                allow_consensus_relief
+                and horizon in consensus_relief_horizons
+                and direction in {"up", "down"}
+                and direction == ret_side == projected_side
+                and p_up_edge <= consensus_relief_max_p_up_edge
+            )
+            if not consensus_relief_applied:
+                reasons.append("p_up_ret_mismatch")
 
         advisory_reasons: List[str] = []
         consensus_side = direction if direction == ret_side == projected_side and direction in {"up", "down"} else None
+        if consensus_relief_applied:
+            advisory_reasons.append("consensus_p_up_ret_mismatch_relief")
         if (
             bool(policy.get("block_on_p_up_ret_mismatch", True))
             and consensus_side is not None
             and p_up_side != "neutral"
             and p_up_side != consensus_side
-            and p_up_value is not None
-            and abs(p_up_value - 0.5) < min_p_up_edge
+            and p_up_edge is not None
+            and p_up_edge < min_p_up_edge
             and ret_pred_value >= min_abs_ret_pred
             and not reasons
+            and not consensus_relief_applied
             and (str(entry.get("trade_action", "hold")) == "hold" or not bool(entry.get("signal_ensemble", 0)))
         ):
             advisory_reasons.append("low_edge_p_up_ret_mismatch")
@@ -2020,7 +2148,12 @@ def _apply_forecast_coherence_policy(
         payload["advisory_reasons"] = advisory_reasons
         payload["triggered"] = bool(reasons)
         payload["low_trust"] = bool(advisory_reasons)
-        payload["exclude_from_voting"] = bool(reasons or advisory_reasons) and exclude_from_voting
+        payload["consensus_relief_applied"] = bool(consensus_relief_applied)
+        payload["exclude_from_voting"] = bool(reasons) and exclude_from_voting
+        if advisory_reasons and exclude_from_voting:
+            payload["exclude_from_voting"] = bool(
+                not consensus_relief_applied or consensus_relief_exclude_from_voting
+            )
         entry["forecast_coherence"] = payload
         if reasons:
             entry["trade_action"] = "hold"
@@ -2193,6 +2326,7 @@ def _compute_weighted_direction_scores(
     labeled_entries: Sequence[tuple[str, Mapping[str, Any], float]],
     *,
     weights: Mapping[float, float] | None = None,
+    policy: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     resolved_weights = weights or {}
     up_score = 0.0
@@ -2204,7 +2338,8 @@ def _compute_weighted_direction_scores(
             continue
         base_weight = max(_lookup_horizon_value(resolved_weights, horizon, 1.0), 0.0)
         confidence = max(float(entry.get("confidence_score") or 0.0), 0.0)
-        weighted_vote = base_weight * (0.5 + 0.5 * min(confidence, 1.0))
+        coherence_multiplier = _coherence_weight_multiplier(entry, horizon=horizon, policy=policy or {})
+        weighted_vote = base_weight * coherence_multiplier * (0.5 + 0.5 * min(confidence, 1.0))
         if direction == "up":
             up_score += weighted_vote
         else:
@@ -2216,6 +2351,7 @@ def _compute_weighted_direction_scores(
                 "direction": direction,
                 "base_weight": float(base_weight),
                 "confidence_score": float(confidence),
+                "coherence_multiplier": float(coherence_multiplier),
                 "weighted_vote": float(weighted_vote),
             }
         )
@@ -2522,10 +2658,16 @@ def _summarize_bias_context(
         if horizon in short_term_horizons:
             short_entries.append((label, entry, horizon))
 
-    bias_scores = _compute_weighted_direction_scores(bias_entries, weights=weights)
-    execution_scores = _compute_weighted_direction_scores(execution_entries, weights=weights)
-    short_term_scores = _compute_weighted_direction_scores(short_entries, weights=weights)
-    mid_term_scores = _compute_weighted_direction_scores(mid_entries, weights=weights)
+    bias_scores = _compute_weighted_direction_scores(bias_entries, weights=weights, policy=policy)
+    execution_scores = _compute_weighted_direction_scores(execution_entries, weights=weights, policy=policy)
+    short_term_scores = _compute_weighted_direction_scores(short_entries, weights=weights, policy=policy)
+    mid_term_scores = _compute_weighted_direction_scores(mid_entries, weights=weights, policy=policy)
+
+    bias_direction = str(bias_scores.get("dominant_direction", "neutral"))
+    bias_alignment_ratio = float(bias_scores.get("dominant_ratio", 0.0))
+    min_bias_alignment_ratio = max(min(float(policy.get("min_bias_alignment_ratio", 0.0) or 0.0), 1.0), 0.0)
+    if bias_direction != "neutral" and bias_alignment_ratio < min_bias_alignment_ratio:
+        bias_direction = "neutral"
 
     direction_support_horizons: Dict[str, List[str]] = {"up": [], "down": []}
     for label, entry, _horizon in bias_entries:
@@ -2534,8 +2676,9 @@ def _summarize_bias_context(
             direction_support_horizons[direction].append(label)
 
     return {
-        "bias_direction": str(bias_scores.get("dominant_direction", "neutral")),
-        "bias_alignment_ratio": float(bias_scores.get("dominant_ratio", 0.0)),
+        "bias_direction": bias_direction,
+        "bias_direction_pre_threshold": str(bias_scores.get("dominant_direction", "neutral")),
+        "bias_alignment_ratio": bias_alignment_ratio,
         "bias_scores": bias_scores,
         "execution_scores": execution_scores,
         "short_term_scores": short_term_scores,
@@ -2544,6 +2687,7 @@ def _summarize_bias_context(
         "short_term_alignment_ratio": float(short_term_scores.get("dominant_ratio", 0.0)),
         "mid_term_direction": str(mid_term_scores.get("dominant_direction", "neutral")),
         "mid_term_alignment_ratio": float(mid_term_scores.get("dominant_ratio", 0.0)),
+        "min_bias_alignment_ratio": float(min_bias_alignment_ratio),
         "direction_support_horizons": direction_support_horizons,
         "execution_entries": execution_entries,
     }
@@ -4366,9 +4510,19 @@ def _apply_trade_decision_model(
 
     feature_values: Dict[str, float] = {
         "p_up": float(result.get("p_up", 0.0)),
+        "raw_p_up": float(result.get("raw_p_up", result.get("p_up", 0.0))),
         "ret_pred": float(result.get("ret_pred", 0.0)),
         "expected_value_proxy": float(result.get("p_up", 0.0)) * float(result.get("ret_pred", 0.0)),
         "abs_ret_pred": abs(float(result.get("ret_pred", 0.0))),
+        "raw_calibrated_probability_gap": float(result.get("raw_calibrated_probability_gap", 0.0) or 0.0),
+        "probability_alignment_gap": float(result.get("probability_alignment_gap", 0.0) or 0.0),
+        "raw_p_up_ret_mismatch": float(result.get("raw_p_up_ret_mismatch", 0.0) or 0.0),
+        "p_up_ret_mismatch": float(result.get("p_up_ret_mismatch", 0.0) or 0.0),
+        "raw_p_up_direction_mismatch": float(result.get("raw_p_up_direction_mismatch", 0.0) or 0.0),
+        "p_up_direction_mismatch": float(result.get("p_up_direction_mismatch", 0.0) or 0.0),
+        "ret_projected_price_consensus": float(result.get("ret_projected_price_consensus", 0.0) or 0.0),
+        "probability_calibration_guard_applied": float(result.get("probability_calibration_guard_applied", 0.0) or 0.0),
+        "probability_calibration_used_regime_key": float(result.get("probability_calibration_used_regime_key", 0.0) or 0.0),
         "residual_std": float(residual_std),
         "confidence_score": float(result.get("confidence_score", 0.0)),
         "position_size": float(result.get("position_size", 0.0)),
@@ -4566,6 +4720,11 @@ def _apply_trade_decision_model(
             "enabled": bool((policy.get("midband_veto") or {}).get("enabled", False)) if isinstance(policy, Mapping) else False,
             "triggered": bool(midband_veto_triggered),
             "reason": midband_veto_reason,
+        },
+        "feature_snapshot": {
+            name: float(feature_values.get(name, 0.0))
+            for name in feature_names
+            if name in feature_values
         },
     }
 
@@ -6629,6 +6788,9 @@ def run_predictions(
                 "applied_key": calibration_key,
                 "used_regime_key": calibration_used_regime_key,
                 "fallback_to_base": bool(calibration_key) and not calibration_used_regime_key,
+                "raw_probability": float(raw_p_up),
+                "resolved_probability": float(p_up),
+                "absolute_gap": float(abs(float(p_up) - float(raw_p_up))),
                 "forecast_alignment_guard": probability_guard,
             },
             "regime_weight_overrides": _get_active_regime_weight_override(
@@ -6656,6 +6818,28 @@ def run_predictions(
             }),
             "volatility_flag": bool(signal.get("volatility_flag")),
         }
+        probability_alignment_features = _derive_probability_alignment_features(
+            close=close,
+            projected_price=float(result["projected_price"]),
+            ret_pred=ret_pred,
+            raw_probability=float(raw_p_up),
+            resolved_probability=float(p_up),
+            direction=str(result["direction_next"]),
+            neutral_band=float(forecast_coherence_policy_resolved.get("p_up_neutral_band", 0.02) or 0.02),
+            probability_guard=probability_guard if isinstance(probability_guard, Mapping) else None,
+            calibration_used_regime_key=bool(calibration_used_regime_key),
+        )
+        result.update(probability_alignment_features)
+        result["probability_calibration"].update(
+            {
+                "raw_side": probability_alignment_features["raw_p_up_side"],
+                "resolved_side": probability_alignment_features["resolved_p_up_side"],
+                "ret_pred_side": probability_alignment_features["ret_pred_side"],
+                "projected_price_side": probability_alignment_features["projected_price_side"],
+                "forecast_consensus_side": probability_alignment_features["forecast_consensus_side"],
+                "guard_applied": bool(probability_alignment_features["probability_calibration_guard_applied"]),
+            }
+        )
         direction_output_scoped = horizon in set(direction_output_policy_resolved.get("horizons", []))
         direction_output = _build_direction_output(
             enabled=bool(direction_output_policy_resolved.get("enabled", False)),

@@ -66,6 +66,20 @@ def _parse_horizon_value(value: str | float | int) -> float | None:
         return None
 
 
+def _format_horizon_token(value: str | float | int) -> str:
+    numeric = _parse_horizon_value(value)
+    if numeric is None:
+        return str(value)
+    if numeric >= 1.0:
+        if float(numeric).is_integer():
+            return f"{int(numeric)}h"
+        return f"{numeric:g}h"
+    minutes = numeric * 60.0
+    if float(minutes).is_integer():
+        return f"{int(minutes)}m"
+    return f"{minutes:g}m"
+
+
 def _load_benchmark_regime_specs(config_path: Path | None, horizon: str) -> Dict[str, str]:
     if config_path is None or not config_path.exists():
         return {}
@@ -484,6 +498,7 @@ def main() -> None:
     marginal_mask = frame["p_up"].between(float(args.lower), float(args.upper), inclusive="both")
     marginal = frame.loc[marginal_mask].copy()
     weight_recommendations = _build_weight_recommendations(marginal)
+    horizon_token = _format_horizon_token(args.horizon)
     benchmark_specs = _load_benchmark_regime_specs(args.benchmark_config, str(args.horizon))
     regime_override_analysis = _build_regime_specific_override_analysis(
         frame,
@@ -500,6 +515,9 @@ def main() -> None:
         regime_override_analysis.get("apply_fallback_for_missing_regimes", True)
     )
     weight_recommendations["regime_override_analysis"] = regime_override_analysis
+    weight_recommendations["horizon_label"] = horizon_token
+    weight_recommendations["recommended_weight_spec"] = weight_recommendations.get("recommended_weight_spec_1h")
+    weight_recommendations["recommended_regime_weights"] = weight_recommendations.get("recommended_regime_weights_1h", {})
 
     payload: Dict[str, Any] = {
         "meta": meta,

@@ -46,8 +46,12 @@ def _extract_marginal_rerank_policy(
     if upper < lower:
         lower, upper = upper, lower
 
-    regime_specs = recs.get("recommended_regime_weights_1h")
-    fallback_spec = recs.get("recommended_weight_spec_1h")
+    regime_specs = recs.get("recommended_regime_weights")
+    if not isinstance(regime_specs, Mapping):
+        regime_specs = recs.get("recommended_regime_weights_1h")
+    fallback_spec = recs.get("recommended_weight_spec")
+    if fallback_spec is None:
+        fallback_spec = recs.get("recommended_weight_spec_1h")
     weight_specs: Dict[str, str] = {}
     if fallback_spec is not None:
         weight_specs["default"] = str(fallback_spec)
