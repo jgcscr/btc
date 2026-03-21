@@ -16,102 +16,18 @@ import torch
 import torch.nn as nn
 from joblib import load as joblib_load
 from sklearn.preprocessing import StandardScaler
-
-
-def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
-    prev_close = close.shift(1)
-    ranges = pd.concat(
-        [
-            high - low,
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
-        ],
-        axis=1,
-    )
-    return ranges.max(axis=1, skipna=True)
+from src.trading.feature_engineering import (
+    apply_funding_rate_features as _shared_apply_funding_rate_features,
+    augment_hourly_price_features as _shared_augment_hourly_price_features,
+)
 
 
 def _augment_price_features(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame.copy()
-
-    def _safe_diff(series: pd.Series) -> pd.Series:
-        return series.diff().fillna(0.0)
-
-    def _safe_pct(series: pd.Series) -> pd.Series:
-        return series.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    for base in ("close", "volume", "fut_close", "fut_volume"):
-        if base not in result.columns:
-            continue
-        result[f"{base}_delta_1h"] = _safe_diff(result[base])
-        result[f"{base}_pct_change_1h"] = _safe_pct(result[base])
-
-    if "close" in result.columns:
-        std_7 = result["close"].rolling(window=7, min_periods=3).std(ddof=0)
-        std_24 = result["close"].rolling(window=24, min_periods=6).std(ddof=0)
-        if "ma_close_7h" in result.columns:
-            denom = std_7.replace(0.0, np.nan)
-            result["close_zscore_7h"] = ((result["close"] - result["ma_close_7h"]) / denom).fillna(0.0)
-        if "ma_close_24h" in result.columns:
-            denom = std_24.replace(0.0, np.nan)
-            result["close_zscore_24h"] = ((result["close"] - result["ma_close_24h"]) / denom).fillna(0.0)
-
-    if "fut_close" in result.columns:
-        rolling_mean = result["fut_close"].rolling(window=7, min_periods=3).mean()
-        rolling_std = result["fut_close"].rolling(window=7, min_periods=3).std(ddof=0).replace(0.0, np.nan)
-        result["fut_close_zscore_7h"] = ((result["fut_close"] - rolling_mean) / rolling_std).fillna(0.0)
-
-    required_cvd = {"volume", "taker_buy_base_volume"}
-    if required_cvd.issubset(result.columns):
-        total_volume = result["volume"].astype(float)
-        taker_buy = result["taker_buy_base_volume"].astype(float)
-        taker_sell = (total_volume - taker_buy).clip(lower=0.0)
-        cvd_raw = taker_buy - taker_sell
-        cvd_window = cvd_raw.rolling(window=6, min_periods=2).sum()
-        vol_window = total_volume.rolling(window=6, min_periods=2).sum().replace(0.0, np.nan)
-        ratio = (cvd_window / vol_window).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
-        result["cvd_ratio_6h"] = ratio
-        cvd_mean = cvd_window.rolling(window=24, min_periods=6).mean()
-        cvd_std = cvd_window.rolling(window=24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
-        zscore = ((cvd_window - cvd_mean) / cvd_std).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        result["cvd_zscore_6h"] = zscore.clip(-10.0, 10.0)
-    else:
-        if "cvd_ratio_6h" not in result.columns:
-            result["cvd_ratio_6h"] = 0.0
-        if "cvd_zscore_6h" not in result.columns:
-            result["cvd_zscore_6h"] = 0.0
-        _warn_placeholder_once(
-            "cvd_ratio_6h",
-            "Missing taker volume columns (volume + taker_buy_base_volume); hydrate Binance spot klines before relying on CVD breakout signals.",
-        )
-
-    required_liquidity = {"high", "low", "close"}
-    if required_liquidity.issubset(result.columns):
-        high = result["high"].astype(float)
-        low = result["low"].astype(float)
-        close = result["close"].astype(float)
-        true_range = _true_range(high, low, close)
-        atr_6h = true_range.rolling(window=6, min_periods=2).mean().replace(0.0, np.nan)
-        range_span = (high - low).abs()
-        liquidity_ratio = (range_span / atr_6h).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        result["liquidity_range_ratio_6h"] = liquidity_ratio.clip(0.0, 10.0)
-
-        mid_price = (high + low) / 2.0
-        half_range = (high - low).replace(0.0, np.nan) / 2.0
-        close_position = ((close - mid_price) / half_range)
-        close_position = close_position.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
-        result["liquidity_close_position_ratio"] = close_position
-    else:
-        if "liquidity_range_ratio_6h" not in result.columns:
-            result["liquidity_range_ratio_6h"] = 0.0
-        if "liquidity_close_position_ratio" not in result.columns:
-            result["liquidity_close_position_ratio"] = 0.0
-        _warn_placeholder_once(
-            "liquidity_features",
-            "Missing OHLC columns; Binance-native liquidity stress metrics default to zeros.",
-        )
-
-    return result
+    return _shared_augment_hourly_price_features(
+        frame,
+        strict_missing=False,
+        warn=_warn_placeholder_once,
+    )
 
 from xgboost import XGBClassifier, XGBRegressor
 
@@ -123,6 +39,7 @@ from src.data.dataset_preparation import (
     repair_hourly_continuity,
 )
 from src.data.targets_multi_horizon import add_multi_horizon_targets
+from src.data.targets_multi_horizon import add_trend_ignition_label
 from src.scripts.build_training_dataset import (
     PROCESSED_PATHS as REG_PROCESSED_PATHS,
     _drop_non_binance_breakout_features,
@@ -217,30 +134,11 @@ def _apply_platt_calibration(p_up: float, params: Mapping[str, Any]) -> float:
 
 
 def _apply_funding_rate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute the 24h funding-rate spike oscillator (z = (x - μ24h) / σ24h)."""
-
-    result = df.copy()
-    candidates = (
-        "funding_rate",
-        "funding_BTCUSDT_funding_rate",
-        "fut_funding_rate",
+    return _shared_apply_funding_rate_features(
+        df,
+        strict_missing=False,
+        warn=_warn_placeholder_once,
     )
-    source = next((col for col in candidates if col in result.columns), None)
-    if source is None:
-        if "funding_rate_zscore_24h" not in result.columns:
-            result["funding_rate_zscore_24h"] = 0.0
-            _warn_placeholder_once(
-                "funding_rate",
-                "Funding rate columns missing; refresh data/processed/funding/hourly_features.parquet or BigQuery curated feeds to unlock funding_rate_zscore_24h.",
-            )
-        return result
-
-    funding = result[source].astype(float)
-    rolling_mean = funding.rolling(window=24, min_periods=6).mean()
-    rolling_std = funding.rolling(window=24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
-    oscillator = ((funding - rolling_mean) / rolling_std).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    result["funding_rate_zscore_24h"] = oscillator.clip(-10.0, 10.0)
-    return result
 
 
 def _recompute_return_targets(df: pd.DataFrame) -> pd.DataFrame:
@@ -291,6 +189,17 @@ def _load_feature_names_from_npz(path: str) -> Optional[List[str]]:
     return data["feature_names"].tolist()
 
 
+def _infer_required_target_horizons(feature_names: Sequence[str]) -> List[int]:
+    horizons: set[int] = {1, 4}
+    for name in feature_names:
+        text = str(name)
+        if text.startswith("ret_") and text.endswith("h"):
+            body = text[len("ret_") : -1]
+            if body.isdigit():
+                horizons.add(int(body))
+    return sorted(h for h in horizons if h > 0)
+
+
 def _build_scaler_from_training(X_all_ordered: pd.DataFrame) -> StandardScaler:
     n = len(X_all_ordered)
     if n == 0:
@@ -312,8 +221,13 @@ def _build_features_from_csv(
     target_column: str,
     horizons: List[int],
     onchain_path: Optional[str],
+    feature_names: Optional[Sequence[str]] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, List[str]]:
-    df = pd.read_csv(features_path, parse_dates=["ts"])
+    path_obj = Path(features_path)
+    if path_obj.suffix.lower() == ".parquet":
+        df = pd.read_parquet(path_obj)
+    else:
+        df = pd.read_csv(features_path, parse_dates=["ts"])
     if "ts" not in df.columns:
         raise ValueError("Features CSV must include a 'ts' column.")
 
@@ -337,7 +251,16 @@ def _build_features_from_csv(
         df,
         realized_windows=DEFAULT_REALIZED_WINDOWS,
     )
-    df_targets = add_multi_horizon_targets(df, horizons=horizons, price_col="close")
+    required_horizons = _infer_required_target_horizons(feature_names or horizons)
+    df_targets = add_multi_horizon_targets(df, horizons=required_horizons, price_col="close")
+    if feature_names and "trend_ignition_6h" in set(feature_names):
+        df_targets = add_trend_ignition_label(
+            df_targets,
+            horizon_hours=6,
+            threshold=0.01,
+            price_col="close",
+            label_col="trend_ignition_6h",
+        )
     ret_cols = [f"ret_{h}h" for h in horizons]
     df_targets = df_targets.dropna(subset=ret_cols)
 
@@ -383,6 +306,7 @@ def prepare_data_for_signals(
             target_column=target_column,
             horizons=horizons,
             onchain_path=onchain_path,
+            feature_names=feature_names,
         )
         if feature_names is None:
             feature_names = list(X_all.columns)
@@ -502,6 +426,9 @@ def prepare_data_for_signals_from_ohlcv(
     df_features: pd.DataFrame,
     feature_names: Optional[List[str]] = None,
     train_frac: float = 0.7,
+    *,
+    expected_freq: pd.Timedelta | str = pd.Timedelta(hours=1),
+    periods_per_hour: int = 1,
 ) -> PreparedData:
     """Build a ``PreparedData`` bundle directly from an OHLCV-derived dataframe.
 
@@ -524,10 +451,18 @@ def prepare_data_for_signals_from_ohlcv(
         raise ValueError(f"Dataframe missing required feature columns: {sorted(missing)}")
 
     df_all = df_features.sort_values("ts").reset_index(drop=True)
-    df_all, _, _ = enforce_unique_hourly_index(df_all, label="realtime_features")
+    freq = pd.Timedelta(expected_freq)
+    normalize_to_hour = freq >= pd.Timedelta(hours=1)
+    df_all, _, _ = enforce_unique_hourly_index(
+        df_all,
+        label="realtime_features",
+        expected_freq=freq,
+        normalize_to_hour=normalize_to_hour,
+    )
     df_all, volatility_columns = add_volatility_columns(
         df_all,
         realized_windows=DEFAULT_REALIZED_WINDOWS,
+        periods_per_hour=max(int(periods_per_hour), 1),
     )
     X_all_ordered = df_all[feature_names].copy()
 

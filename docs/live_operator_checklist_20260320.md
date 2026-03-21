@@ -30,23 +30,23 @@ Use them to judge whether the chop-suppression candidate is drifting operational
 
 Fresh run used for this checklist:
 
-- generated at `2026-03-20T05:58:27.037243+00:00`
+- generated at `2026-03-21T05:10:33.769700+00:00`
 
 Current operator-facing state:
 
 - feature coverage: `ok = true`
 - directional bias: bullish across the mid-term stack
-- `1h`: rejected by `forecast_coherence_gate`
-- `4h`: `waiting_pullback`, side `long`, `pending_trade_action = long`, `position_size = 0.2400201025766676`, `position_size_cap = 0.35`
-- `8h`: rejected by `insufficient_mfe_headroom`, side `long`, `position_size = 0.07313213844161717`, `position_size_cap = 0.20`
-- `12h`: rejected by `insufficient_mfe_headroom`, side `long`, `position_size = 0.25781212460742925`, `position_size_cap = 0.35`
+- `1h`: rejected by `insufficient_mfe_headroom`
+- `4h`: rejected by `insufficient_mfe_headroom`
+- `8h`: `ready`, side `long`, `position_size = 0.0025482643209240163`, `position_size_cap = 0.20`, `confidence_min_source = 8h@trend_ignition`
+- `12h`: `bias_only_ready`, `trade_action = hold`, `abstention.reason = edge_over_fee_below_min`
 
 Practical reading:
 
 - keep the bullish bias,
-- do not chase a market entry,
-- the only acceptable live path in this snapshot is to wait for the preferred `4h` pullback structure,
-- do not override the model into a standalone `8h` long while `8h` is rejected for headroom.
+- the current model-approved live path is the `8h` setup,
+- do not upsize the `8h` trade beyond the configured `0.20` cap,
+- do not substitute the `12h` bias-only setup for the ready `8h` setup while `12h` remains blocked by `edge_over_fee_below_min`.
 
 ## Pre-Run Checks
 
@@ -94,17 +94,17 @@ Current workspace note:
 ## Execution Decision Tree
 
 1. If feature coverage fails, pause live trading.
-2. If `4h` is `waiting_pullback` and `8h` or `12h` is rejected for `insufficient_mfe_headroom`, keep the directional bias but do not force a market entry.
-3. If `1h` is rejected by `forecast_coherence_gate`, treat it as a context warning and do not use it to justify overriding the `4h` or `12h` execution state.
-4. If `8h` is the only horizon that looks tradeable, do not promote it manually unless `4h` and `12h` are at least non-conflicting and `8h` is not rejected for `insufficient_mfe_headroom`.
-5. If `4h` or `12h` becomes `ready`, prefer that horizon over a standalone `8h` continuation setup.
+2. If `8h` is `ready` and `prompt_ready_summary.operator_summary_compact.recommended_operator_action = enter_now`, use the `8h` execution plan and keep size inside the configured `0.20` cap.
+3. If `1h` or `4h` is rejected for `insufficient_mfe_headroom`, treat those horizons as non-confirming rather than as overrides of the ready `8h` setup.
+4. If `12h` is `bias_only_ready` because `edge_over_fee_below_min`, keep the directional bias but do not substitute `12h` for the ready `8h` plan.
+5. If a later refresh promotes `4h` or `12h` to `ready` with stronger follow-through, re-evaluate the preferred horizon instead of carrying forward a stale `8h` bias.
 
 ## Escalate Or Pause
 
 Reduce risk or pause if any of these appears:
 
 1. repeated `8h`-preferred long setups without confirmation from `4h` or `12h`
-2. repeated `insufficient_mfe_headroom` rejections on the same side while directional bias stays one-sided
+2. repeated `8h`-preferred long setups with deteriorating `edge_over_fee` or `insufficient_mfe_headroom` across the confirming stack
 3. new feature freshness or coverage failure
 4. next qualified reliability run fails promotion or model-shift guards
 

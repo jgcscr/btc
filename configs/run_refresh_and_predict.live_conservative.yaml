@@ -17,6 +17,9 @@ data_quality:
   max_zero_volume_ratio: 0.2
   min_rows: 120
 confidence_min: 0.33
+confidence_min_by_horizon_regime:
+  "8":
+    trend_ignition: 0.23
 position_size_floor: 0.0
 position_size_cap: 0.35
 position_size_cap_by_horizon:
@@ -33,6 +36,10 @@ abstention_policy:
   require_positive_ev: true
   hold_prob_center: 0.5
   hold_prob_band: 0.03
+  thresholds_by_horizon_regime:
+    "8":
+      trend_ignition:
+        hold_prob_band: 0.0
 uncertainty_policy:
   enabled: true
   alpha: 0.2
@@ -85,6 +92,11 @@ trade_decision_policy:
   enabled: true
   model_path: artifacts/models/trade_decision_model.json
   threshold: 0.5495
+  thresholds_by_horizon_regime:
+    "8":
+      trend_ignition: 0.4175
+    "12":
+      trend_ignition: 0.4175
   use_oof_expected_value: true
   oof_expected_value_mode: max_with_raw_calibrated
   enforce_positive_oof_envelope: true
@@ -153,18 +165,18 @@ direction_output_policy:
     min_component_count: 2
     use_raw_probability_gate: true
     weight_specs:
-      default: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
-      trend_ignition: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
-      neutral: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
-      chop: transformer:1.0,transformer_large:0.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0,lgbm:0.0
+      default: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
+      trend_ignition: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
+      neutral: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
+      chop: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
 confluence_policy:
   enabled: true
   short_horizons: [1]
   mid_horizons: [4, 8, 12]
   min_support_ratio: 0.66
   min_support_ratio_by_horizon:
-    "4": 1.0
-    "8": 1.0
+    "4": 0.8
+    "8": 0.8
   min_aligned_horizons: 2
   min_aligned_horizons_by_horizon:
     "4": 3
@@ -255,7 +267,7 @@ execution_policy:
     require_favorable_entry_zone: true
   adaptive_take_profit:
     enabled: true
-    min_rr_fraction_of_floor: 0.85
+    min_rr_fraction_of_floor: 0.75
   pullback_quality:
     enabled: true
     min_score_by_horizon:
@@ -303,7 +315,7 @@ execution_policy:
       max_chase_atr_mult: 0.28
       pullback_quality_floor: 0.45
     trend_ignition:
-      tp_multiplier: 1.25
+      tp_multiplier: 1.1
       time_stop_multiplier: 1.5
       size_multiplier: 1.1
       entry_mode_by_tier:
@@ -324,7 +336,7 @@ degradation_monitoring:
 spot_provider: binanceus
 write_artifacts: false
 disable_monitoring_latest: false
-dir_model_weights: transformer:0.0,transformer_large:0.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.0,lgbm:1.0
+dir_model_weights: transformer:0.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.0
 trend_ignition:
   enabled: false
   model_path: artifacts/models/trend_ignition/xgb_trend_ignition.joblib
@@ -351,20 +363,20 @@ adaptive_thresholds:
 regime_model_weights:
   enabled: true
   trend_ignition:
-    "1": "transformer:0.0,transformer_large:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5,lgbm:0.0"
-    "4": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.0"
-    "8": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.0"
-    "12": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.0"
+    "1": "transformer:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5"
+    "4": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "8": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "12": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
   neutral:
-    "1": "transformer:0.0,transformer_large:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5,lgbm:0.0"
-    "4": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.5"
-    "8": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.5"
-    "12": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5,lgbm:1.5"
+    "1": "transformer:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5"
+    "4": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "8": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "12": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
   chop:
-    "1": "transformer:0.0,transformer_large:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5,lgbm:0.0"
-    "4": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5,lgbm:1.5"
-    "8": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5,lgbm:1.5"
-    "12": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5,lgbm:1.5"
+    "1": "transformer:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5"
+    "4": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5"
+    "8": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5"
+    "12": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5"
 regime_model_dirs:
   enabled: true
   trend_ignition:

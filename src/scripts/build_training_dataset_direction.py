@@ -19,6 +19,7 @@ from src.data.labeling import (
 from src.scripts.build_training_dataset import _apply_funding_rate_features
 from src.scripts.build_training_dataset import _load_local_features as _load_hourly_local_features
 from src.scripts.build_training_dataset import merge_intrahour_15m_features
+from src.trading.feature_engineering import augment_hourly_price_features as _shared_augment_hourly_price_features
 from src.trading.volatility import (
     DEFAULT_REALIZED_WINDOWS,
     add_volatility_columns,
@@ -253,92 +254,7 @@ def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
 
 
 def _augment_price_features(df: pd.DataFrame) -> pd.DataFrame:
-    result = df.copy()
-
-    def _safe_diff(series: pd.Series) -> pd.Series:
-        return series.diff().fillna(0.0)
-
-    def _safe_pct(series: pd.Series) -> pd.Series:
-        return series.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    for base in ("close", "volume", "fut_close", "fut_volume"):
-        if base not in result.columns:
-            continue
-        result[f"{base}_delta_1h"] = _safe_diff(result[base])
-        result[f"{base}_pct_change_1h"] = _safe_pct(result[base])
-
-    if "close" in result.columns:
-        std_7 = result["close"].rolling(window=7, min_periods=3).std(ddof=0)
-        std_24 = result["close"].rolling(window=24, min_periods=6).std(ddof=0)
-        if "ma_close_7h" in result.columns:
-            denom = std_7.replace(0.0, np.nan)
-            result["close_zscore_7h"] = ((result["close"] - result["ma_close_7h"]) / denom).fillna(0.0)
-        if "ma_close_24h" in result.columns:
-            denom = std_24.replace(0.0, np.nan)
-            result["close_zscore_24h"] = ((result["close"] - result["ma_close_24h"]) / denom).fillna(0.0)
-
-    if "fut_close" in result.columns:
-        rolling_mean = result["fut_close"].rolling(window=7, min_periods=3).mean()
-        rolling_std = result["fut_close"].rolling(window=7, min_periods=3).std(ddof=0).replace(0.0, np.nan)
-        result["fut_close_zscore_7h"] = ((result["fut_close"] - rolling_mean) / rolling_std).fillna(0.0)
-
-    required_cvd = {"volume", "taker_buy_base_volume"}
-    if not required_cvd.issubset(result.columns):
-        missing = ", ".join(sorted(required_cvd - set(result.columns)))
-        raise ValueError(
-            f"Cannot compute CVD features; missing columns: {missing}.",
-        )
-    total_volume = result["volume"].astype(float)
-    taker_buy = result["taker_buy_base_volume"].astype(float)
-    taker_sell = (total_volume - taker_buy).clip(lower=0.0)
-    cvd_raw = taker_buy - taker_sell
-    cvd_window = cvd_raw.rolling(window=6, min_periods=2).sum()
-    vol_window = total_volume.rolling(window=6, min_periods=2).sum().replace(0.0, np.nan)
-    ratio = (cvd_window / vol_window).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
-    result["cvd_ratio_6h"] = ratio
-    cvd_mean = cvd_window.rolling(window=24, min_periods=6).mean()
-    cvd_std = cvd_window.rolling(window=24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
-    zscore = ((cvd_window - cvd_mean) / cvd_std).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    result["cvd_zscore_6h"] = zscore.clip(-10.0, 10.0)
-
-    required_liquidity = {"high", "low", "close"}
-    if not required_liquidity.issubset(result.columns):
-        missing = ", ".join(sorted(required_liquidity - set(result.columns)))
-        raise ValueError(f"Cannot compute liquidity features; missing OHLC columns: {missing}.")
-    true_range = _true_range(result["high"].astype(float), result["low"].astype(float), result["close"].astype(float))
-    atr_6h = true_range.rolling(window=6, min_periods=2).mean().replace(0.0, np.nan)
-    range_span = (result["high"].astype(float) - result["low"].astype(float)).abs()
-    liquidity_ratio = (range_span / atr_6h).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    result["liquidity_range_ratio_6h"] = liquidity_ratio.clip(0.0, 10.0)
-
-    mid_price = (result["high"].astype(float) + result["low"].astype(float)) / 2.0
-    half_range = (result["high"].astype(float) - result["low"].astype(float)).replace(0.0, np.nan) / 2.0
-    close_position = ((result["close"].astype(float) - mid_price) / half_range)
-    close_position = close_position.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
-    result["liquidity_close_position_ratio"] = close_position
-
-    high = result["high"].astype(float)
-    low = result["low"].astype(float)
-    close = result["close"].astype(float)
-    volume = result["volume"].astype(float) if "volume" in result.columns else None
-    atr_24h = true_range.rolling(window=24, min_periods=6).mean().replace(0.0, np.nan)
-    result["range_expansion_1h"] = (true_range / atr_24h).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 10.0)
-    session_high = high.rolling(window=8, min_periods=2).max().replace(0.0, np.nan)
-    session_low = low.rolling(window=8, min_periods=2).min().replace(0.0, np.nan)
-    result["distance_from_session_high_8h"] = ((close / session_high) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
-    result["distance_from_session_low_8h"] = ((close / session_low) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
-    if volume is not None:
-        typical_price = (high + low + close) / 3.0
-        rolling_notional = (typical_price * volume).rolling(window=8, min_periods=2).sum()
-        rolling_volume = volume.rolling(window=8, min_periods=2).sum().replace(0.0, np.nan)
-        rolling_vwap = (rolling_notional / rolling_volume).replace([np.inf, -np.inf], np.nan)
-        result["vwap_deviation_8h"] = ((close / rolling_vwap) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
-    else:
-        result["vwap_deviation_8h"] = 0.0
-    result["momentum_slope_2h"] = _safe_pct(close).rolling(window=2, min_periods=1).mean().fillna(0.0)
-    result["momentum_slope_4h"] = _safe_pct(close).rolling(window=4, min_periods=1).mean().fillna(0.0)
-
-    return result
+    return _shared_augment_hourly_price_features(df, strict_missing=True)
 
 
 def _merge_processed_features(df: pd.DataFrame, paths: Sequence[Path]) -> pd.DataFrame:

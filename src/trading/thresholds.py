@@ -92,9 +92,11 @@ def load_calibrated_thresholds(path: Path | str | None) -> Dict[int | float, Dic
     for key, entry in horizons.items():
         horizon = _normalize_horizon_key(key)
         if horizon is None:
-            continue
+            raise ValueError(f"Invalid threshold horizon key '{key}' in {path_obj}.")
         threshold_entry = _coerce_threshold_entry(entry)
         if threshold_entry is None:
-            continue
+            raise ValueError(f"Malformed threshold entry for horizon '{key}' in {path_obj}.")
+        if horizon in loaded:
+            raise ValueError(f"Duplicate threshold entry for normalized horizon '{horizon}' in {path_obj}.")
         loaded[horizon] = threshold_entry
     return loaded

@@ -54,6 +54,17 @@ Interpretation:
 - `8h` remains enabled but capped below `4h` and `12h`,
 - `4h` and `12h` are the primary live-carry horizons.
 
+Scoped runtime overrides now active in the checked-in live conservative profile:
+
+- `confidence_min_by_horizon_regime.8h.trend_ignition = 0.23`
+- `trade_decision_policy.thresholds_by_horizon_regime.8h.trend_ignition = 0.4175`
+- `trade_decision_policy.thresholds_by_horizon_regime.12h.trend_ignition = 0.4175`
+- `abstention_policy.thresholds_by_horizon_regime.8h.trend_ignition.hold_prob_band = 0.0`
+- `confluence_policy.min_support_ratio_by_horizon.4h = 0.8`
+- `confluence_policy.min_support_ratio_by_horizon.8h = 0.8`
+- `execution_policy.adaptive_take_profit.min_rr_fraction_of_floor = 0.75`
+- `execution_policy.regime_templates.trend_ignition.tp_multiplier = 1.1`
+
 ## Exact Command
 
 ```bash
@@ -85,6 +96,16 @@ Current workspace note:
 - the `prompt_ready_summary.market_outlook_strategy` fields are not the primary live read path in the current workspace snapshot
 - shadow comparison artifacts under `artifacts/predictions/comparisons/` should not be used to override the live conservative read path
 
+Current codespace local-validation snapshot:
+
+- generated at `2026-03-21T05:10:33.769700+00:00`
+- feature coverage `ok = true`
+- preferred horizon `8h`
+- `recommended_operator_action = enter_now`
+- `8h` is `ready` long
+- `12h` is `bias_only_ready` because `edge_over_fee_below_min`
+- `1h` and `4h` remain blocked by `insufficient_mfe_headroom`
+
 ## Live Escalation Rules
 
 Keep live trading enabled only while these conditions remain true:
@@ -113,7 +134,7 @@ What was tried:
 What is active now:
 
 - keep the validated default signal logic,
-- harden live deployment by reducing `8h` capital exposure instead of forcing a weaker routing rule,
+- harden live deployment by reducing `8h` capital exposure and using scoped horizon/regime overrides instead of forcing a blanket routing rule,
 - continue collecting covered post-fix evidence before making another structural `8h` policy change.
 
 Latest direct operator-caution extraction from the covered `8h` added-trade set:
@@ -126,4 +147,5 @@ Latest direct operator-caution extraction from the covered `8h` added-trade set:
 Operational consequence:
 
 - keep `8h` enabled but underweighted,
-- do not manually force standalone `8h` longs when `4h` is not ready or when the `8h` execution reason is `insufficient_mfe_headroom`.
+- respect the `0.20` `8h` size cap even when `8h` is the current ready horizon,
+- do not manually upsize or substitute `12h` when it remains `bias_only_ready` because `edge_over_fee_below_min`.

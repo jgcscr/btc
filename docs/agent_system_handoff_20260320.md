@@ -17,7 +17,14 @@ Current live stance:
 
 - the system is trusted for live trading with conservative risk discipline,
 - `8h` remains the weakest carry horizon,
-- live hardening is done with horizon-specific size caps and operator discipline, not with a blanket `8h` suppression rule.
+- live hardening is done with horizon-specific size caps, scoped horizon/regime overrides, and operator discipline, not with a blanket `8h` suppression rule.
+
+Current local conservative validation state in this codespace:
+
+- latest local conservative refresh was generated at `2026-03-21T05:10:33.769700+00:00`
+- feature coverage is `ok = true`
+- preferred horizon is `8h` and `recommended_operator_action = enter_now`
+- `8h` is currently `ready` long while `12h` is `bias_only_ready` because `edge_over_fee_below_min`
 
 Current deployed shared bundle:
 
@@ -137,6 +144,8 @@ Runtime config and policy:
 - `configs/run_refresh_and_predict.live_conservative.yaml`
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`
+- `src/trading/feature_engineering.py`
+- `src/scripts/audit_feature_parity.py`
 
 Reliability workflow control:
 
@@ -174,6 +183,7 @@ Scratch validation area:
 3. Do not add a blanket `8h` suppression rule without covered replay validation.
 4. Prefer capital underweighting and operator discipline over speculative routing changes.
 5. If live output shows directional bias but `execution_plan` says `waiting_pullback` or `rejected`, do not force a market entry.
+6. Treat runtime config validation failures as correctness problems, not as warnings; stale weight keys and malformed threshold maps now fail fast by design.
 
 ## What To Check Before Trusting A New Change
 
@@ -192,6 +202,7 @@ For runtime policy changes:
 2. manifest correctness for snapshot reuse
 3. covered return-proxy scoring against `artifacts/datasets/btc_features_multi_horizon_splits.npz`
 4. focused regression tests when code changes are involved
+5. train/serve feature parity using `src.scripts.audit_feature_parity` when local-feature overrides are part of the change
 
 ## Current 8h Interpretation
 
@@ -205,7 +216,8 @@ Operationally this means:
 
 - keep `8h` enabled,
 - keep it underweighted,
-- do not manually promote standalone `8h` longs while `4h` is not ready or while `8h` is rejected for `insufficient_mfe_headroom`.
+- allow the checked-in live conservative profile to act on `8h` when it is genuinely `ready`,
+- do not manually upsize or substitute a blocked `12h` setup for the ready `8h` setup.
 
 ## Minimal First Session For A New Agent
 

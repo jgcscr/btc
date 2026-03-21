@@ -102,6 +102,16 @@ def apply_weight_overrides(
     if not overrides:
         return
 
+    valid_keys: set[str] = set()
+    for entry in configs:
+        valid_keys.add(str(entry["name"]))
+        valid_keys.add(str(entry["type"]))
+    unknown = sorted(key for key in overrides.keys() if key not in valid_keys)
+    if unknown:
+        raise ValueError(
+            "Unknown direction-model weight overrides: " + ", ".join(unknown),
+        )
+
     for entry in configs:
         name = entry["name"]
         key = name if name in overrides else entry["type"]

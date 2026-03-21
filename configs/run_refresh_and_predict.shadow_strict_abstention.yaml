@@ -49,7 +49,7 @@ forecast_coherence_policy:
 spot_provider: binanceus
 write_artifacts: true
 disable_monitoring_latest: false
-dir_model_weights: transformer:0.0,transformer_large:0.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.0,lgbm:1.0
+dir_model_weights: transformer:0.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.0
 trend_ignition:
   enabled: false
   model_path: artifacts/models/trend_ignition/xgb_trend_ignition.joblib

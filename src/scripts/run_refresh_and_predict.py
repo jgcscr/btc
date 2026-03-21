@@ -164,6 +164,7 @@ CONFIG_ALLOWED_KEYS = {
     "platt_calibration",
     "data_quality",
     "confidence_min",
+    "confidence_min_by_horizon_regime",
     "position_size_floor",
     "position_size_cap",
     "position_size_cap_by_horizon",
@@ -179,6 +180,7 @@ CONFIG_ALLOWED_KEYS = {
     "forecast_coherence_policy",
     "direction_output_policy",
     "degradation_monitoring",
+    "disabled_horizons",
 }
 # boolean config keys; converted with _bool_env
 CONFIG_BOOL_FIELDS = {
@@ -401,6 +403,10 @@ def _normalize_abstention_policy_block(value: Mapping[str, Any]) -> Dict[str, An
             normalized[key] = bool(raw_value)
         elif key in numeric_keys:
             normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key == "thresholds_by_horizon_regime":
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("abstention_policy.thresholds_by_horizon_regime must be a mapping.")
+            normalized[key] = dict(raw_value)
         else:
             print(
                 f"Warning: Unknown abstention_policy config key '{raw_key}' ignored.",
@@ -487,6 +493,10 @@ def _normalize_trade_decision_policy_block(value: Mapping[str, Any]) -> Dict[str
             normalized[key] = str(raw_value).lower() if raw_value is not None else None
         elif key == "model_path":
             normalized[key] = str(raw_value) if raw_value is not None else None
+        elif key == "thresholds_by_horizon_regime":
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("trade_decision_policy.thresholds_by_horizon_regime must be a mapping.")
+            normalized[key] = dict(raw_value)
         elif key == "midband_veto":
             if not isinstance(raw_value, Mapping):
                 raise ValueError("trade_decision_policy.midband_veto must be a mapping.")
@@ -866,6 +876,14 @@ def _normalize_config_value(name: str, value: Any) -> Any:
         if value is None:
             return None
         return str(value)
+    if name == "disabled_horizons":
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return parse_targets(value)
+        if isinstance(value, Sequence):
+            return [_normalize_horizon_value(entry) for entry in value]
+        raise ValueError(f"Invalid disabled_horizons entry in config: {value!r}")
     if name == "spot_provider":
         if value is None:
             return None
@@ -907,6 +925,8 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_degradation_monitoring_block(value)
         if name == "position_size_cap_by_horizon" and value is not None:
             return _normalize_horizon_float_map(value, minimum=0.0, maximum=1.0)
+        if name == "confidence_min_by_horizon_regime" and value is not None:
+            return _normalize_horizon_regime_float_map(value, minimum=0.0, maximum=1.0)
         return value
     raise ValueError(f"Unsupported config key: {name}")
 
@@ -1046,18 +1066,103 @@ def _normalize_horizon_float_map(raw: Any, *, minimum: float = 0.0, maximum: flo
     return resolved
 
 
+def _normalize_horizon_regime_float_map(
+    raw: Any,
+    *,
+    minimum: float = 0.0,
+    maximum: float | None = None,
+) -> Dict[float, Dict[str, float]]:
+    if not isinstance(raw, Mapping):
+        return {}
+    resolved: Dict[float, Dict[str, float]] = {}
+    for key, value in raw.items():
+        horizon = _coerce_numeric_horizon(key)
+        if horizon is None or not isinstance(value, Mapping):
+            continue
+        regime_values: Dict[str, float] = {}
+        for regime, raw_number in value.items():
+            candidate = raw_number.get("confidence_min") if isinstance(raw_number, Mapping) else raw_number
+            numeric_value = _finite_float_or_none(candidate)
+            if numeric_value is None:
+                continue
+            numeric_value = max(numeric_value, minimum)
+            if maximum is not None:
+                numeric_value = min(numeric_value, maximum)
+            regime_values[str(regime).strip().lower()] = numeric_value
+        if regime_values:
+            resolved[horizon] = regime_values
+    return resolved
+
+
+def _resolve_confidence_min_for_horizon(
+    base_confidence_min: float,
+    overrides: Mapping[float, Mapping[str, float]] | None,
+    *,
+    horizon: float,
+    regime_state: str,
+) -> tuple[float, str]:
+    resolved = max(0.0, min(1.0, float(base_confidence_min)))
+    source = "default"
+    if not isinstance(overrides, Mapping):
+        return resolved, source
+    regime_map = overrides.get(_normalize_horizon_value(horizon))
+    if not isinstance(regime_map, Mapping):
+        return resolved, source
+    regime_key = str(regime_state).strip().lower()
+    override = regime_map.get(regime_key)
+    if override is None:
+        override = regime_map.get("default")
+        if override is None:
+            return resolved, source
+        source = f"{_format_horizon_label(horizon)}@default"
+    else:
+        source = f"{_format_horizon_label(horizon)}@{regime_key}"
+    return max(0.0, min(1.0, float(override))), source
+
+
+def _normalize_threshold_overrides(
+    overrides: Mapping[int | float | str, Dict[str, float]] | None,
+) -> Dict[float, Dict[str, float]]:
+    if not isinstance(overrides, Mapping):
+        return {}
+
+    normalized: Dict[float, Dict[str, float]] = {}
+    for raw_key, raw_entry in overrides.items():
+        horizon = _coerce_numeric_horizon(raw_key)
+        if horizon is None:
+            raise ValueError(f"Invalid threshold override horizon: {raw_key!r}")
+        if not isinstance(raw_entry, Mapping):
+            raise ValueError(f"Threshold override for {raw_key!r} must be a mapping.")
+        if horizon in normalized:
+            raise ValueError(f"Duplicate threshold override for normalized horizon {horizon!r}.")
+
+        entry: Dict[str, float] = {}
+        required_keys = ("p_up_min", "ret_min")
+        for key in required_keys:
+            if key not in raw_entry:
+                raise ValueError(f"Threshold override for {raw_key!r} is missing required key '{key}'.")
+            entry[key] = float(raw_entry[key])
+
+        for key in ("max_drawdown", "volatility_ceiling", "volatility_mult", "expected_value_multiplier"):
+            if key in raw_entry and raw_entry[key] is not None:
+                entry[key] = float(raw_entry[key])
+
+        metric_key = raw_entry.get("volatility_metric")
+        if isinstance(metric_key, str) and metric_key.strip():
+            entry["volatility_metric"] = metric_key.strip()  # type: ignore[assignment]
+        normalized[horizon] = entry
+    return normalized
+
+
 def _resolve_thresholds_for_horizon(
     horizon: float,
     default_p_up: float,
     default_ret: float,
-    overrides: Mapping[int | float | str, Dict[str, float]] | None,
+    overrides: Mapping[float, Dict[str, float]] | None,
 ) -> Dict[str, float]:
     entry: Dict[str, float] | None = None
     if overrides:
-        for key in _threshold_lookup_keys(horizon):
-            entry = overrides.get(key)  # type: ignore[arg-type]
-            if entry is not None:
-                break
+        entry = overrides.get(_normalize_horizon_value(horizon))
 
     p_up_value = float((entry or {}).get("p_up_min", default_p_up))
     ret_value = float((entry or {}).get("ret_min", default_ret))
@@ -2156,6 +2261,13 @@ def _apply_forecast_coherence_policy(
             )
         entry["forecast_coherence"] = payload
         if reasons:
+            _append_gate_trace(
+                entry,
+                stage="forecast_coherence",
+                reason="|".join(reasons),
+                triggered=True,
+                blocking=True,
+            )
             entry["trade_action"] = "hold"
             entry["signal_ensemble"] = 0
             entry["direction_next_display"] = "neutral"
@@ -2176,6 +2288,13 @@ def _apply_forecast_coherence_policy(
                 trade_decision["forecast_coherence_gate_triggered"] = True
                 trade_decision["forecast_coherence_gate_reasons"] = reasons
         elif advisory_reasons:
+            _append_gate_trace(
+                entry,
+                stage="forecast_coherence",
+                reason="|".join(advisory_reasons),
+                triggered=True,
+                blocking=False,
+            )
             trade_decision = entry.get("trade_decision")
             if isinstance(trade_decision, dict):
                 trade_decision["forecast_coherence_low_trust"] = True
@@ -2292,6 +2411,13 @@ def _apply_confluence_policy(
             0.0 if dominant_direction == "neutral" else float(dominant_direction == current_direction)
         )
         if confluence_triggered:
+            _append_gate_trace(
+                entry,
+                stage="confluence",
+                reason="|".join(reasons),
+                triggered=True,
+                blocking=True,
+            )
             entry["trade_action"] = "hold"
             entry["signal_ensemble"] = 0
             trade_decision = entry.get("trade_decision")
@@ -4140,6 +4266,56 @@ def _resolve_data_quality_policy(config: Mapping[str, Any] | None) -> Dict[str, 
 
 def _resolve_abstention_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
     cfg = config or {}
+    thresholds_by_horizon_regime: Dict[float, Dict[str, Dict[str, Any]]] = {}
+    raw_thresholds = cfg.get("thresholds_by_horizon_regime") if isinstance(cfg.get("thresholds_by_horizon_regime"), Mapping) else {}
+    for raw_horizon, raw_regimes in raw_thresholds.items():
+        horizon = _coerce_numeric_horizon(raw_horizon)
+        if horizon is None or not isinstance(raw_regimes, Mapping):
+            continue
+        resolved_regimes: Dict[str, Dict[str, Any]] = {}
+        for raw_regime, raw_values in raw_regimes.items():
+            if not isinstance(raw_values, Mapping):
+                continue
+            resolved_values = {
+                key: value
+                for key, value in {
+                    "min_confidence": (
+                        max(0.0, min(1.0, float(raw_values.get("min_confidence"))))
+                        if raw_values.get("min_confidence") is not None
+                        else None
+                    ),
+                    "min_abs_expected_value": (
+                        max(float(raw_values.get("min_abs_expected_value")), 0.0)
+                        if raw_values.get("min_abs_expected_value") is not None
+                        else None
+                    ),
+                    "min_edge_over_fee": (
+                        max(float(raw_values.get("min_edge_over_fee")), 0.0)
+                        if raw_values.get("min_edge_over_fee") is not None
+                        else None
+                    ),
+                    "require_positive_ev": (
+                        bool(raw_values.get("require_positive_ev"))
+                        if raw_values.get("require_positive_ev") is not None
+                        else None
+                    ),
+                    "hold_prob_center": (
+                        max(0.0, min(1.0, float(raw_values.get("hold_prob_center"))))
+                        if raw_values.get("hold_prob_center") is not None
+                        else None
+                    ),
+                    "hold_prob_band": (
+                        max(0.0, min(0.5, float(raw_values.get("hold_prob_band"))))
+                        if raw_values.get("hold_prob_band") is not None
+                        else None
+                    ),
+                }.items()
+                if value is not None
+            }
+            if resolved_values:
+                resolved_regimes[str(raw_regime).strip().lower()] = resolved_values
+        if resolved_regimes:
+            thresholds_by_horizon_regime[_normalize_horizon_value(horizon)] = resolved_regimes
     return {
         "enabled": bool(cfg.get("enabled", False)),
         "min_confidence": max(0.0, min(1.0, float(cfg.get("min_confidence") or 0.0))),
@@ -4148,7 +4324,32 @@ def _resolve_abstention_policy(config: Mapping[str, Any] | None) -> Dict[str, An
         "require_positive_ev": bool(cfg.get("require_positive_ev", False)),
         "hold_prob_center": max(0.0, min(1.0, float(cfg.get("hold_prob_center") or 0.5))),
         "hold_prob_band": max(0.0, min(0.5, float(cfg.get("hold_prob_band") or 0.0))),
+        "thresholds_by_horizon_regime": thresholds_by_horizon_regime,
     }
+
+
+def _resolve_abstention_policy_for_horizon(
+    policy: Mapping[str, Any],
+    *,
+    horizon: float | None,
+    regime_state: str,
+) -> Dict[str, Any]:
+    resolved = dict(policy or {})
+    if horizon is None:
+        return resolved
+    overrides = resolved.get("thresholds_by_horizon_regime") if isinstance(resolved.get("thresholds_by_horizon_regime"), Mapping) else {}
+    regime_map = overrides.get(_normalize_horizon_value(horizon))
+    if not isinstance(regime_map, Mapping):
+        return resolved
+    regime_key = str(regime_state).strip().lower()
+    scoped = regime_map.get(regime_key)
+    if scoped is None:
+        scoped = regime_map.get("default")
+    if not isinstance(scoped, Mapping):
+        return resolved
+    merged = dict(resolved)
+    merged.update(scoped)
+    return merged
 
 
 def _resolve_regime_model_weights_policy(config: Mapping[str, Any] | None) -> Optional[Dict[str, Any]]:
@@ -4263,6 +4464,29 @@ def _resolve_trade_decision_policy(config: Mapping[str, Any] | None) -> Dict[str
     enabled = bool(cfg.get("enabled", False) and model_payload is not None)
     midband_veto_cfg = cfg.get("midband_veto") if isinstance(cfg.get("midband_veto"), Mapping) else {}
     weak_band_veto_cfg = cfg.get("weak_band_veto") if isinstance(cfg.get("weak_band_veto"), Mapping) else {}
+    thresholds_by_horizon_regime: Dict[float, Dict[str, float]] = {}
+    raw_thresholds = (
+        cfg.get("thresholds_by_horizon_regime")
+        if isinstance(cfg.get("thresholds_by_horizon_regime"), Mapping)
+        else {}
+    )
+    for raw_horizon, raw_regimes in raw_thresholds.items():
+        horizon = _coerce_numeric_horizon(raw_horizon)
+        if horizon is None or not isinstance(raw_regimes, Mapping):
+            continue
+        resolved_regimes: Dict[str, float] = {}
+        for raw_regime, raw_value in raw_regimes.items():
+            regime_key = str(raw_regime).strip().lower()
+            threshold_value: float | None = None
+            if isinstance(raw_value, Mapping):
+                threshold_value = _finite_float_or_none(raw_value.get("threshold"))
+            else:
+                threshold_value = _finite_float_or_none(raw_value)
+            if threshold_value is None:
+                continue
+            resolved_regimes[regime_key] = max(0.0, min(1.0, float(threshold_value)))
+        if resolved_regimes:
+            thresholds_by_horizon_regime[_normalize_horizon_value(horizon)] = resolved_regimes
     return {
         "enabled": enabled,
         "replace_threshold_rule": bool(cfg.get("replace_threshold_rule", True)),
@@ -4277,6 +4501,7 @@ def _resolve_trade_decision_policy(config: Mapping[str, Any] | None) -> Dict[str
         "raw_ev_fallback_quantile": float(cfg.get("raw_ev_fallback_quantile", 0.9)),
         "raw_ev_fallback_min_edge_over_fee": float(cfg.get("raw_ev_fallback_min_edge_over_fee", 0.0)),
         "threshold": float(cfg.get("threshold") if cfg.get("threshold") is not None else (model_payload or {}).get("threshold", 0.55)),
+        "thresholds_by_horizon_regime": thresholds_by_horizon_regime,
         "min_expected_net": float(cfg.get("min_expected_net", 0.0)),
         "min_edge_over_fee": float(cfg.get("min_edge_over_fee", 0.0)),
         "midband_veto": {
@@ -4308,6 +4533,43 @@ def _resolve_trade_decision_policy(config: Mapping[str, Any] | None) -> Dict[str
         },
         "model": model_payload,
     }
+
+
+def _resolve_trade_decision_threshold(
+    policy: Mapping[str, Any],
+    *,
+    horizon_label: str | None,
+    regime_state: str,
+) -> tuple[float, str]:
+    base_threshold = max(0.0, min(1.0, float(policy.get("threshold", 0.55))))
+    source = "default"
+    if not horizon_label:
+        return base_threshold, source
+
+    try:
+        horizon = _normalize_horizon_value(_parse_horizon_label(horizon_label))
+    except (TypeError, ValueError):
+        return base_threshold, source
+
+    overrides = (
+        policy.get("thresholds_by_horizon_regime")
+        if isinstance(policy.get("thresholds_by_horizon_regime"), Mapping)
+        else {}
+    )
+    regime_overrides = overrides.get(horizon)
+    if not isinstance(regime_overrides, Mapping):
+        return base_threshold, source
+
+    regime_key = str(regime_state).strip().lower()
+    override = regime_overrides.get(regime_key)
+    if override is None:
+        override = regime_overrides.get("default")
+        if override is None:
+            return base_threshold, source
+        source = f"{_format_horizon_label(horizon)}@default"
+    else:
+        source = f"{_format_horizon_label(horizon)}@{regime_key}"
+    return max(0.0, min(1.0, float(override))), source
 
 
 def _sigmoid(value: float) -> float:
@@ -4482,6 +4744,7 @@ def _lookup_raw_ev_fallback_threshold(model: Mapping[str, Any], quantile: float)
 def _apply_trade_decision_model(
     *,
     result: Dict[str, Any],
+    horizon_label: str | None,
     regime_state: str,
     residual_std: float,
     policy: Mapping[str, Any],
@@ -4552,7 +4815,11 @@ def _apply_trade_decision_model(
         logit += coef * float(feature_values.get(name, 0.0))
     trade_prob = _sigmoid(logit)
 
-    threshold = max(0.0, min(1.0, float(policy.get("threshold", 0.55))))
+    threshold, threshold_source = _resolve_trade_decision_threshold(
+        policy,
+        horizon_label=horizon_label,
+        regime_state=regime_state,
+    )
     expected_net_raw = _finite_float(result.get("expected_value", 0.0), 0.0)
     expected_net_oof = _lookup_oof_expected_net(model, trade_prob)
     expected_net_raw_calibrated = _lookup_raw_ev_expected_net(model, expected_net_raw)
@@ -4676,22 +4943,25 @@ def _apply_trade_decision_model(
                 trade_ok = False
                 midband_veto_triggered = True
                 midband_veto_reason = "midband_veto"
-
-        result["signal_ensemble"] = int(trade_ok)
-        result["trade_action"] = (
-            "long" if int(trade_ok) == 1 and signal_dir_only == 1 else
-            "short" if int(trade_ok) == 1 and signal_dir_only == 0 else
-            "hold"
-        )
     else:
         midband_veto_triggered = False
         midband_veto_reason = "replace_threshold_rule_disabled"
 
+    proposed_signal_ensemble = int(trade_ok)
+    proposed_trade_action = (
+        "long" if proposed_signal_ensemble == 1 and signal_dir_only == 1 else
+        "short" if proposed_signal_ensemble == 1 and signal_dir_only == 0 else
+        "hold"
+    )
+
     return {
         "enabled": True,
         "triggered": bool(trade_ok),
+        "proposed_signal_ensemble": int(proposed_signal_ensemble),
+        "proposed_trade_action": proposed_trade_action,
         "trade_probability": float(trade_prob),
         "threshold": float(threshold),
+        "threshold_source": threshold_source,
         "expected_net": (float(expected_net) if expected_net_valid else None),
         "expected_net_valid": bool(expected_net_valid),
         "expected_net_raw": float(expected_net_raw),
@@ -4727,6 +4997,192 @@ def _apply_trade_decision_model(
             if name in feature_values
         },
     }
+
+
+def _append_gate_trace(
+    entry: Dict[str, Any],
+    *,
+    stage: str,
+    reason: str,
+    triggered: bool,
+    blocking: bool,
+) -> None:
+    trace = entry.get("gate_trace")
+    if not isinstance(trace, list):
+        trace = []
+        entry["gate_trace"] = trace
+    trace.append(
+        {
+            "stage": stage,
+            "reason": reason,
+            "triggered": bool(triggered),
+            "blocking": bool(blocking),
+        }
+    )
+
+
+def _upstream_trade_gate_reasons(entry: Mapping[str, Any]) -> List[str]:
+    reasons: List[str] = []
+    coherence = entry.get("forecast_coherence") if isinstance(entry.get("forecast_coherence"), Mapping) else {}
+    confluence = entry.get("confluence") if isinstance(entry.get("confluence"), Mapping) else {}
+    if bool(coherence.get("triggered", False)):
+        reasons.append("forecast_coherence_gate")
+    if bool(confluence.get("triggered", False)):
+        reasons.append("confluence_gate")
+    return reasons
+
+
+def _apply_trade_decision_stage(
+    summary: Dict[str, Dict[str, Any]],
+    execution_contexts: Mapping[str, Mapping[str, Any]],
+    policy: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    for label, entry in summary.items():
+        residual_std = float(execution_contexts.get(label, {}).get("residual_std", DEFAULT_RESIDUAL_STD))
+        regime_state = str(entry.get("regime_state") or REGIME_NEUTRAL)
+        payload = _apply_trade_decision_model(
+            result=entry,
+            horizon_label=label,
+            regime_state=regime_state,
+            residual_std=residual_std,
+            policy=policy,
+            fee_bps=float(DEFAULT_FEE_BPS),
+            slippage_bps=float(DEFAULT_SLIPPAGE_BPS),
+        )
+        reason = str(payload.get("reason", ""))
+        if reason in {"disabled", "missing_model", "bad_model_shape"}:
+            entry["trade_decision"] = payload
+            continue
+        upstream_reasons = _upstream_trade_gate_reasons(entry)
+        if upstream_reasons:
+            payload["pre_upstream_gate_triggered"] = bool(payload.get("triggered", False))
+            payload["triggered"] = False
+            payload["blocked"] = True
+            payload["blocking_reason"] = ",".join(upstream_reasons)
+            payload["upstream_gate_reasons"] = list(upstream_reasons)
+            _append_gate_trace(
+                entry,
+                stage="trade_decision",
+                reason=payload["blocking_reason"],
+                triggered=True,
+                blocking=True,
+            )
+        else:
+            if bool(policy.get("replace_threshold_rule", True)):
+                entry["signal_ensemble"] = int(payload.get("proposed_signal_ensemble", entry.get("signal_ensemble", 0)))
+                entry["trade_action"] = str(payload.get("proposed_trade_action", entry.get("trade_action", "hold")))
+            if bool(payload.get("triggered", False)):
+                _append_gate_trace(
+                    entry,
+                    stage="trade_decision",
+                    reason="pass",
+                    triggered=True,
+                    blocking=False,
+                )
+            else:
+                reason = "threshold_or_envelope_veto"
+                midband = payload.get("midband_veto") if isinstance(payload.get("midband_veto"), Mapping) else {}
+                weak_band = payload.get("weak_band_veto") if isinstance(payload.get("weak_band_veto"), Mapping) else {}
+                if bool(midband.get("triggered", False)):
+                    reason = "midband_veto"
+                elif bool(weak_band.get("triggered", False)):
+                    reason = "weak_band_veto"
+                _append_gate_trace(
+                    entry,
+                    stage="trade_decision",
+                    reason=reason,
+                    triggered=True,
+                    blocking=True,
+                )
+        entry["trade_decision"] = payload
+    return summary
+
+
+def _apply_post_trade_gates(
+    summary: Dict[str, Dict[str, Any]],
+    *,
+    confidence_min: float,
+    abstention_policy: Mapping[str, Any],
+    uncertainty_policy: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    for entry in summary.values():
+        confidence_score = float(entry.get("confidence_score", 0.0))
+        effective_confidence_min = max(0.0, min(1.0, float(entry.get("confidence_min", confidence_min))))
+        if str(entry.get("trade_action", "hold")) != "hold" and confidence_score < effective_confidence_min:
+            entry["trade_action"] = "hold"
+            entry["signal_ensemble"] = 0
+            entry["confidence_filter_triggered"] = True
+            _append_gate_trace(
+                entry,
+                stage="confidence_filter",
+                reason="confidence_below_min",
+                triggered=True,
+                blocking=True,
+            )
+        else:
+            entry["confidence_filter_triggered"] = False
+
+        expected_value = float(entry.get("expected_value", 0.0))
+        abstention_expected_value, abstention_expected_value_source = _resolve_abstention_expected_value(
+            expected_value,
+            entry.get("trade_decision") if isinstance(entry.get("trade_decision"), Mapping) else None,
+        )
+        effective_abstention_policy = _resolve_abstention_policy_for_horizon(
+            abstention_policy,
+            horizon=_coerce_result_horizon(entry.get("horizon_hours")),
+            regime_state=str(entry.get("regime_state") or REGIME_NEUTRAL),
+        )
+        abstain, abstain_reason = _apply_abstention_policy(
+            trade_action=str(entry.get("trade_action", "hold")),
+            p_up=float(entry.get("p_up", 0.0)),
+            confidence_score=confidence_score,
+            expected_value=abstention_expected_value,
+            fee_bps=float(DEFAULT_FEE_BPS),
+            slippage_bps=float(DEFAULT_SLIPPAGE_BPS),
+            policy=effective_abstention_policy,
+        )
+        entry["abstention"] = {
+            "enabled": bool(effective_abstention_policy.get("enabled", False)),
+            "triggered": bool(abstain),
+            "reason": abstain_reason,
+            "expected_value_used": float(abstention_expected_value),
+            "expected_value_source": abstention_expected_value_source,
+        }
+        if abstain:
+            entry["trade_action"] = "hold"
+            entry["signal_ensemble"] = 0
+            _append_gate_trace(
+                entry,
+                stage="abstention",
+                reason=abstain_reason,
+                triggered=True,
+                blocking=True,
+            )
+
+        uncertainty_abstain, uncertainty_reason, uncertainty_payload = _apply_uncertainty_abstention(
+            trade_action=str(entry.get("trade_action", "hold")),
+            p_up_components=entry.get("p_up_components", {}),
+            horizon=_coerce_result_horizon(entry.get("horizon_hours")),
+            regime_state=str(entry.get("regime_state") or REGIME_NEUTRAL),
+            policy=uncertainty_policy,
+        )
+        entry["uncertainty"] = uncertainty_payload
+        if uncertainty_abstain:
+            entry["trade_action"] = "hold"
+            entry["signal_ensemble"] = 0
+            entry["abstention"] = {
+                "enabled": True,
+                "triggered": True,
+                "reason": uncertainty_reason,
+            }
+            _append_gate_trace(
+                entry,
+                stage="uncertainty",
+                reason=uncertainty_reason,
+                triggered=True,
+                blocking=True,
+            )
+    return summary
 
 
 def _resolve_regime_model_dirs_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -6324,7 +6780,7 @@ def _build_direction_output(
 
 def _load_prepared(dataset_path: Path, *, target_column: str, offline: bool = False) -> tuple:
     if offline:
-        return _load_prepared_offline(dataset_path)
+        return _load_prepared_offline(dataset_path, base_horizon=_base_horizon_for_target_column(target_column))
 
     prepared = prepare_data_for_signals(str(dataset_path), target_column=target_column)
     index = len(prepared.df_all) - 1
@@ -6336,7 +6792,20 @@ def _load_prepared(dataset_path: Path, *, target_column: str, offline: bool = Fa
     return prepared, index, close, ts_iso
 
 
-def _load_prepared_offline(dataset_path: Path) -> tuple[PreparedData, int, float, str]:
+def _base_horizon_for_target_column(target_column: str) -> float:
+    lowered = str(target_column).strip().lower()
+    if lowered == "ret_15m":
+        return 0.25
+    return 1.0
+
+
+def _periods_per_hour_for_base_horizon(base_horizon: float) -> int:
+    if float(base_horizon) >= 1.0:
+        return 1
+    return max(int(round(1.0 / float(base_horizon))), 1)
+
+
+def _load_prepared_offline(dataset_path: Path, *, base_horizon: float) -> tuple[PreparedData, int, float, str]:
     if not dataset_path.exists():
         raise FileNotFoundError(f"Dataset not found for offline preparation: {dataset_path}")
 
@@ -6361,13 +6830,17 @@ def _load_prepared_offline(dataset_path: Path) -> tuple[PreparedData, int, float
         raise RuntimeError("Offline dataset must include a 'close' feature column.")
 
     periods = len(df_features)
-    ts_index = pd.date_range(end=datetime.now(timezone.utc), periods=periods, freq="H")
+    expected_freq = pd.Timedelta(hours=float(base_horizon))
+    freq_alias = expected_freq if expected_freq != pd.Timedelta(hours=1) else "H"
+    ts_index = pd.date_range(end=datetime.now(timezone.utc), periods=periods, freq=freq_alias)
     df_features.insert(0, "ts", ts_index)
 
     prepared = prepare_data_for_signals_from_ohlcv(
         df_features,
         feature_names=feature_names,
         train_frac=0.7,
+        expected_freq=expected_freq,
+        periods_per_hour=_periods_per_hour_for_base_horizon(base_horizon),
     )
 
     index = len(prepared.df_all) - 1
@@ -6427,13 +6900,19 @@ def run_predictions(
     direction_output_policy: Mapping[str, Any] | None = None,
     latest_close: float | None = None,
     confidence_min: float = CONFIDENCE_MIN_DEFAULT,
+    confidence_min_by_horizon_regime: Mapping[float | int | str, Mapping[str, float]] | None = None,
     position_size_floor: float = POSITION_SIZE_FLOOR_DEFAULT,
     position_size_cap: float = POSITION_SIZE_CAP_DEFAULT,
     position_size_cap_by_horizon: Mapping[float | int | str, float] | None = None,
+    disabled_horizons: Sequence[float] | None = None,
 ) -> Dict[str, Dict[str, float | str | int]]:
     normalized_targets = sorted({_normalize_horizon_value(h) for h in targets})
+    disabled_horizon_set = {_normalize_horizon_value(h) for h in (disabled_horizons or [])}
+    if disabled_horizon_set:
+        normalized_targets = [h for h in normalized_targets if h not in disabled_horizon_set]
     if not normalized_targets:
         return {}
+    normalized_threshold_overrides = _normalize_threshold_overrides(thresholds_by_horizon)
 
     trend_payload = _resolve_trend_ignition_payload(trend_ignition)
     direction_fallback_policy = _resolve_direction_fallback_policy(direction_only_fallback)
@@ -6449,6 +6928,11 @@ def run_predictions(
     forecast_coherence_policy_resolved = _resolve_forecast_coherence_policy(forecast_coherence_policy)
     direction_output_policy_resolved = _resolve_direction_output_policy(direction_output_policy)
     confidence_min = max(0.0, min(1.0, float(confidence_min)))
+    confidence_min_by_horizon_regime_resolved = _normalize_horizon_regime_float_map(
+        confidence_min_by_horizon_regime,
+        minimum=0.0,
+        maximum=1.0,
+    )
     position_size_floor = max(0.0, float(position_size_floor))
     position_size_cap = max(position_size_floor, float(position_size_cap))
     position_size_cap_by_horizon_resolved = _normalize_horizon_float_map(
@@ -6611,7 +7095,7 @@ def run_predictions(
             horizon,
             p_up_min,
             ret_min,
-            thresholds_by_horizon,
+            normalized_threshold_overrides,
         )
         horizon_p_up = horizon_thresholds["p_up_min"]
         horizon_ret = horizon_thresholds["ret_min"]
@@ -6705,6 +7189,12 @@ def run_predictions(
             residual_std=residual_std,
             direction_signal=signal_dir_only,
         )
+        effective_confidence_min, confidence_min_source = _resolve_confidence_min_for_horizon(
+            confidence_min,
+            confidence_min_by_horizon_regime_resolved,
+            horizon=horizon,
+            regime_state=regime_state,
+        )
         effective_position_size_cap = _lookup_horizon_value(
             position_size_cap_by_horizon_resolved,
             horizon,
@@ -6712,7 +7202,7 @@ def run_predictions(
         )
         position_size = _compute_position_size(
             confidence_score,
-            confidence_min=confidence_min,
+            confidence_min=effective_confidence_min,
             size_floor=position_size_floor,
             size_cap=effective_position_size_cap,
         )
@@ -6775,7 +7265,8 @@ def run_predictions(
             ),
             "confidence_score": confidence_score,
             "position_size": position_size,
-            "confidence_min": confidence_min,
+            "confidence_min": effective_confidence_min,
+            "confidence_min_source": confidence_min_source,
             "position_size_cap": effective_position_size_cap,
             "p_up_components": signal.get("p_up_components", {}),
             "stop_loss": stop_loss_price,
@@ -6817,6 +7308,7 @@ def run_predictions(
                 "triggered": False,
             }),
             "volatility_flag": bool(signal.get("volatility_flag")),
+            "gate_trace": [],
         }
         probability_alignment_features = _derive_probability_alignment_features(
             close=close,
@@ -6886,15 +7378,6 @@ def run_predictions(
             result["stop_loss"] = updated_stop
             result["take_profit"] = updated_take
         result["target_range_overrides"] = overrides_payload
-        trade_decision_payload = _apply_trade_decision_model(
-            result=result,
-            regime_state=regime_state,
-            residual_std=residual_std,
-            policy=trade_decision_policy_resolved,
-            fee_bps=float(DEFAULT_FEE_BPS),
-            slippage_bps=float(DEFAULT_SLIPPAGE_BPS),
-        )
-        result["trade_decision"] = trade_decision_payload
         entry_price = float(result["entry_price"])
         stop_loss = float(result["stop_loss"])
         take_profit = float(result["take_profit"])
@@ -6912,55 +7395,20 @@ def run_predictions(
             trend_threshold=float(trend_payload.get("threshold")) if trend_payload else None,
         )
         result["direction_only_fallback"] = fallback_info
-        if result["trade_action"] != "hold" and confidence_score < confidence_min:
-            result["trade_action"] = "hold"
-            result["confidence_filter_triggered"] = True
-        else:
-            result["confidence_filter_triggered"] = False
         if fallback_triggered:
             pending_direction_fallback_ts = signal_ts
-
-        abstention_expected_value, abstention_expected_value_source = _resolve_abstention_expected_value(
-            expected_value,
-            result.get("trade_decision") if isinstance(result.get("trade_decision"), Mapping) else None,
-        )
-
-        abstain, abstain_reason = _apply_abstention_policy(
-            trade_action=str(result["trade_action"]),
-            p_up=p_up,
-            confidence_score=confidence_score,
-            expected_value=abstention_expected_value,
-            fee_bps=float(DEFAULT_FEE_BPS),
-            slippage_bps=float(DEFAULT_SLIPPAGE_BPS),
-            policy=abstention_policy_resolved,
-        )
+        result["trade_decision"] = {
+            "enabled": bool(trade_decision_policy_resolved.get("enabled", False)),
+            "triggered": False,
+            "reason": "pending_stage",
+        }
+        result["confidence_filter_triggered"] = False
         result["abstention"] = {
             "enabled": bool(abstention_policy_resolved.get("enabled", False)),
-            "triggered": bool(abstain),
-            "reason": abstain_reason,
-            "expected_value_used": float(abstention_expected_value),
-            "expected_value_source": abstention_expected_value_source,
+            "triggered": False,
+            "reason": "pending_stage",
         }
-        if abstain:
-            result["trade_action"] = "hold"
-            result["signal_ensemble"] = 0
-
-        uncertainty_abstain, uncertainty_reason, uncertainty_payload = _apply_uncertainty_abstention(
-            trade_action=str(result["trade_action"]),
-            p_up_components=result.get("p_up_components", {}),
-            horizon=horizon,
-            regime_state=regime_state,
-            policy=uncertainty_policy_resolved,
-        )
-        result["uncertainty"] = uncertainty_payload
-        if uncertainty_abstain:
-            result["trade_action"] = "hold"
-            result["signal_ensemble"] = 0
-            result["abstention"] = {
-                "enabled": True,
-                "triggered": True,
-                "reason": uncertainty_reason,
-            }
+        result["uncertainty"] = {"available": False, "reason": "pending_stage"}
 
         summary[label] = result
         execution_contexts[label] = {
@@ -6979,6 +7427,14 @@ def run_predictions(
 
     if confluence_policy_resolved.get("enabled"):
         summary = _apply_confluence_policy(summary, confluence_policy_resolved)
+
+    summary = _apply_trade_decision_stage(summary, execution_contexts, trade_decision_policy_resolved)
+    summary = _apply_post_trade_gates(
+        summary,
+        confidence_min=confidence_min,
+        abstention_policy=abstention_policy_resolved,
+        uncertainty_policy=uncertainty_policy_resolved,
+    )
 
     if execution_policy_resolved.get("enabled"):
         summary = _apply_execution_policy(summary, execution_contexts, execution_policy_resolved)
@@ -7049,6 +7505,8 @@ def write_summary(
 def _build_blocked_trade_analytics(summary: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
     status_counts: Dict[str, int] = {}
     reason_counts: Dict[str, int] = {}
+    gate_stage_counts: Dict[str, int] = {}
+    gate_reason_counts: Dict[str, int] = {}
     by_horizon: Dict[str, Dict[str, Any]] = {}
     blocked_total = 0
     ready_total = 0
@@ -7080,6 +7538,19 @@ def _build_blocked_trade_analytics(summary: Mapping[str, Mapping[str, Any]]) -> 
         horizon_payload["status_counts"][status] = horizon_payload["status_counts"].get(status, 0) + 1
         horizon_payload["reason_counts"][reason] = horizon_payload["reason_counts"].get(reason, 0) + 1
 
+        gate_trace = entry.get("gate_trace") if isinstance(entry.get("gate_trace"), list) else []
+        for gate_entry in gate_trace:
+            if not isinstance(gate_entry, Mapping) or not bool(gate_entry.get("triggered", False)):
+                continue
+            stage = str(gate_entry.get("stage") or "unknown")
+            gate_reason = str(gate_entry.get("reason") or "unknown")
+            gate_stage_counts[stage] = gate_stage_counts.get(stage, 0) + 1
+            gate_reason_counts[gate_reason] = gate_reason_counts.get(gate_reason, 0) + 1
+            horizon_gate_counts = horizon_payload.setdefault("gate_stage_counts", {})
+            horizon_gate_reasons = horizon_payload.setdefault("gate_reason_counts", {})
+            horizon_gate_counts[stage] = horizon_gate_counts.get(stage, 0) + 1
+            horizon_gate_reasons[gate_reason] = horizon_gate_reasons.get(gate_reason, 0) + 1
+
     return {
         "total_horizons": len(summary),
         "ready_total": ready_total,
@@ -7088,6 +7559,8 @@ def _build_blocked_trade_analytics(summary: Mapping[str, Mapping[str, Any]]) -> 
         "blocked_total": blocked_total,
         "status_counts": status_counts,
         "reason_counts": reason_counts,
+        "gate_stage_counts": gate_stage_counts,
+        "gate_reason_counts": gate_reason_counts,
         "by_horizon": by_horizon,
     }
 
@@ -7205,6 +7678,13 @@ def _build_trade_ready_monitoring_payload(predictions_payload: dict[str, Any], a
         request["position_size_cap_by_horizon"] = {
             _format_horizon_label(float(key)): float(value)
             for key, value in sorted(position_size_cap_by_horizon.items(), key=lambda item: float(item[0]))
+        }
+    confidence_min_by_horizon_regime = getattr(args, "confidence_min_by_horizon_regime", None)
+    if isinstance(confidence_min_by_horizon_regime, Mapping) and confidence_min_by_horizon_regime:
+        request["confidence_min_by_horizon_regime"] = {
+            _format_horizon_label(float(horizon)): {str(regime): float(value) for regime, value in regimes.items()}
+            for horizon, regimes in sorted(confidence_min_by_horizon_regime.items(), key=lambda item: float(item[0]))
+            if isinstance(regimes, Mapping)
         }
     data_quality_cfg = getattr(args, "data_quality", None)
     if isinstance(data_quality_cfg, Mapping):
@@ -7968,9 +8448,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             direction_output_policy=direction_output_cfg,
             latest_close=latest_close,
             confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
+            confidence_min_by_horizon_regime=getattr(args, "confidence_min_by_horizon_regime", None),
             position_size_floor=float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),
             position_size_cap=float(getattr(args, "position_size_cap", POSITION_SIZE_CAP_DEFAULT)),
             position_size_cap_by_horizon=getattr(args, "position_size_cap_by_horizon", None),
+            disabled_horizons=getattr(args, "disabled_horizons", None),
         )
     except Exception as exc:  # pragma: no cover - runtime safety
         print(f"Prediction step failed: {exc}", file=sys.stderr)

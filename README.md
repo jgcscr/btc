@@ -136,12 +136,15 @@ The top-level payload also includes `execution_prior_summary`, which aggregates 
 The top-level payload now also includes:
 
 - `blocked_trade_analytics`, which counts ready, pullback-waiting, bias-only, and rejected horizons plus the dominant rejection reasons.
+- `blocked_trade_analytics.gate_stage_counts` and `blocked_trade_analytics.gate_reason_counts`, which summarize where horizons were blocked across trade-decision, abstention, coherence, and confluence stages.
 - `degradation_monitoring`, which evaluates recent snapshot history as a proxy-health check and raises per-horizon alarms when ready ratio, blocked ratio, confidence, or expected net drift beyond configured floors.
 - `prompt_ready_summary.operator_summary_compact`, which is the operator-facing digest of market bias, preferred horizon, recommended action, primary blocker, supporting horizons, and caution flags.
 
 `execution_plan.stop_management` records whether stop guardrails widened, capped, or swapped the selected stop candidate to keep the stop width inside the configured ATR band.
 
 `probability_calibration` records the requested horizon/regime calibration key, the key actually applied, whether runtime fell back to the base horizon calibration, and any `forecast_alignment_guard` fallback used when a regime-specific calibration would have flipped a raw probability that already agreed with both forecast branches.
+
+`trade_decision.threshold_source`, `confidence_min_source`, and `abstention.reason` now make the applied horizon/regime policy resolution explicit inside each horizon payload.
 
 `direction_output` is a user-facing direction payload. It can apply a separate direction-only calibration/remap, expose the probability used for display, and emit `neutral` inside the configured band without changing `trade_action` or the internal `direction_next` used by policy gates.
 
@@ -153,12 +156,21 @@ The top-level payload now also includes:
 
 `artifacts/monitoring/latest.json` also includes local feature alignment diagnostics under `request.local_feature_overrides.feature_alignment`, source freshness under `request.local_feature_overrides.source_freshness`, and feature-coverage enforcement results under `request.local_feature_overrides.feature_coverage`.
 
+Current local conservative validation snapshot in this codespace:
+
+- deployed shared bundle remains `artifacts/monitoring/reliability_promotion_deploy_manifest.json` run `20260317T014743Z`
+- latest local conservative refresh was generated at `2026-03-21T05:10:33.769700+00:00`
+- feature coverage is `ok = true` with zero effective zero-imputed required columns
+- preferred horizon is `8h`, `tradeable = true`, `recommended_operator_action = enter_now`
+- `8h` is `ready` long, while `12h` is `bias_only_ready` because `abstention.reason = edge_over_fee_below_min`
+
 Notes:
 
 - If `artifacts/models/target_ranges/metadata.json` exists, `run_refresh_and_predict` auto-enables target-range inference for supported horizons.
 - The default config currently requests targets `0.25,1,4,8,12`, so live output includes a 15m horizon in addition to hourly horizons.
 - `configs/run_refresh_and_predict.default.yaml` is the trusted post-fix runtime default documented in `docs/trade_decision_post_fix_trust_basis_20260319.md`.
 - `configs/run_refresh_and_predict.live_conservative.yaml` is the approved initial live trading profile documented in `docs/live_trading_rollout_20260320.md`.
+- the live conservative profile in this workspace now also carries scoped `8h@trend_ignition` overrides for trade-decision threshold, confidence minimum, and abstention hold-band while keeping the same deployed shared model/calibration bundle.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml` remains the cadence/shadow wrapper profile and is still used by `scripts/run_cadence.sh` because it writes artifacts directly.
 - Live inference now resolves the best available versioned model artifact within a model family before loading it.
 - The current deployed bundle is recorded in `artifacts/monitoring/reliability_promotion_deploy_manifest.json`. In the current workspace it points to run `20260317T014743Z` and variant `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`.
@@ -203,10 +215,17 @@ Prediction configs:
 - `configs/run_refresh_and_predict.default.yaml` - promoted runtime policy with trade-decision, confluence, feature-coverage, adaptive-threshold, regime-model, target-range, and execution-policy blocks.
 - `configs/run_refresh_and_predict.default.yaml` now also carries a `forecast_coherence_policy` block with consensus-relief controls for low-edge `p_up` conflicts and an execution-policy `coherence_weighting` block for weighted bias voting.
 - The default and live conservative profiles now also define horizon/regime uncertainty overrides, weighted horizon bias voting, minimum bias-alignment thresholds, short-term arbitration thresholds, pullback-quality scoring, disagreement-severity guards, regime-specific entry-mode templates, and snapshot-based degradation monitoring.
-- `configs/run_refresh_and_predict.live_conservative.yaml` - approved initial live trading profile with horizon-specific size caps and a stricter confidence floor.
+- `configs/run_refresh_and_predict.live_conservative.yaml` - approved initial live trading profile with horizon-specific size caps, a stricter confidence floor, and scoped horizon/regime overrides under `trade_decision_policy.thresholds_by_horizon_regime`, `confidence_min_by_horizon_regime`, and `abstention_policy.thresholds_by_horizon_regime`.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml` - shadow/cadence profile that mirrors the promoted policy while writing artifacts by default.
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml` - shadow-only chop-regime suppression candidate used by the comparison cadence.
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`
+
+Validation rules now enforced at runtime:
+
+- unknown top-level runtime config keys are rejected instead of being silently ignored
+- unknown direction-model weight override keys raise immediately
+- malformed or duplicate normalized threshold entries raise immediately
+- `disabled_horizons` is supported as an explicit config knob for suppressing horizons without editing target lists
 
 Reliability configs:
 
@@ -375,6 +394,23 @@ Keep workflow running when promotion gate blocks promotion:
 ```
 
 With `--continue-on-promotion-fail`, the workflow can keep running and still write downstream summary artifacts even when the promotion gate blocks promotion.
+
+Train/serve feature-parity workflow:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.audit_feature_parity \
+  --dataset-path artifacts/datasets/btc_features_multi_horizon_splits.npz \
+  --features-path artifacts/tmp/parity_features_1h.parquet \
+  --target-column ret_1h
+```
+
+This uses the saved scaler statistics and timestamps inside the dataset artifact to compare the saved training feature subset against live-style prepared features.
+
+Feature engineering and offline preparation notes:
+
+- shared hourly feature engineering now lives in `src/trading/feature_engineering.py` and is used by both dataset builders and runtime preparation
+- `prepare_data_for_signals` accepts parquet feature sources in addition to CSV
+- offline preparation now supports sub-hour cadences by passing the expected feature frequency and periods-per-hour into signal preparation
 
 Promotion and deploy behavior:
 

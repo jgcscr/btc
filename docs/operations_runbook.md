@@ -29,12 +29,20 @@ The script resolves the latest trustworthy run by reading `artifacts/reliability
 Recommended runtime policy reference:
 
 - `configs/run_refresh_and_predict.default.yaml` is the trusted post-fix operating default.
-- `configs/run_refresh_and_predict.live_conservative.yaml` is the conservative live rollout profile with horizon-specific size caps.
+- `configs/run_refresh_and_predict.live_conservative.yaml` is the conservative live rollout profile with horizon-specific size caps plus scoped `8h@trend_ignition` overrides for trade-decision threshold, confidence minimum, and abstention hold-band.
 - `docs/trade_decision_post_fix_trust_basis_20260319.md` is the operator-facing record of the current trust basis and validation workflow.
 - `docs/live_trading_rollout_20260320.md` is the operator-facing live rollout policy and monitoring guide.
 - `docs/live_operator_checklist_20260320.md` is the shortest pre-run and post-run operator checklist for live use.
 - `docs/trade_decision_8h_hardening_memo_20260320.md` records the current `8h` caution stance and the safest next hardening direction.
 - `docs/agent_system_handoff_20260320.md` is the new-agent handoff for safely running the system end to end.
+
+Current codespace validation state:
+
+- deployed shared bundle still points to run `20260317T014743Z`
+- latest local conservative refresh was generated at `2026-03-21T05:10:33.769700+00:00`
+- feature coverage is `ok = true` and source freshness lag is `0.0h`
+- `8h` is currently `ready` long and is the preferred horizon
+- `12h` is currently `bias_only_ready` with `abstention.reason = edge_over_fee_below_min`
 
 ## Exact Commands By Cadence
 
@@ -124,6 +132,26 @@ Interpretation rules:
 - do not interpret score-only differences as operational changes unless the summary starts showing operational or decision-state deltas.
 
 Direct execution of `./scripts/run_cadence.sh <cadence>` is not supported in this workspace because the script is not executable as checked in. Invoke it through `bash`.
+
+## Runtime Validation Rules
+
+Before trusting a config edit or a new local profile, expect these fail-fast checks:
+
+- unknown runtime config keys are rejected
+- unknown direction-model weight override keys are rejected
+- malformed or duplicate normalized threshold entries are rejected
+- stale direction model keys such as removed model families must be deleted from profile weight maps before the run will start
+
+Train/serve parity can be checked with:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.audit_feature_parity \
+  --dataset-path artifacts/datasets/btc_features_multi_horizon_splits.npz \
+  --features-path artifacts/tmp/parity_features_1h.parquet \
+  --target-column ret_1h
+```
+
+This is the preferred check before trusting a local-feature override path for live-style refreshes.
 
 ## Promotion Handoff And Gate Alignment
 
@@ -230,9 +258,11 @@ For the next weekly runtime run after deployment `20260317T014743Z`, inspect the
 
 - `artifacts/predictions/latest.json` now includes `blocked_trade_analytics`, `degradation_monitoring`, and `prompt_ready_summary.operator_summary_compact` at the top level.
 - `blocked_trade_analytics` is the quickest way to see whether the current snapshot is being blocked mainly by forecast coherence, short-term disagreement, pullback quality, or baseline risk/reward guards.
+- `blocked_trade_analytics.gate_stage_counts` and `gate_reason_counts` show which gating stage actually blocked the stack most often in the latest snapshot.
 - `degradation_monitoring` is snapshot-history based rather than realized-PnL based. Treat it as an operational posture alarm, not as a substitute for trade replay or live outcome review.
 - `operator_summary_compact` is the fastest operator-facing digest: it reports market bias, preferred horizon, recommended action, primary blocker, supporting horizons, and caution flags.
 - `artifacts/monitoring/latest.json` mirrors these top-level prediction summaries so operators can inspect them from one monitoring payload.
+- Per-horizon `trade_decision.threshold_source`, `confidence_min_source`, and `abstention.reason` now expose which horizon/regime override was actually applied.
 
 Replay workflow for cached hourly bars:
 
