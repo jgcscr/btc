@@ -1,5 +1,8 @@
 name: Cadence Operations
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -19,11 +22,13 @@ on:
 
 jobs:
   run-cadence:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 360
     env:
       PYTHONUNBUFFERED: '1'
       PYTHON_BIN: python
+      CADENCE_ARTIFACTS_ROOT_URI: ${{ vars.CADENCE_ARTIFACTS_ROOT_URI != '' && vars.CADENCE_ARTIFACTS_ROOT_URI || '/workspaces/btc/artifacts' }}
+      CADENCE_DEPLOY_MANIFEST_URI: ${{ vars.CADENCE_DEPLOY_MANIFEST_URI }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,6 +61,47 @@ jobs:
             esac
           fi
           echo "cadence=$cadence" >> "$GITHUB_OUTPUT"
+
+      - name: Validate local artifact root
+        if: ${{ env.CADENCE_ARTIFACTS_ROOT_URI == '' }}
+        run: |
+          echo "CADENCE_ARTIFACTS_ROOT_URI must be set to a local filesystem path visible to the self-hosted runner." >&2
+          exit 1
+
+      - name: Reject remote artifact URIs
+        if: ${{ startsWith(env.CADENCE_ARTIFACTS_ROOT_URI, 'gs://') || startsWith(env.CADENCE_DEPLOY_MANIFEST_URI, 'gs://') }}
+        run: |
+          echo "This workflow is configured for self-hosted local-only cadence execution." >&2
+          echo "Use a local filesystem path for CADENCE_ARTIFACTS_ROOT_URI and do not configure gs:// artifact URIs here." >&2
+          exit 1
+
+      - name: Preflight local cadence artifacts
+        id: preflight
+        run: |
+          args=(--artifacts-root-uri "${CADENCE_ARTIFACTS_ROOT_URI}" --validate-only)
+          if [[ -n "${CADENCE_DEPLOY_MANIFEST_URI}" ]]; then
+            args+=(--manifest-uri "${CADENCE_DEPLOY_MANIFEST_URI}")
+          fi
+          python -m src.scripts.bootstrap_cadence_artifacts "${args[@]}" | tee cadence_preflight.json
+          manifest_uri=$(python -c "import json, pathlib; payload=json.loads(pathlib.Path('cadence_preflight.json').read_text(encoding='utf-8')); print(payload.get('manifest_uri', ''))")
+          run_id=$(python -c "import json, pathlib; payload=json.loads(pathlib.Path('cadence_preflight.json').read_text(encoding='utf-8')); print(payload.get('run_id', ''))")
+          echo "manifest_uri=${manifest_uri}" >> "$GITHUB_OUTPUT"
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Log resolved cadence inputs
+        run: |
+          echo "Artifact root: ${CADENCE_ARTIFACTS_ROOT_URI}"
+          echo "Deploy manifest: ${{ steps.preflight.outputs.manifest_uri }}"
+          echo "Trustworthy run id: ${{ steps.preflight.outputs.run_id }}"
+
+      - name: Bootstrap cadence artifacts
+        if: ${{ env.CADENCE_ARTIFACTS_ROOT_URI != '' }}
+        run: |
+          args=(--artifacts-root-uri "${CADENCE_ARTIFACTS_ROOT_URI}")
+          if [[ -n "${CADENCE_DEPLOY_MANIFEST_URI}" ]]; then
+            args+=(--manifest-uri "${CADENCE_DEPLOY_MANIFEST_URI}")
+          fi
+          python -m src.scripts.bootstrap_cadence_artifacts "${args[@]}"
 
       - name: Run cadence
         run: |

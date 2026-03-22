@@ -58,6 +58,28 @@ raise SystemExit(1)
 PY
 }
 
+require_latest_trustworthy_run() {
+  local run_id=""
+  if ! run_id="$(find_latest_trustworthy_run)"; then
+    cat >&2 <<'EOF'
+No trustworthy reliability run found under artifacts/reliability.
+
+Cadence requires prebuilt reliability artifacts that are not tracked in git.
+Restore the deployed artifacts bundle before running cadence.
+
+For GitHub Actions, add a bootstrap step that restores artifacts/ from durable storage
+before invoking scripts/run_cadence.sh.
+EOF
+    return 1
+  fi
+
+  if [[ -z "$run_id" ]]; then
+    echo "Resolved empty trustworthy reliability run id" >&2
+    return 1
+  fi
+  printf '%s\n' "$run_id"
+}
+
 run_predictions() {
   local run_id="$1"
   echo "Using trustworthy run: $run_id"
@@ -99,29 +121,21 @@ CADENCE="$1"
 
 case "$CADENCE" in
   daily)
-    RUN_ID="$(find_latest_trustworthy_run)"
-    if [[ -z "$RUN_ID" ]]; then
-      echo "No trustworthy reliability run found under artifacts/reliability" >&2
-      exit 1
-    fi
+    RUN_ID="$(require_latest_trustworthy_run)"
     run_predictions "$RUN_ID"
     ;;
   weekly)
     run_reliability "configs/reliability_workflow.runtime.yaml"
-    RUN_ID="$(find_latest_trustworthy_run)"
+    RUN_ID="$(require_latest_trustworthy_run)"
     run_predictions "$RUN_ID"
     ;;
   monthly)
     run_reliability "configs/reliability_workflow.default.yaml"
-    RUN_ID="$(find_latest_trustworthy_run)"
+    RUN_ID="$(require_latest_trustworthy_run)"
     run_predictions "$RUN_ID"
     ;;
   shadow)
-    RUN_ID="$(find_latest_trustworthy_run)"
-    if [[ -z "$RUN_ID" ]]; then
-      echo "No trustworthy reliability run found under artifacts/reliability" >&2
-      exit 1
-    fi
+    RUN_ID="$(require_latest_trustworthy_run)"
     run_shadow_comparison "$RUN_ID"
     ;;
   *)

@@ -312,3 +312,42 @@ For shadow cadence reviews, also inspect:
 GitHub Codespaces containers are not a reliable place to depend on `cron` or `systemd` for persistent scheduling. Use the GitHub Actions workflow for unattended cadence execution.
 
 GitHub Actions also requires the underlying model and dataset artifacts to be available on the runner. This workflow assumes the repository checkout already contains the required files or that they are restored by your environment before the cadence step runs.
+
+Current GitHub Actions bootstrap path:
+
+- the workflow is now intentionally self-hosted only
+- install a self-hosted GitHub Actions runner on the same machine or server that already has the cadence artifacts
+- set repository variable `CADENCE_ARTIFACTS_ROOT_URI` to the local filesystem path that mirrors the repository `artifacts/` tree on that runner
+- optionally set `CADENCE_DEPLOY_MANIFEST_URI` if the deploy manifest is not at `monitoring/reliability_promotion_deploy_manifest.json` under that root
+- the workflow first runs a preflight validation against that local path and fails before cadence if the manifest or required summary/deployed files are missing
+- the workflow runs `python -m src.scripts.bootstrap_cadence_artifacts` before `scripts/run_cadence.sh`, which restores the deployed manifest, the selected trustworthy run summary, and the currently deployed model/monitoring files into the local checkout
+- `gs://` artifact URIs are intentionally rejected by this workflow variant; use only local filesystem paths visible to the self-hosted runner
+
+Self-hosted runner setup helper:
+
+- use `scripts/setup_self_hosted_runner.sh` to download and configure the Linux x64 runner on the local machine once you have a repository registration token
+- the script accepts `--repo`, `--token`, `--dir`, `--name`, `--labels`, `--replace`, and `--install-service`
+- after the runner is online, set `CADENCE_ARTIFACTS_ROOT_URI` in GitHub repository variables to the local artifacts path visible to that runner if you need to override the default local path
+
+## Session-Bound Runner Warning
+
+The runner currently configured in a Codespaces or dev-container session is not durable by default:
+
+- if you start the runner with `./run.sh`, it only lives for the lifetime of that shell or background process
+- if the container restarts, is rebuilt, or goes idle long enough to be recycled, the runner stops and GitHub will show it as offline
+- this is acceptable for ad hoc manual workflow runs, but it is not a reliable foundation for unattended scheduled cadence execution
+
+## Durable Runner Recommendation
+
+For stable unattended cadence operation, prefer a non-ephemeral self-hosted host:
+
+- a small VM, always-on workstation, or local server with a persistent filesystem
+- install the runner outside the repository checkout, for example under `$HOME/actions-runner-btc`
+- point the workflow at the persistent local artifact tree, or keep the repository and `artifacts/` tree on the same host path permanently
+- run the runner under the host's service manager so it comes back after reboot
+
+If you stay in Codespaces for now, treat the runner as temporary and re-check these before trusting schedule execution:
+
+- the runner still shows online in GitHub
+- `/workspaces/btc/artifacts` still exists on the runner host
+- the preflight step resolves the expected manifest path and trustworthy run id before cadence starts

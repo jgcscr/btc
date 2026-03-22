@@ -450,6 +450,12 @@ The GitHub Actions workflow supports manual dispatch plus three UTC cadences:
 - weekly on Monday at `02:30`
 - monthly on day 1 at `03:45`
 
+Self-hosted runner note:
+
+- the cadence workflow is now intended to run on a self-hosted runner with direct access to the local `artifacts/` tree
+- in ephemeral environments such as Codespaces containers, a runner started with `./run.sh` is session-bound and stops when the container restarts
+- for durable unattended cadence execution, move the runner to a non-ephemeral host with a persistent filesystem and service manager
+
 Shadow comparison workflow:
 
 - `src.scripts.compare_live_profile_snapshots` compares two archived `artifacts/predictions/latest.json` snapshots and classifies differences as operational, decision-state-only, or score-only.
