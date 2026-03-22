@@ -80,9 +80,17 @@ EOF
   printf '%s\n' "$run_id"
 }
 
+ensure_runtime_directories() {
+  mkdir -p \
+    data/spot_klines \
+    artifacts/predictions \
+    artifacts/monitoring
+}
+
 run_predictions() {
   local run_id="$1"
   echo "Using trustworthy run: $run_id"
+  ensure_runtime_directories
   "$PYTHON_BIN" -m src.scripts.run_refresh_and_predict \
     --config configs/run_refresh_and_predict.shadow_simplified.yaml \
     --targets 0.25,1,4,8,12 \
@@ -94,6 +102,7 @@ run_predictions() {
 run_shadow_comparison() {
   local reliable_run_id="$1"
   echo "Using trustworthy run for shadow comparison: $reliable_run_id"
+  ensure_runtime_directories
   "$PYTHON_BIN" -m src.scripts.run_shadow_profile_comparison \
     --lhs-config configs/run_refresh_and_predict.shadow_simplified.yaml \
     --rhs-config configs/run_refresh_and_predict.shadow_chop_suppression.yaml \
