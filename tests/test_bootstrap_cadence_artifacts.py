@@ -12,6 +12,17 @@ from src.scripts.bootstrap_cadence_artifacts import (
 
 
 class BootstrapCadenceArtifactsTests(unittest.TestCase):
+    def test_validate_rejects_remote_artifact_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir) / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+
+            with self.assertRaisesRegex(ValueError, "local filesystem path"):
+                validate_cadence_artifacts(
+                    artifacts_root_uri="gs://btc-artifacts",
+                    repo_root=repo_root,
+                )
+
     def test_validate_reports_ok_when_required_local_artifacts_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -144,4 +155,49 @@ class BootstrapCadenceArtifactsTests(unittest.TestCase):
             self.assertTrue((repo_root / "artifacts" / "models" / "calibrated_thresholds_merged.json").exists())
             self.assertTrue((repo_root / "artifacts" / "models" / "platt_calibration.json").exists())
             self.assertTrue((repo_root / "artifacts" / "models" / "trade_decision_model.json").exists())
+            self.assertTrue((repo_root / "artifacts" / "models" / "lstm_dir1h_v1" / "model.keras").exists())
+
+    def test_bootstrap_replaces_existing_models_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            remote_artifacts = root / "remote_artifacts"
+            repo_root = root / "repo"
+            summary_dir = remote_artifacts / "reliability" / "20260317T014743Z" / "summary"
+            monitoring_dir = remote_artifacts / "monitoring"
+            models_dir = remote_artifacts / "models"
+
+            summary_dir.mkdir(parents=True, exist_ok=True)
+            monitoring_dir.mkdir(parents=True, exist_ok=True)
+            models_dir.mkdir(parents=True, exist_ok=True)
+            (repo_root / "artifacts" / "models" / "stale_dir1h_v9").mkdir(parents=True, exist_ok=True)
+            (repo_root / "artifacts" / "models" / "stale_dir1h_v9" / "model.keras").write_text(
+                "stale",
+                encoding="utf-8",
+            )
+
+            (summary_dir / "edge_trustworthiness.json").write_text(
+                json.dumps({"edge_trustworthy": True}),
+                encoding="utf-8",
+            )
+            (summary_dir / "calibrated_thresholds.json").write_text(
+                json.dumps({"1": {"threshold": 0.55}}),
+                encoding="utf-8",
+            )
+            (summary_dir / "platt_calibration.json").write_text(
+                json.dumps({"1": {"a": 1.0, "b": 0.0}}),
+                encoding="utf-8",
+            )
+            (monitoring_dir / "reliability_promotion_deploy_manifest.json").write_text(
+                json.dumps({"run_id": "20260317T014743Z", "deployed_files": {}}),
+                encoding="utf-8",
+            )
+            (models_dir / "lstm_dir1h_v1").mkdir(parents=True, exist_ok=True)
+            (models_dir / "lstm_dir1h_v1" / "model.keras").write_text("fresh", encoding="utf-8")
+
+            bootstrap_cadence_artifacts(
+                artifacts_root_uri=str(remote_artifacts),
+                repo_root=repo_root,
+            )
+
+            self.assertFalse((repo_root / "artifacts" / "models" / "stale_dir1h_v9").exists())
             self.assertTrue((repo_root / "artifacts" / "models" / "lstm_dir1h_v1" / "model.keras").exists())

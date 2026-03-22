@@ -69,10 +69,10 @@ jobs:
           exit 1
 
       - name: Reject remote artifact URIs
-        if: ${{ startsWith(env.CADENCE_ARTIFACTS_ROOT_URI, 'gs://') || startsWith(env.CADENCE_DEPLOY_MANIFEST_URI, 'gs://') }}
+        if: ${{ contains(env.CADENCE_ARTIFACTS_ROOT_URI, '://') || contains(env.CADENCE_DEPLOY_MANIFEST_URI, '://') }}
         run: |
           echo "This workflow is configured for self-hosted local-only cadence execution." >&2
-          echo "Use a local filesystem path for CADENCE_ARTIFACTS_ROOT_URI and do not configure gs:// artifact URIs here." >&2
+          echo "Use local filesystem paths for CADENCE_ARTIFACTS_ROOT_URI and CADENCE_DEPLOY_MANIFEST_URI; remote URIs are not supported here." >&2
           exit 1
 
       - name: Preflight local cadence artifacts

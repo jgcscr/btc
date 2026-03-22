@@ -320,7 +320,7 @@ Current GitHub Actions bootstrap path:
 - optionally set `CADENCE_DEPLOY_MANIFEST_URI` if the deploy manifest is not at `monitoring/reliability_promotion_deploy_manifest.json` under that root
 - the workflow first runs a preflight validation against that local path and fails before cadence if the manifest or required summary/deployed files are missing
 - the workflow runs `python -m src.scripts.bootstrap_cadence_artifacts` before `scripts/run_cadence.sh`, which restores the deployed manifest, the selected trustworthy run summary, the manifest-listed deployed files, and the full `artifacts/models` tree into the local checkout
-- `gs://` artifact URIs are intentionally rejected by this workflow variant; use only local filesystem paths visible to the self-hosted runner
+- remote artifact URIs are intentionally rejected by this workflow variant; use only local filesystem paths visible to the self-hosted runner
 
 Self-hosted runner setup helper:
 

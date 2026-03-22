@@ -467,7 +467,7 @@ Self-hosted runner note:
 - the cadence workflow is now intended to run on a self-hosted runner with direct access to the local `artifacts/` tree
 - in ephemeral environments such as Codespaces containers, a runner started with `./run.sh` is session-bound and stops when the container restarts
 - for durable unattended cadence execution, move the runner to a non-ephemeral host with a persistent filesystem and service manager
-- the workflow preflights the local artifact root, rejects `gs://` URIs, then runs `python -m src.scripts.bootstrap_cadence_artifacts` before invoking `scripts/run_cadence.sh`
+- the workflow preflights the local artifact root, rejects remote artifact URIs, then runs `python -m src.scripts.bootstrap_cadence_artifacts` before invoking `scripts/run_cadence.sh`
 - `src.scripts.bootstrap_cadence_artifacts` restores the deploy manifest, the selected trustworthy reliability summary, manifest-listed deployed files, and the full `artifacts/models` tree into the checked-out workspace
 - `scripts/setup_self_hosted_runner.sh` is the checked-in helper for installing and configuring the Linux x64 self-hosted runner once a repository registration token has been issued
 
