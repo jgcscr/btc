@@ -41,6 +41,13 @@ def _copy_from_uri(source_uri: str, target_path: Path) -> None:
             cleanup()
 
 
+def _copy_local_directory(source_dir: Path, target_dir: Path) -> None:
+    if not source_dir.exists() or not source_dir.is_dir():
+        raise FileNotFoundError(f"Source directory missing: {source_dir}")
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
+
+
 def _load_json_from_uri(source_uri: str) -> Dict[str, Any]:
     local_source, cleanup = resolve_to_local(source_uri)
     try:
@@ -84,6 +91,7 @@ def validate_cadence_artifacts(
 
     required_sources = {
         "manifest": resolved_manifest_uri,
+        "models_root": join_uri(artifacts_root_uri, "models"),
         "edge_trustworthiness": join_uri(
             artifacts_root_uri,
             f"reliability/{run_id}/summary/edge_trustworthiness.json",
@@ -161,6 +169,11 @@ def bootstrap_cadence_artifacts(
     manifest_target = repo_root / "artifacts" / "monitoring" / "reliability_promotion_deploy_manifest.json"
     _copy_from_uri(resolved_manifest_uri, manifest_target)
     restored.append(str(manifest_target))
+
+    models_source_dir = Path(join_uri(artifacts_root_uri, "models"))
+    models_target_dir = repo_root / "artifacts" / "models"
+    _copy_local_directory(models_source_dir, models_target_dir)
+    restored.append(str(models_target_dir))
 
     for _, target in _required_summary_targets(run_id, repo_root).items():
         relative = target.relative_to(repo_root / "artifacts").as_posix()

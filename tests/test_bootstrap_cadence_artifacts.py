@@ -19,9 +19,11 @@ class BootstrapCadenceArtifactsTests(unittest.TestCase):
             repo_root = root / "repo"
             summary_dir = remote_artifacts / "reliability" / "20260317T014743Z" / "summary"
             monitoring_dir = remote_artifacts / "monitoring"
+            models_dir = remote_artifacts / "models"
 
             summary_dir.mkdir(parents=True, exist_ok=True)
             monitoring_dir.mkdir(parents=True, exist_ok=True)
+            models_dir.mkdir(parents=True, exist_ok=True)
             repo_root.mkdir(parents=True, exist_ok=True)
 
             (summary_dir / "edge_trustworthiness.json").write_text(
@@ -38,6 +40,10 @@ class BootstrapCadenceArtifactsTests(unittest.TestCase):
             )
             (monitoring_dir / "calibrated_thresholds_last_deployable.json").write_text(
                 json.dumps({"1": {"threshold": 0.55}}),
+                encoding="utf-8",
+            )
+            (models_dir / "direction_output_isotonic_1h.json").write_text(
+                json.dumps({"calibration": "ok"}),
                 encoding="utf-8",
             )
             (monitoring_dir / "reliability_promotion_deploy_manifest.json").write_text(
@@ -97,6 +103,9 @@ class BootstrapCadenceArtifactsTests(unittest.TestCase):
                 json.dumps({"model": "ok"}),
                 encoding="utf-8",
             )
+            model_family_dir = models_dir / "lstm_dir1h_v1"
+            model_family_dir.mkdir(parents=True, exist_ok=True)
+            (model_family_dir / "model.keras").write_text("stub", encoding="utf-8")
 
             manifest = {
                 "run_id": "20260317T014743Z",
@@ -135,3 +144,4 @@ class BootstrapCadenceArtifactsTests(unittest.TestCase):
             self.assertTrue((repo_root / "artifacts" / "models" / "calibrated_thresholds_merged.json").exists())
             self.assertTrue((repo_root / "artifacts" / "models" / "platt_calibration.json").exists())
             self.assertTrue((repo_root / "artifacts" / "models" / "trade_decision_model.json").exists())
+            self.assertTrue((repo_root / "artifacts" / "models" / "lstm_dir1h_v1" / "model.keras").exists())
