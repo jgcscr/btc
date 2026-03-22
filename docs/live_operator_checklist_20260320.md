@@ -26,27 +26,23 @@ The following artifacts are shadow-only diagnostics and are not live trade-autho
 
 Use them to judge whether the chop-suppression candidate is drifting operationally from `shadow_simplified`, not to override the current live conservative execution state.
 
-## Latest Fresh Conservative Snapshot
+## Current Snapshot Discipline
 
-Fresh run used for this checklist:
+Do not trust a hardcoded snapshot summary in this document.
 
-- generated at `2026-03-21T05:10:33.769700+00:00`
+After each fresh conservative run, read the current state directly from:
 
-Current operator-facing state:
+- `artifacts/predictions/latest.json`
+- `artifacts/monitoring/latest.json`
+- `artifacts/monitoring/trade_ready_summary.json` when that run path refreshed artifact-writing summaries
 
-- feature coverage: `ok = true`
-- directional bias: bullish across the mid-term stack
-- `1h`: rejected by `insufficient_mfe_headroom`
-- `4h`: rejected by `insufficient_mfe_headroom`
-- `8h`: `ready`, side `long`, `position_size = 0.0025482643209240163`, `position_size_cap = 0.20`, `confidence_min_source = 8h@trend_ignition`
-- `12h`: `bias_only_ready`, `trade_action = hold`, `abstention.reason = edge_over_fee_below_min`
+Minimum fields to confirm before acting:
 
-Practical reading:
-
-- keep the bullish bias,
-- the current model-approved live path is the `8h` setup,
-- do not upsize the `8h` trade beyond the configured `0.20` cap,
-- do not substitute the `12h` bias-only setup for the ready `8h` setup while `12h` remains blocked by `edge_over_fee_below_min`.
+- top-level `generated_at` is recent enough for the decision you are about to make
+- `request.local_feature_overrides.feature_coverage.ok = true`
+- source freshness remains acceptable in `request.local_feature_overrides.source_freshness`
+- `prompt_ready_summary.operator_summary_compact` matches the preferred horizon and recommended action you intend to follow
+- per-horizon `trade_action`, `execution_plan.status`, `execution_plan.reason`, `position_size_cap`, `confidence_min_source`, and `abstention.reason` support the same interpretation
 
 ## Pre-Run Checks
 
@@ -94,17 +90,17 @@ Current workspace note:
 ## Execution Decision Tree
 
 1. If feature coverage fails, pause live trading.
-2. If `8h` is `ready` and `prompt_ready_summary.operator_summary_compact.recommended_operator_action = enter_now`, use the `8h` execution plan and keep size inside the configured `0.20` cap.
-3. If `1h` or `4h` is rejected for `insufficient_mfe_headroom`, treat those horizons as non-confirming rather than as overrides of the ready `8h` setup.
-4. If `12h` is `bias_only_ready` because `edge_over_fee_below_min`, keep the directional bias but do not substitute `12h` for the ready `8h` plan.
-5. If a later refresh promotes `4h` or `12h` to `ready` with stronger follow-through, re-evaluate the preferred horizon instead of carrying forward a stale `8h` bias.
+2. If the preferred horizon is `ready` and `prompt_ready_summary.operator_summary_compact.recommended_operator_action = enter_now`, use that horizon's execution plan and keep size inside that horizon's configured cap.
+3. If lower horizons are rejected for execution-quality reasons such as `insufficient_mfe_headroom`, treat them as non-confirming rather than as automatic overrides of a ready mid-term setup.
+4. If a horizon is `bias_only_ready`, keep the directional bias but do not substitute that horizon for a separate horizon that is actually `ready`.
+5. If a later refresh changes the preferred ready horizon, re-evaluate from the fresh snapshot instead of carrying forward a stale earlier bias.
 
 ## Escalate Or Pause
 
 Reduce risk or pause if any of these appears:
 
-1. repeated `8h`-preferred long setups without confirmation from `4h` or `12h`
-2. repeated `8h`-preferred long setups with deteriorating `edge_over_fee` or `insufficient_mfe_headroom` across the confirming stack
+1. repeated `8h`-preferred setups without confirmation from `4h` or `12h`
+2. repeated preferred-horizon setups with deteriorating `edge_over_fee` or `insufficient_mfe_headroom` across the confirming stack
 3. new feature freshness or coverage failure
 4. next qualified reliability run fails promotion or model-shift guards
 

@@ -67,8 +67,9 @@ No trustworthy reliability run found under artifacts/reliability.
 Cadence requires prebuilt reliability artifacts that are not tracked in git.
 Restore the deployed artifacts bundle before running cadence.
 
-For GitHub Actions, add a bootstrap step that restores artifacts/ from durable storage
-before invoking scripts/run_cadence.sh.
+For the checked-in self-hosted GitHub Actions workflow, preflight and bootstrap now run
+before scripts/run_cadence.sh. If you are invoking cadence outside that workflow,
+restore the required artifacts into this checkout first.
 EOF
     return 1
   fi

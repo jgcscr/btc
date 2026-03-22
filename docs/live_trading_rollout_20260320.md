@@ -90,21 +90,19 @@ Primary fields:
 - per-horizon `position_size`
 - request-level `position_size_cap_by_horizon`
 
-Current workspace note:
+Current operating note:
 
 - direct conservative refreshes should be interpreted from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
-- the `prompt_ready_summary.market_outlook_strategy` fields are not the primary live read path in the current workspace snapshot
+- the `prompt_ready_summary.market_outlook_strategy` fields are useful context but are not the primary live authorization read path
 - shadow comparison artifacts under `artifacts/predictions/comparisons/` should not be used to override the live conservative read path
 
-Current codespace local-validation snapshot:
+Current snapshot discipline:
 
-- generated at `2026-03-21T05:10:33.769700+00:00`
-- feature coverage `ok = true`
-- preferred horizon `8h`
-- `recommended_operator_action = enter_now`
-- `8h` is `ready` long
-- `12h` is `bias_only_ready` because `edge_over_fee_below_min`
-- `1h` and `4h` remain blocked by `insufficient_mfe_headroom`
+- do not rely on a hardcoded snapshot summary in this rollout note
+- confirm recency from top-level `generated_at` in `artifacts/predictions/latest.json`
+- confirm feature coverage and source freshness from `artifacts/monitoring/latest.json`
+- confirm the preferred horizon and operator action from `prompt_ready_summary.operator_summary_compact`
+- confirm per-horizon `trade_action`, `execution_plan.status`, `execution_plan.reason`, and position-size limits before acting
 
 ## Live Escalation Rules
 

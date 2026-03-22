@@ -1,5 +1,15 @@
 ## Trade-Decision Final Comparison
 
+Historical reference only.
+
+This file records a finalized comparison from 2026-03-16. It is useful for understanding why a branch was selected at that time, but it is not the current operating source of truth.
+
+Use these current sources instead:
+
+- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- `docs/trade_decision_post_fix_trust_basis_20260319.md`
+- `docs/operations_runbook.md`
+
 Date: 2026-03-16
 Primary finalized runs: `20260316T011019Z`, `20260316T013439Z`, `20260316T030147Z`
 

@@ -15,7 +15,7 @@ The suite trains:
 Use the orchestration script to rebuild datasets and train the full stack in a single run:
 
 ```bash
-python -m src.scripts.train_model_suite \
+/workspaces/btc/.venv/bin/python -m src.scripts.train_model_suite \
   --targets 0.25,1,4,8,12 \
   --rebuild-datasets \
   --train-regression \
@@ -28,7 +28,7 @@ python -m src.scripts.train_model_suite \
 Recommended for CI smoke tests:
 
 ```bash
-python -m src.scripts.train_model_suite \
+/workspaces/btc/.venv/bin/python -m src.scripts.train_model_suite \
   --targets 1 \
   --rebuild-datasets \
   --train-direction \
@@ -40,7 +40,7 @@ python -m src.scripts.train_model_suite \
 Train only regression models:
 
 ```bash
-python -m src.scripts.train_model_suite \
+/workspaces/btc/.venv/bin/python -m src.scripts.train_model_suite \
   --targets 0.25,1,4,8,12 \
   --train-regression
 ```
@@ -48,7 +48,7 @@ python -m src.scripts.train_model_suite \
 Train only direction models (tree + LightGBM):
 
 ```bash
-python -m src.scripts.train_model_suite \
+/workspaces/btc/.venv/bin/python -m src.scripts.train_model_suite \
   --targets 0.25,1,4,8,12 \
   --train-direction \
   --train-lgbm
@@ -57,11 +57,13 @@ python -m src.scripts.train_model_suite \
 Train only sequence and transformer models:
 
 ```bash
-python -m src.scripts.train_model_suite \
+/workspaces/btc/.venv/bin/python -m src.scripts.train_model_suite \
   --targets 0.25,1,4,8,12 \
   --train-sequence \
   --train-transformer
 ```
+
+In this codespace, prefer the explicit interpreter path above unless you have already activated `.venv` in your shell.
 
 ## Datasets used per horizon
 

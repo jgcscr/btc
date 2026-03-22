@@ -1,5 +1,15 @@
 ## Trade-Decision Operator Handoff
 
+Historical reference only.
+
+This file records the 2026-03-16 deployment decision context. Do not use it as the source of truth for the current deployed run, current live state, or current cadence workflow behavior.
+
+Use these current sources instead:
+
+- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- `docs/operations_runbook.md`
+- `docs/live_operator_checklist_20260320.md`
+
 Date: 2026-03-16
 Final reference runs: `20260316T011019Z`, `20260316T013439Z`, `20260316T030147Z`
 

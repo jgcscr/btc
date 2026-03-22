@@ -16,7 +16,7 @@ Optional:
   --dir <path>                 Install directory (default: $HOME/actions-runner-btc)
   --version <runner-version>   Actions runner version (default: 2.333.0)
   --replace                    Replace an existing runner registration with the same name
-  --install-service            Install and start the runner as a service
+  --install-service            Install and start the runner as a service when the host supports it
 
 Example:
   scripts/setup_self_hosted_runner.sh \
@@ -138,5 +138,8 @@ To install it as a service later:
   cd "$RUNNER_DIR"
   sudo ./svc.sh install
   sudo ./svc.sh start
+
+Note: service installation requires a host service manager. In Codespaces or other
+container sessions without systemd, run the runner interactively instead.
 EOF
 fi

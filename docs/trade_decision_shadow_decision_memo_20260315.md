@@ -1,5 +1,15 @@
 ## Trade-Decision Shadow Decision Memo
 
+Historical shadow-selection memo.
+
+This file records why the shadow decision path looked the way it did on 2026-03-15 and 2026-03-16. It is not the current source of truth for active deployment, current workflow routing, or present-day operator action.
+
+Use these current sources instead:
+
+- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- `docs/operations_runbook.md`
+- `docs/agent_system_handoff_20260320.md`
+
 Date: 2026-03-15
 Runs reviewed: `20260315T200516Z`, `20260315T204343Z`, `20260315T210636Z`, `20260316T004726Z`
 

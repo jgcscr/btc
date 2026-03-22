@@ -1,5 +1,15 @@
 ## Trade-Decision Reference Feature Policy
 
+Historical policy record.
+
+This file captures the 2026-03-15 policy decision context around reference features. It remains useful background, but current deployment state and current live operation should be read from the active manifest and current runbook artifacts.
+
+Use these current sources instead:
+
+- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- `docs/operations_runbook.md`
+- `docs/live_trading_rollout_20260320.md`
+
 Date: 2026-03-15
 
 Current decision:

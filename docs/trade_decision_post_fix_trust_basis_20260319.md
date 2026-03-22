@@ -1,5 +1,13 @@
 # Trade Decision Post-Fix Trust Basis (2026-03-19)
 
+This document remains the rationale for why `configs/run_refresh_and_predict.default.yaml` is the trusted operating default.
+
+For the current deployed bundle and current live-style runtime state, use:
+
+- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- `artifacts/predictions/latest.json`
+- `artifacts/monitoring/latest.json`
+
 ## Recommended Operating Default
 
 The recommended operating profile is the current default runtime config:

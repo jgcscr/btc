@@ -19,18 +19,11 @@ Current live stance:
 - `8h` remains the weakest carry horizon,
 - live hardening is done with horizon-specific size caps, scoped horizon/regime overrides, and operator discipline, not with a blanket `8h` suppression rule.
 
-Current local conservative validation state in this codespace:
+Current state sources in this codespace:
 
-- latest local conservative refresh was generated at `2026-03-21T05:10:33.769700+00:00`
-- feature coverage is `ok = true`
-- preferred horizon is `8h` and `recommended_operator_action = enter_now`
-- `8h` is currently `ready` long while `12h` is `bias_only_ready` because `edge_over_fee_below_min`
-
-Current deployed shared bundle:
-
-- deploy manifest: `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
-- current deployed run id: `20260317T014743Z`
-- current deployed shadow variant: `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`
+- read the latest live-style runtime state from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
+- read the active deployed bundle from `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- treat those artifacts, not this handoff note, as the source of truth for the current run id, active variant, preferred horizon, and latest recommended action
 
 ## Read Order For A New Agent
 
@@ -78,6 +71,7 @@ Important behavior:
 - the cadence script resolves the latest trustworthy reliability run,
 - it refreshes predictions with `configs/run_refresh_and_predict.shadow_simplified.yaml`,
 - it is for scheduled operating cadence, not for the conservative discretionary live rollout.
+- the GitHub Actions workflow currently exposes only `daily`, `weekly`, and `monthly`; `shadow` remains a local wrapper path unless the workflow is extended.
 
 ### 2a. Shadow comparison cadence
 

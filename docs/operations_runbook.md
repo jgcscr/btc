@@ -36,15 +36,19 @@ Recommended runtime policy reference:
 - `docs/trade_decision_8h_hardening_memo_20260320.md` records the current `8h` caution stance and the safest next hardening direction.
 - `docs/agent_system_handoff_20260320.md` is the new-agent handoff for safely running the system end to end.
 
-Current codespace validation state:
+Current state sources:
 
-- deployed shared bundle still points to run `20260317T014743Z`
-- latest local conservative refresh was generated at `2026-03-21T05:10:33.769700+00:00`
-- feature coverage is `ok = true` and source freshness lag is `0.0h`
-- `8h` is currently `ready` long and is the preferred horizon
-- `12h` is currently `bias_only_ready` with `abstention.reason = edge_over_fee_below_min`
+- read the active deployed bundle from `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- read the latest live-style snapshot from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
+- check `generated_at`, feature coverage, and source freshness in those artifacts before acting
+- do not rely on hardcoded snapshot summaries in this runbook for the latest market state
 
 ## Exact Commands By Cadence
+
+There are two execution contexts in this repo:
+
+- local CLI cadence: run `bash ./scripts/run_cadence.sh <cadence>` directly when the checkout already has the required local `artifacts/` tree
+- GitHub Actions cadence: the self-hosted workflow first validates and bootstraps artifacts into the checkout, then calls the same shell wrapper
 
 ### Daily
 
@@ -110,6 +114,13 @@ Use it through the cadence wrapper:
 bash ./scripts/run_cadence.sh shadow
 ```
 
+Current workflow boundary:
+
+- `shadow` is supported by `scripts/run_cadence.sh`
+- `.github/workflows/cadence.yml` currently schedules only `daily`, `weekly`, and `monthly`
+- the GitHub Actions manual dispatch selector currently exposes only `daily`, `weekly`, and `monthly`
+- run `shadow` locally unless you intentionally extend the workflow inputs and artifact upload paths
+
 Important behavior:
 
 - the shadow run uses the latest trustworthy reliability bundle for thresholds and Platt calibration,
@@ -171,77 +182,65 @@ This is the preferred check before trusting a local-feature override path for li
 
 ## Rollback Criteria
 
-- Current active deployment: run `20260317T014743Z`, variant `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`, recorded in `artifacts/monitoring/reliability_promotion_deploy_manifest.json`.
+- Current active deployment is whatever run and variant are recorded in `artifacts/monitoring/reliability_promotion_deploy_manifest.json`.
 - Recommended runtime policy default: `configs/run_refresh_and_predict.default.yaml`, with trust basis documented in `docs/trade_decision_post_fix_trust_basis_20260319.md`.
 - Roll back if the next runtime reliability run keeps the active variant selected but records `summary/promotion_gate.json` with `promote = false` or any failed `trade_decision_model_shift_guard` checks.
 - Roll back if `summary/champion_gate_alignment_check.json` fails, because that indicates workflow routing drift rather than a trustworthy model-quality comparison.
 - Roll back if the active variant loses overlap-triggered support on the next qualified runtime run: `triggered_row_count < 10`, `triggered_net_return_total <= 0`, or `triggered_hit_rate < 0.45` in `summary/overlap_triggered_trade_diagnostics.json`.
 - Roll back if live refresh checks show a materially worse operational posture than the prior deployment, especially if a horizon flips from trade-decision-triggered to inactive for non-price reasons tied to reference-feature drift or policy gating instability.
-- Use the prior approved deployment artifacts referenced by your last known-good deploy manifest when an emergency rollback is required. The current checked-in runbook no longer hardcodes a single pre-fix rollback source because the active deploy manifest has advanced while the trusted post-fix runtime default is documented separately.
+- Use the prior approved deployment artifacts referenced by the target run's summary manifest when an emergency rollback is required.
 
 ### Manual Rollback
 
-Use this exact restore block from the repository root if the active deployment must be reverted immediately:
+Use the deploy manifest written by the target reliability run instead of a hardcoded historical copy block.
+
+Each promoted run writes `artifacts/reliability/<RUN_ID>/summary/promotion_deploy_manifest.json`, which records the deployed targets and source files for that run. Use that file as the rollback source of truth.
+
+Example restore flow from the repository root:
 
 ```bash
 set -e
 
-cp artifacts/reliability/20260315T062250Z/summary/platt_calibration.json \
-  artifacts/models/platt_calibration.json
+ROLLBACK_RUN_ID="<prior-known-good-run-id>"
+MANIFEST="artifacts/reliability/${ROLLBACK_RUN_ID}/summary/promotion_deploy_manifest.json"
+export MANIFEST
 
-cp artifacts/reliability/20260315T062250Z/summary/trade_decision_model.json \
-  artifacts/models/trade_decision_model.json
+python - <<'PY'
+import json
+import os
+import shutil
+from pathlib import Path
 
-cp artifacts/reliability/20260315T062250Z/summary/backtest_signals_meta_ensemble_decision_aligned_shadow_selection_calibration_guard.csv \
-  artifacts/monitoring/labeled_backtest_1h.csv
+manifest_path = Path(os.environ["MANIFEST"])
+payload = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-cp artifacts/reliability/20260315T062250Z/summary/backtest_signals_meta_ensemble_decision_aligned_shadow_selection_calibration_guard_meta.json \
-  artifacts/monitoring/labeled_backtest_1h_meta.json
+for spec in payload.get("deployed_files", {}).values():
+    source = Path(spec["source"])
+    target = Path(spec["target"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
 
-cp artifacts/reliability/20260315T062250Z/summary/backtest_signals_meta_ensemble_decision_aligned_shadow_selection_calibration_guard.csv \
-  artifacts/monitoring/labeled_backtest_1h_incumbent.csv
-
-cp artifacts/reliability/20260315T062250Z/summary/backtest_signals_meta_ensemble_decision_aligned_shadow_selection_calibration_guard_meta.json \
-  artifacts/monitoring/labeled_backtest_1h_incumbent_meta.json
-
-cp artifacts/reliability/20260315T062250Z/summary/model_quality_candidate.json \
-  artifacts/monitoring/model_quality_incumbent_1h_backtest.json
-
-cp artifacts/reliability/20260315T062250Z/summary/model_quality_candidate.json \
-  artifacts/monitoring/model_quality_incumbent_1h.json
-
-cp artifacts/reliability/20260315T062250Z/summary/promotion_gate.json \
-  artifacts/monitoring/promotion_gate_1h.json
-
-cp artifacts/reliability/20260315T062250Z/summary/calibration_robustness.json \
-  artifacts/monitoring/calibration_robustness.json
-
-cp artifacts/reliability/20260315T062250Z/summary/rolling_ab_report.json \
-  artifacts/monitoring/rolling_ab_report.json
-
-cp artifacts/reliability/20260315T062250Z/summary/rolling_ab_report.md \
-  artifacts/monitoring/rolling_ab_report.md
-
-if [[ -f artifacts/reliability/20260315T062250Z/summary/selection_calibration_guard_rule.json ]]; then
-  cp artifacts/reliability/20260315T062250Z/summary/selection_calibration_guard_rule.json \
-    artifacts/monitoring/selection_calibration_guard_rule_1h.json
-fi
+Path("artifacts/monitoring/reliability_promotion_deploy_manifest.json").write_text(
+    json.dumps(payload, indent=2),
+    encoding="utf-8",
+)
+PY
 ```
 
-After the copy completes, replace `artifacts/monitoring/reliability_promotion_deploy_manifest.json` with a manifest that points back to run `20260315T062250Z`, then run a dry-run refresh check to confirm the restored bundle loads cleanly.
+After the copy completes, run a dry-run refresh check to confirm the restored bundle loads cleanly.
 
 ## Weekly Monitoring Checklist
 
-For the next weekly runtime run after deployment `20260317T014743Z`, inspect these items in order:
+For the next weekly runtime run after the current deployment, inspect these items in order:
 
-- Confirm `artifacts/monitoring/reliability_promotion_deploy_manifest.json` still points at run `20260317T014743Z` before starting, unless an approved rollback was executed.
+- Confirm `artifacts/monitoring/reliability_promotion_deploy_manifest.json` still points at the intended incumbent before starting, unless an approved rollback was executed.
 - Run the weekly workflow and read `summary/champion_gate_alignment_check.json` first; it must stay `passed = true` with `selected_source = policy_aligned`.
 - Read `summary/promotion_gate.json`; treat any failed `trade_decision_model_shift_guard` check as an immediate rollback candidate, not a soft warning.
 - Read `summary/overlap_triggered_trade_diagnostics.json`; keep the deployment only if the triggered slice remains at least `10` trades, positive net return, and hit rate at or above `0.45`.
 - Read `summary/rolling_ab_report.json`; confirm the promoted branch does not introduce new negative rolling windows beyond the configured cap.
 - Read `summary/calibration_robustness.json`; confirm the active-trade selection slice still clears recent AUC, recent ECE, and ECE drift thresholds.
 - Run a dry-run prediction refresh against the active deployment and compare the result to the prior rollback target if behavior looks unstable. The validated comparison pattern is that the new deployment may increase trade-decision triggering while final actions remain `hold`; that alone is not a rollback signal.
-- If a rollback trigger fires, restore run `20260315T062250Z` first, then investigate whether the failure is a workflow regression, overlap deterioration, or reference-feature drift.
+- If a rollback trigger fires, restore the prior known-good deployed run first, then investigate whether the failure is a workflow regression, overlap deterioration, or reference-feature drift.
 
 ## Reading `execution_plan`
 
@@ -277,13 +276,13 @@ Replay mode is hourly-only for now and overwrites the usual prediction artifact 
 
 ## GitHub Actions Schedule
 
-The workflow is defined in `.github/workflows/cadence.yml` and runs:
+The workflow is defined in `.github/workflows/cadence.yml` and runs (UTC):
 
 - daily at `01:15 UTC`
 - weekly on Monday at `02:30 UTC`
 - monthly on day 1 at `03:45 UTC`
 
-It also supports manual dispatch with a `cadence` selector.
+It also supports manual dispatch with a `cadence` selector for `daily`, `weekly`, and `monthly`.
 
 ## Expected Outputs
 
@@ -320,7 +319,7 @@ Current GitHub Actions bootstrap path:
 - set repository variable `CADENCE_ARTIFACTS_ROOT_URI` to the local filesystem path that mirrors the repository `artifacts/` tree on that runner
 - optionally set `CADENCE_DEPLOY_MANIFEST_URI` if the deploy manifest is not at `monitoring/reliability_promotion_deploy_manifest.json` under that root
 - the workflow first runs a preflight validation against that local path and fails before cadence if the manifest or required summary/deployed files are missing
-- the workflow runs `python -m src.scripts.bootstrap_cadence_artifacts` before `scripts/run_cadence.sh`, which restores the deployed manifest, the selected trustworthy run summary, and the currently deployed model/monitoring files into the local checkout
+- the workflow runs `python -m src.scripts.bootstrap_cadence_artifacts` before `scripts/run_cadence.sh`, which restores the deployed manifest, the selected trustworthy run summary, the manifest-listed deployed files, and the full `artifacts/models` tree into the local checkout
 - `gs://` artifact URIs are intentionally rejected by this workflow variant; use only local filesystem paths visible to the self-hosted runner
 
 Self-hosted runner setup helper:
