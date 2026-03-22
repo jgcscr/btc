@@ -669,19 +669,17 @@ Canonical matched-cycle/watchlist artifacts:
 - `artifacts/reliability/default_midband_matched_cycle_latest.json`
 - `artifacts/reliability/default_vs_midband_paper_live_watchlist.json`
 
-## 9. Trade-Ready Reporting
+## 9. Trade-Ready Artifacts
 
-`src.scripts.build_trade_ready_report` is a specialized CI/GCS reporting helper. It expects captured workflow outputs such as `run_dataset_refresh.json` and `run_signal.json` in a workspace directory, plus a `REPORT_BUCKET` destination.
+The current local-only workflow does not maintain a separate cloud reporting helper.
 
-Example:
+For operator-ready outputs, use these local artifacts directly:
 
-```bash
-REPORT_BUCKET=gs://<your-bucket> \
-WORKSPACE=/workspace \
-python -m src.scripts.build_trade_ready_report
-```
+- `artifacts/monitoring/latest.json`
+- `artifacts/monitoring/trade_ready_summary.json`
+- `artifacts/predictions/latest.json`
 
-This is not the main local prediction entrypoint; for local fresh predictions use `src.scripts.run_refresh_and_predict`.
+For local fresh predictions, use `src.scripts.run_refresh_and_predict`.
 
 ## 10. Fresh Prediction Checklist
 
