@@ -7,6 +7,17 @@ This repo uses four operating cadences:
 - `monthly`: run the full default reliability workflow, then refresh live predictions
 - `shadow`: run simplified vs chop-suppression shadow profiles and archive comparison artifacts
 
+## Recent Changes (2026-03-25)
+
+- Runtime reliability quality flow now includes directional-objective gating via `src.scripts.evaluate_directional_objectives`.
+- Directional-objective runtime profile is tuned to current production behavior:
+  - `group_min_rows: 40`
+  - `max_brier: 0.255`
+  - `max_ece_by_regime.chop: 0.18`
+- Directional-objective evaluation now handles both `y` and `y_true` label columns and normalizes missing/invalid regime labels to `unknown`.
+- Trade-decision compatibility was hardened so legacy callers can omit `horizon_label` when invoking `_apply_trade_decision_model`.
+- Runtime output docs now explicitly cover `execution_plan.stop_management.stop_scaling`, dynamic RR-floor diagnostics in `execution_plan.target_management`, and `direction_output.probability_shrinkage`.
+
 ## Single Entrypoint
 
 Use the shell entrypoint from the repository root:
