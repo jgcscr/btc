@@ -89,6 +89,13 @@ python -m src.scripts.run_reliability_workflow \
 bash ./scripts/run_cadence.sh daily
 ```
 
+Runtime reliability workflow quality stage now includes directional-objective gating:
+
+- command: `python -m src.scripts.evaluate_directional_objectives`
+- outputs: `summary/directional_objectives.json` and `logs/directional_objectives.log`
+- checks: overall, by-horizon, and by-regime Brier/ECE/F1 with min-row guards
+- runtime profile defaults currently use `prob_col: p_up`, `label_col: y` (auto-resolved to `y_true` if present in the labeled CSV), `group_min_rows: 40`, `max_brier: 0.255`, and `max_ece_by_regime.chop: 0.18`
+
 ### Monthly
 
 Runs the full default reliability profile, then refreshes predictions.
@@ -234,6 +241,7 @@ After the copy completes, run a dry-run refresh check to confirm the restored bu
 For the next weekly runtime run after the current deployment, inspect these items in order:
 
 - Confirm `artifacts/monitoring/reliability_promotion_deploy_manifest.json` still points at the intended incumbent before starting, unless an approved rollback was executed.
+- Read `summary/directional_objectives.json` early in the review. Treat any non-empty `failed_checks` as a reliability-gate failure that must be addressed before promotion.
 - Run the weekly workflow and read `summary/champion_gate_alignment_check.json` first; it must stay `passed = true` with `selected_source = policy_aligned`.
 - Read `summary/promotion_gate.json`; treat any failed `trade_decision_model_shift_guard` check as an immediate rollback candidate, not a soft warning.
 - Read `summary/overlap_triggered_trade_diagnostics.json`; keep the deployment only if the triggered slice remains at least `10` trades, positive net return, and hit rate at or above `0.45`.

@@ -266,6 +266,24 @@ quality:
     regime_aware: true
     regime_col: regime_state
     min_regime_rows: 20
+  directional_objectives:
+    enabled: true
+    prob_col: p_up
+    label_col: y
+    regime_col: regime_state
+    threshold: 0.5
+    min_rows: 300
+    group_min_rows: 40
+    max_brier: 0.255
+    max_ece: 0.10
+    min_f1: 0.40
+    min_f1_by_horizon:
+      1h: 0.40
+      4h: 0.40
+      8h: 0.38
+      12h: 0.35
+    max_ece_by_regime:
+      chop: 0.18
   leakage_audit:
     enabled: true
     y_key: y

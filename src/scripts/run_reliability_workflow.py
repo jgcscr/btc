@@ -948,6 +948,70 @@ def _build_calibration_robustness_command(
     return cmd
 
 
+def _build_directional_objectives_command(
+    *,
+    python: str,
+    input_path: Path,
+    output_path: Path,
+    directional_cfg: Dict[str, Any],
+) -> List[str]:
+    def _format_threshold_map(raw: Any) -> str:
+        if not isinstance(raw, dict):
+            return ""
+        parts: List[str] = []
+        for key, value in raw.items():
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            label = str(key).strip()
+            if not label:
+                continue
+            parts.append(f"{label}:{numeric}")
+        return ",".join(parts)
+
+    cmd = [
+        python,
+        "-m",
+        "src.scripts.evaluate_directional_objectives",
+        "--input",
+        str(input_path),
+        "--output",
+        str(output_path),
+        "--prob-col",
+        str(directional_cfg.get("prob_col", "p_up")),
+        "--regime-col",
+        str(directional_cfg.get("regime_col", "regime_state")),
+        "--threshold",
+        str(float(directional_cfg.get("threshold", 0.5))),
+        "--min-rows",
+        str(int(directional_cfg.get("min_rows", 300))),
+        "--group-min-rows",
+        str(int(directional_cfg.get("group_min_rows", 80))),
+        "--max-brier",
+        str(float(directional_cfg.get("max_brier", 0.25))),
+        "--max-ece",
+        str(float(directional_cfg.get("max_ece", 0.08))),
+        "--min-f1",
+        str(float(directional_cfg.get("min_f1", 0.45))),
+    ]
+    label_col = directional_cfg.get("label_col")
+    if label_col:
+        cmd.extend(["--label-col", str(label_col)])
+    for flag, key in (
+        ("--max-brier-by-horizon", "max_brier_by_horizon"),
+        ("--max-ece-by-horizon", "max_ece_by_horizon"),
+        ("--min-f1-by-horizon", "min_f1_by_horizon"),
+        ("--max-brier-by-regime", "max_brier_by_regime"),
+        ("--max-ece-by-regime", "max_ece_by_regime"),
+        ("--min-f1-by-regime", "min_f1_by_regime"),
+    ):
+        encoded = _format_threshold_map(directional_cfg.get(key))
+        if encoded:
+            cmd.extend([flag, encoded])
+    return cmd
+
+
 def _extract_recent_calibration_payload(
     calibration_payload: Dict[str, Any],
     *,
@@ -1544,6 +1608,7 @@ def _summarize_trade_decision_stage_distribution(
         payload = rrp._apply_trade_decision_model(
             result=result,
             regime_state=regime_state,
+                horizon_label=str(row.get("horizon", "1h")),
             residual_std=0.0,
             policy=policy,
             fee_bps=fee_bps,
@@ -3476,6 +3541,7 @@ def main() -> None:
     leakage_cfg = quality_cfg.get("leakage_audit", {}) if isinstance(quality_cfg, dict) else {}
     cv_stress_cfg = quality_cfg.get("cv_stress_sweep", {}) if isinstance(quality_cfg, dict) else {}
     feature_rel_cfg = quality_cfg.get("feature_reliability", {}) if isinstance(quality_cfg, dict) else {}
+    directional_objectives_cfg = quality_cfg.get("directional_objectives", {}) if isinstance(quality_cfg, dict) else {}
     champ_cfg = quality_cfg.get("champion_challenger", {}) if isinstance(quality_cfg, dict) else {}
     label_ablation_cfg = quality_cfg.get("label_ablation", {}) if isinstance(quality_cfg, dict) else {}
     trade_decision_cfg = quality_cfg.get("trade_decision_model", {}) if isinstance(quality_cfg, dict) else {}
@@ -6020,6 +6086,22 @@ def main() -> None:
                             args.dry_run,
                         )
                     )
+
+            if bool(directional_objectives_cfg.get("enabled", False)):
+                directional_cmd = _build_directional_objectives_command(
+                    python=python,
+                    input_path=quality_input,
+                    output_path=summary_dir / "directional_objectives.json",
+                    directional_cfg=directional_objectives_cfg,
+                )
+                results.append(
+                    _run_step(
+                        "directional_objectives",
+                        directional_cmd,
+                        logs_dir / "directional_objectives.log",
+                        args.dry_run,
+                    )
+                )
 
             if bool(regime_weakness_cfg.get("enabled", True)):
                 calibration_path = summary_dir / "calibration_robustness.json"

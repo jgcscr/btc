@@ -141,10 +141,22 @@ forecast_coherence_policy:
   exclude_blocked_horizons_from_voting: true
 direction_output_policy:
   enabled: true
-  horizons: [1]
+  horizons: [0.25, 1]
   neutral_band: 0.02
+  neutral_band_by_horizon:
+    "0.25": 0.04
+    "1": 0.025
   calibration_path: artifacts/models/direction_output_isotonic_1h.json
   use_trade_probability_fallback: true
+  probability_shrinkage:
+    enabled: true
+    horizons: [0.25, 1]
+    regimes: [chop, neutral]
+    default_strength: 0.25
+    strength_by_horizon:
+      "0.25": 0.45
+      "1": 0.2
+    bypass_edge: 0.35
   marginal_rerank:
     enabled: true
     horizons: [1]
@@ -176,7 +188,7 @@ confluence_policy:
 execution_policy:
   enabled: true
   bias_horizons: [4, 8, 12]
-  execution_horizons: [1, 4, 8, 12]
+  execution_horizons: [4, 8, 12]
   horizon_bias_weights:
     "1": 0.75
     "4": 1.0
@@ -196,7 +208,7 @@ execution_policy:
       "4": 1.0
       "8": 0.95
       "12": 1.05
-  short_term_strict_horizons: [1]
+  short_term_strict_horizons: []
   short_term_min_mid_ratio: 0.75
   short_term_min_support_ratio: 0.75
   require_bias_alignment: true
@@ -256,6 +268,34 @@ execution_policy:
   adaptive_take_profit:
     enabled: true
     min_rr_fraction_of_floor: 0.85
+  dynamic_rr_floor:
+    enabled: true
+    mfe_mae_scale: 0.9
+    max_adjustment: 0.35
+    min_samples: 40
+    default_floor: 0.9
+    min_floor_by_horizon:
+      "0.25": 0.9
+      "1": 1.0
+      "4": 1.2
+      "8": 1.35
+      "12": 1.35
+    max_floor_by_horizon:
+      "0.25": 1.2
+      "1": 1.35
+      "4": 1.75
+      "8": 1.9
+      "12": 1.9
+    regime_multiplier:
+      chop: 0.95
+      neutral: 1.0
+      trend_ignition: 1.05
+  volatility_expansion_stop:
+    enabled: true
+    expansion_threshold: 1.1
+    stop_multiplier: 1.12
+    max_multiplier: 1.35
+    regimes: [trend_ignition, neutral]
   pullback_quality:
     enabled: true
     min_score_by_horizon:
@@ -282,6 +322,7 @@ execution_policy:
   regime_templates:
     chop:
       tp_multiplier: 0.85
+      stop_multiplier: 0.95
       time_stop_multiplier: 0.75
       size_multiplier: 0.75
       entry_mode_by_tier:
@@ -293,6 +334,7 @@ execution_policy:
       pullback_quality_floor: 0.45
     neutral:
       tp_multiplier: 1.0
+      stop_multiplier: 1.0
       time_stop_multiplier: 1.0
       size_multiplier: 1.0
       entry_mode_by_tier:
@@ -304,6 +346,7 @@ execution_policy:
       pullback_quality_floor: 0.4
     trend_ignition:
       tp_multiplier: 1.25
+      stop_multiplier: 1.15
       time_stop_multiplier: 1.5
       size_multiplier: 1.1
       entry_mode_by_tier:

@@ -19,6 +19,7 @@ from src.scripts.run_refresh_and_predict import (
     _refine_stop_with_target_range,
     _lookup_horizon_value,
     _resolve_execution_target_reward,
+    _resolve_direction_output_policy,
     _resolve_direction_signal_for_horizon,
     _resolve_probability_calibration,
     _resolve_trade_probability_for_horizon,
@@ -317,6 +318,77 @@ class PredictionCoherenceControlTests(unittest.TestCase):
         self.assertEqual(key, "1h")
         self.assertEqual(params, {"method": "platt", "a": 0.25, "b": 0.05})
         self.assertFalse(used_regime_key)
+
+    def test_direction_output_probability_shrinkage_applies_for_15m(self) -> None:
+        policy = _resolve_direction_output_policy(
+            {
+                "enabled": True,
+                "horizons": [0.25, 1.0],
+                "neutral_band": 0.02,
+                "neutral_band_by_horizon": {"0.25": 0.04},
+                "probability_shrinkage": {
+                    "enabled": True,
+                    "horizons": [0.25],
+                    "regimes": ["chop"],
+                    "default_strength": 0.5,
+                    "bypass_edge": 0.4,
+                },
+            }
+        )
+
+        payload = _build_direction_output(
+            enabled=True,
+            scoped=True,
+            label="15m",
+            regime_state="chop",
+            signal_dir_only=1,
+            raw_probability=0.8,
+            trade_probability=0.8,
+            ret_pred=0.001,
+            close=100.0,
+            projected_price=100.1,
+            p_up_components={},
+            policy=policy,
+        )
+
+        self.assertTrue(payload["probability_shrinkage"]["applied"])
+        self.assertLess(payload["probability"], 0.8)
+        self.assertAlmostEqual(payload["neutral_band"], 0.04)
+
+    def test_dynamic_rr_floor_can_adapt_to_realized_excursion(self) -> None:
+        payload = _resolve_execution_target_reward(
+            side="long",
+            planned_entry=100.0,
+            existing_take=101.0,
+            projected_high=None,
+            projected_low=None,
+            analytics_payload={
+                "available": True,
+                "sample_count": 120,
+                "mae_distance": 0.01,
+                "mfe_distance": 0.012,
+            },
+            risk_unit=1.0,
+            horizon=4.0,
+            policy={
+                "minimum_rr_by_horizon": {"4": 2.0},
+                "dynamic_rr_floor": {
+                    "enabled": True,
+                    "mfe_mae_scale": 1.0,
+                    "max_adjustment": 0.5,
+                    "min_samples": 40,
+                    "default_floor": 0.8,
+                    "min_floor_by_horizon": {"4": 0.8},
+                    "max_floor_by_horizon": {"4": 2.0},
+                    "regime_multiplier": {"trend_ignition": 1.0},
+                },
+            },
+            regime_template={"tp_multiplier": 1.0},
+            regime_state="trend_ignition",
+        )
+
+        self.assertEqual(payload["status"], "pass")
+        self.assertTrue(payload["target_management"]["dynamic_rr_floor_applied"])
 
     def test_trade_probability_guard_falls_back_to_raw_when_regime_calibration_flips_forecast_aligned_side(self) -> None:
         probability, key, used_regime_key, payload = _resolve_trade_probability_for_horizon(

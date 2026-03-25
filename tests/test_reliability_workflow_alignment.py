@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from src.scripts.run_reliability_workflow import (
+    _build_directional_objectives_command,
     _build_regime_max_p_up_shadow,
     _build_regime_abs_ret_pred_floor_shadow,
     _apply_trade_decision_model_shift_guard,
@@ -37,6 +38,31 @@ from src.scripts.run_reliability_workflow import (
 
 
 class ChampionGateAlignmentCheckTests(unittest.TestCase):
+    def test_build_directional_objectives_command_includes_overrides(self) -> None:
+        cmd = _build_directional_objectives_command(
+            python="python",
+            input_path=Path("candidate.csv"),
+            output_path=Path("directional_objectives.json"),
+            directional_cfg={
+                "enabled": True,
+                "prob_col": "p_up",
+                "label_col": "y",
+                "regime_col": "regime_state",
+                "threshold": 0.5,
+                "min_rows": 200,
+                "group_min_rows": 50,
+                "max_brier": 0.24,
+                "max_ece": 0.08,
+                "min_f1": 0.42,
+                "min_f1_by_horizon": {"1h": 0.45},
+            },
+        )
+
+        rendered = " ".join(cmd)
+        self.assertIn("src.scripts.evaluate_directional_objectives", rendered)
+        self.assertIn("--min-f1-by-horizon", rendered)
+        self.assertIn("1h:0.45", rendered)
+
     def test_resolve_effective_champion_gate_uses_selected_shadow_companion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             summary_dir = Path(tmpdir)

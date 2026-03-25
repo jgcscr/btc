@@ -164,6 +164,7 @@ Reliability outputs:
 - `artifacts/reliability/<run-id>/summary/champion_gate_alignment_check.json`
 - `artifacts/reliability/<run-id>/summary/trade_decision_model_shift_guard.json`
 - `artifacts/reliability/<run-id>/summary/edge_trustworthiness.json`
+- `artifacts/reliability/<run-id>/summary/directional_objectives.json`
 
 Scratch validation area:
 
@@ -185,10 +186,11 @@ For reliability and deployment changes:
 
 1. `summary/champion_gate_alignment_check.json`
 2. `summary/promotion_gate.json`
-3. `summary/trade_decision_model_shift_guard.json`
-4. `summary/overlap_triggered_trade_diagnostics.json`
-5. `summary/calibration_robustness.json`
-6. `summary/rolling_ab_report.json`
+3. `summary/directional_objectives.json`
+4. `summary/trade_decision_model_shift_guard.json`
+5. `summary/overlap_triggered_trade_diagnostics.json`
+6. `summary/calibration_robustness.json`
+7. `summary/rolling_ab_report.json`
 
 For runtime policy changes:
 

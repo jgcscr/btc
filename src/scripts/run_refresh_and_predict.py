@@ -652,6 +652,7 @@ def _normalize_execution_policy_block(value: Mapping[str, Any]) -> Dict[str, Any
         raise ValueError("execution_policy config must be a mapping.")
 
     numeric_keys = {
+        "min_bias_alignment_ratio",
         "immediate_entry_min_support_ratio",
         "pullback_entry_min_support_ratio",
         "immediate_entry_min_mid_ratio",
@@ -700,6 +701,9 @@ def _normalize_execution_policy_block(value: Mapping[str, Any]) -> Dict[str, Any
             "target_range_stop_refinement",
             "pullback_quality",
             "disagreement_severity",
+            "coherence_weighting",
+            "dynamic_rr_floor",
+            "volatility_expansion_stop",
         }:
             if not isinstance(raw_value, Mapping):
                 raise ValueError(f"{key} in execution_policy must be a mapping")
@@ -782,8 +786,56 @@ def _normalize_direction_output_policy_block(value: Mapping[str, Any]) -> Dict[s
             normalized[key] = bool(raw_value)
         elif key == "neutral_band":
             normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key == "neutral_band_by_horizon":
+            if raw_value is None:
+                normalized[key] = {}
+            elif isinstance(raw_value, Mapping):
+                normalized[key] = dict(raw_value)
+            else:
+                raise ValueError("neutral_band_by_horizon in direction_output_policy must be a mapping")
         elif key == "calibration_path":
             normalized[key] = str(raw_value) if raw_value is not None else None
+        elif key == "probability_shrinkage":
+            if raw_value is None:
+                normalized[key] = None
+            elif isinstance(raw_value, Mapping):
+                shrinkage: Dict[str, Any] = {}
+                for raw_shrink_key, raw_shrink_value in raw_value.items():
+                    shrink_key = str(raw_shrink_key).replace("-", "_")
+                    if shrink_key == "enabled":
+                        shrinkage[shrink_key] = bool(raw_shrink_value)
+                    elif shrink_key in {"default_strength", "bypass_edge"}:
+                        shrinkage[shrink_key] = float(raw_shrink_value) if raw_shrink_value is not None else None
+                    elif shrink_key == "strength_by_horizon":
+                        if raw_shrink_value is None:
+                            shrinkage[shrink_key] = {}
+                        elif isinstance(raw_shrink_value, Mapping):
+                            shrinkage[shrink_key] = dict(raw_shrink_value)
+                        else:
+                            raise ValueError("strength_by_horizon in direction_output_policy.probability_shrinkage must be a mapping")
+                    elif shrink_key in {"horizons", "regimes"}:
+                        if raw_shrink_value is None:
+                            shrinkage[shrink_key] = None
+                        elif isinstance(raw_shrink_value, str):
+                            if shrink_key == "horizons":
+                                shrinkage[shrink_key] = parse_targets(raw_shrink_value)
+                            else:
+                                shrinkage[shrink_key] = [segment.strip() for segment in raw_shrink_value.split(",") if segment.strip()]
+                        elif isinstance(raw_shrink_value, Sequence):
+                            if shrink_key == "horizons":
+                                shrinkage[shrink_key] = [_normalize_horizon_value(item) for item in raw_shrink_value]
+                            else:
+                                shrinkage[shrink_key] = [str(item).strip() for item in raw_shrink_value if str(item).strip()]
+                        else:
+                            raise ValueError(f"{shrink_key} in direction_output_policy.probability_shrinkage must be a list/sequence")
+                    else:
+                        print(
+                            f"Warning: Unknown direction_output_policy.probability_shrinkage key '{raw_shrink_key}' ignored.",
+                            file=sys.stderr,
+                        )
+                normalized[key] = shrinkage
+            else:
+                raise ValueError("direction_output_policy.probability_shrinkage must be a mapping")
         elif key == "marginal_rerank":
             if raw_value is None:
                 normalized[key] = None
@@ -1662,6 +1714,10 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
     pullback_quality_cfg = cfg.get("pullback_quality") if isinstance(cfg.get("pullback_quality"), Mapping) else {}
     disagreement_cfg = cfg.get("disagreement_severity") if isinstance(cfg.get("disagreement_severity"), Mapping) else {}
     coherence_weighting_cfg = cfg.get("coherence_weighting") if isinstance(cfg.get("coherence_weighting"), Mapping) else {}
+    dynamic_rr_floor_cfg = cfg.get("dynamic_rr_floor") if isinstance(cfg.get("dynamic_rr_floor"), Mapping) else {}
+    volatility_expansion_stop_cfg = (
+        cfg.get("volatility_expansion_stop") if isinstance(cfg.get("volatility_expansion_stop"), Mapping) else {}
+    )
 
     return {
         "enabled": bool(cfg.get("enabled", False)),
@@ -1805,6 +1861,33 @@ def _resolve_execution_policy(config: Mapping[str, Any] | None) -> Dict[str, Any
             "min_multiplier": max(min(float(coherence_weighting_cfg.get("min_multiplier") or 0.1), 1.0), 0.0),
             "by_horizon": _normalize_float_map(coherence_weighting_cfg.get("by_horizon"), minimum=0.0),
         },
+        "dynamic_rr_floor": {
+            "enabled": bool(dynamic_rr_floor_cfg.get("enabled", False)),
+            "mfe_mae_scale": max(float(dynamic_rr_floor_cfg.get("mfe_mae_scale") or 0.9), 0.0),
+            "max_adjustment": max(min(float(dynamic_rr_floor_cfg.get("max_adjustment") or 0.35), 1.0), 0.0),
+            "min_samples": max(int(dynamic_rr_floor_cfg.get("min_samples") or 40), 1),
+            "default_floor": max(float(dynamic_rr_floor_cfg.get("default_floor") or 0.0), 0.0),
+            "min_floor_by_horizon": _normalize_float_map(dynamic_rr_floor_cfg.get("min_floor_by_horizon"), minimum=0.0),
+            "max_floor_by_horizon": _normalize_float_map(dynamic_rr_floor_cfg.get("max_floor_by_horizon"), minimum=0.0),
+            "regime_multiplier": {
+                str(key).strip().lower(): max(float(value), 0.0)
+                for key, value in (dynamic_rr_floor_cfg.get("regime_multiplier") or {}).items()
+                if str(key).strip()
+            }
+            if isinstance(dynamic_rr_floor_cfg.get("regime_multiplier"), Mapping)
+            else {},
+        },
+        "volatility_expansion_stop": {
+            "enabled": bool(volatility_expansion_stop_cfg.get("enabled", False)),
+            "expansion_threshold": max(float(volatility_expansion_stop_cfg.get("expansion_threshold") or 1.15), 0.0),
+            "stop_multiplier": max(float(volatility_expansion_stop_cfg.get("stop_multiplier") or 1.1), 0.1),
+            "max_multiplier": max(float(volatility_expansion_stop_cfg.get("max_multiplier") or 1.5), 0.1),
+            "regimes": [
+                str(value).strip().lower()
+                for value in (volatility_expansion_stop_cfg.get("regimes") or [])
+                if str(value).strip()
+            ],
+        },
         "regime_templates": regime_templates,
     }
 
@@ -1831,6 +1914,20 @@ def _resolve_forecast_coherence_policy(config: Mapping[str, Any] | None) -> Dict
 
 
 def _resolve_direction_output_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    def _normalize_float_map(raw: Any, *, minimum: float = 0.0) -> Dict[float, float]:
+        if not isinstance(raw, Mapping):
+            return {}
+        resolved: Dict[float, float] = {}
+        for key, value in raw.items():
+            horizon = _coerce_numeric_horizon(key)
+            if horizon is None:
+                continue
+            try:
+                resolved[horizon] = max(float(value), minimum)
+            except (TypeError, ValueError):
+                continue
+        return resolved
+
     def _parse_weight_spec(spec: Any) -> Dict[str, float]:
         if isinstance(spec, Mapping):
             resolved: Dict[str, float] = {}
@@ -1862,6 +1959,7 @@ def _resolve_direction_output_policy(config: Mapping[str, Any] | None) -> Dict[s
     horizons = cfg.get("horizons") or [1.0]
     calibration_map = cfg.get("calibration_map") if isinstance(cfg.get("calibration_map"), Mapping) else {}
     marginal_rerank_cfg = cfg.get("marginal_rerank") if isinstance(cfg.get("marginal_rerank"), Mapping) else {}
+    shrinkage_cfg = cfg.get("probability_shrinkage") if isinstance(cfg.get("probability_shrinkage"), Mapping) else {}
     marginal_weight_specs_raw = (
         marginal_rerank_cfg.get("weight_specs") if isinstance(marginal_rerank_cfg.get("weight_specs"), Mapping) else {}
     )
@@ -1878,9 +1976,27 @@ def _resolve_direction_output_policy(config: Mapping[str, Any] | None) -> Dict[s
         "enabled": bool(cfg.get("enabled", False)),
         "horizons": sorted({_normalize_horizon_value(v) for v in horizons}),
         "neutral_band": max(float(cfg.get("neutral_band") or 0.0), 0.0),
+        "neutral_band_by_horizon": _normalize_float_map(cfg.get("neutral_band_by_horizon"), minimum=0.0),
         "use_trade_probability_fallback": bool(cfg.get("use_trade_probability_fallback", True)),
         "calibration_path": str(cfg.get("calibration_path") or "") or None,
         "calibration_map": calibration_map,
+        "probability_shrinkage": {
+            "enabled": bool(shrinkage_cfg.get("enabled", False)),
+            "horizons": sorted(
+                {
+                    _normalize_horizon_value(v)
+                    for v in (shrinkage_cfg.get("horizons") or horizons)
+                }
+            ),
+            "regimes": {
+                str(value).strip().lower()
+                for value in (shrinkage_cfg.get("regimes") or [])
+                if str(value).strip()
+            },
+            "default_strength": max(min(float(shrinkage_cfg.get("default_strength") or 0.0), 0.95), 0.0),
+            "strength_by_horizon": _normalize_float_map(shrinkage_cfg.get("strength_by_horizon"), minimum=0.0),
+            "bypass_edge": max(min(float(shrinkage_cfg.get("bypass_edge") or 1.0), 0.5), 0.0),
+        },
         "marginal_rerank": {
             "enabled": bool(marginal_rerank_cfg.get("enabled", False)) and bool(marginal_weight_specs),
             "horizons": sorted({_normalize_horizon_value(v) for v in marginal_horizons}),
@@ -3606,10 +3722,53 @@ def _apply_execution_policy(
         if stop_refinement.get("applied"):
             selected_stop = float(stop_refinement["stop_loss"])
             risk_unit = float(stop_refinement["risk_unit"])
+        stop_scaling_payload = {
+            "applied": False,
+            "reason": "not_triggered",
+            "multiplier": 1.0,
+            "risk_unit_before": float(risk_unit),
+            "risk_unit_after": float(risk_unit),
+        }
+        regime_stop_multiplier = max(float(regime_template.get("stop_multiplier", 1.0) or 1.0), 0.1)
+        if regime_stop_multiplier > 1.0:
+            scaled_risk = risk_unit * regime_stop_multiplier
+            selected_stop = planned_entry - scaled_risk if side == "long" else planned_entry + scaled_risk
+            risk_unit = float(max(scaled_risk, 1e-8))
+            stop_scaling_payload = {
+                "applied": True,
+                "reason": "regime_stop_multiplier",
+                "multiplier": float(regime_stop_multiplier),
+                "risk_unit_before": float(stop_scaling_payload["risk_unit_before"]),
+                "risk_unit_after": float(risk_unit),
+            }
+
+        vol_stop_cfg = policy.get("volatility_expansion_stop") if isinstance(policy.get("volatility_expansion_stop"), Mapping) else {}
+        if bool(vol_stop_cfg.get("enabled", False)):
+            expansion_value = abs(_finite_float(entry.get("range_expansion_1h"), 0.0))
+            expansion_threshold = float(vol_stop_cfg.get("expansion_threshold", 1.15) or 1.15)
+            scoped_regimes = {str(v).strip().lower() for v in (vol_stop_cfg.get("regimes") or []) if str(v).strip()}
+            regime_allowed = (not scoped_regimes) or (regime_state in scoped_regimes)
+            if regime_allowed and expansion_value >= expansion_threshold:
+                stop_multiplier = max(float(vol_stop_cfg.get("stop_multiplier", 1.1) or 1.1), 0.1)
+                max_multiplier = max(float(vol_stop_cfg.get("max_multiplier", 1.5) or 1.5), 0.1)
+                stop_multiplier = min(stop_multiplier, max_multiplier)
+                scaled_risk = risk_unit * stop_multiplier
+                selected_stop = planned_entry - scaled_risk if side == "long" else planned_entry + scaled_risk
+                risk_unit = float(max(scaled_risk, 1e-8))
+                stop_scaling_payload = {
+                    "applied": True,
+                    "reason": "volatility_expansion_stop",
+                    "multiplier": float(stop_multiplier),
+                    "expansion_value": float(expansion_value),
+                    "expansion_threshold": float(expansion_threshold),
+                    "risk_unit_before": float(stop_scaling_payload.get("risk_unit_after", stop_scaling_payload["risk_unit_before"])),
+                    "risk_unit_after": float(risk_unit),
+                }
         plan["stop_management"] = {
             "source": stop_resolution.get("source"),
             "adjustment": stop_resolution.get("adjustment"),
             "target_range_refinement": stop_refinement.get("details"),
+            "stop_scaling": stop_scaling_payload,
         }
 
         if guards_cfg.get("enabled"):
@@ -3629,6 +3788,7 @@ def _apply_execution_policy(
             horizon=horizon,
             policy=policy,
             regime_template=regime_template,
+            regime_state=regime_state,
         )
         selected_take = float(target_resolution["selected_take"])
         risk_reward_ratio = float(target_resolution["risk_reward_ratio"])
@@ -3759,9 +3919,37 @@ def _resolve_execution_target_reward(
     horizon: float,
     policy: Mapping[str, Any],
     regime_template: Mapping[str, Any],
+    regime_state: str = REGIME_NEUTRAL,
 ) -> Dict[str, Any]:
     rr_floor = _lookup_horizon_value(policy.get("minimum_rr_by_horizon", {}), horizon, 1.0)
     rr_floor *= float(regime_template.get("tp_multiplier", 1.0) or 1.0)
+    dynamic_rr_cfg = policy.get("dynamic_rr_floor") if isinstance(policy.get("dynamic_rr_floor"), Mapping) else {}
+    dynamic_rr_applied = False
+    dynamic_rr_ratio = None
+    if bool(dynamic_rr_cfg.get("enabled", False)) and bool(analytics_payload.get("available")):
+        sample_count = int(analytics_payload.get("sample_count") or 0)
+        min_samples = max(int(dynamic_rr_cfg.get("min_samples", 40) or 40), 1)
+        mae_distance = _finite_float_or_none(analytics_payload.get("mae_distance"))
+        mfe_distance = _finite_float_or_none(analytics_payload.get("mfe_distance"))
+        if sample_count >= min_samples and mae_distance is not None and mfe_distance is not None and mae_distance > 0.0:
+            realized_ratio = max(mfe_distance / max(mae_distance, 1e-8), 0.0)
+            regime_multiplier = 1.0
+            regime_map = dynamic_rr_cfg.get("regime_multiplier") if isinstance(dynamic_rr_cfg.get("regime_multiplier"), Mapping) else {}
+            if regime_map:
+                regime_multiplier = max(float(regime_map.get(str(regime_state).strip().lower(), 1.0) or 1.0), 0.0)
+            scaled_ratio = realized_ratio * max(float(dynamic_rr_cfg.get("mfe_mae_scale", 0.9) or 0.9), 0.0) * regime_multiplier
+            max_adjustment = max(min(float(dynamic_rr_cfg.get("max_adjustment", 0.35) or 0.35), 1.0), 0.0)
+            floor_reduction = rr_floor * max_adjustment
+            bounded_floor = max(rr_floor - floor_reduction, scaled_ratio)
+            min_floor = _lookup_horizon_value(
+                dynamic_rr_cfg.get("min_floor_by_horizon", {}),
+                horizon,
+                float(dynamic_rr_cfg.get("default_floor", 0.0) or 0.0),
+            )
+            max_floor = _lookup_horizon_value(dynamic_rr_cfg.get("max_floor_by_horizon", {}), horizon, rr_floor)
+            rr_floor = max(min(bounded_floor, max_floor), min_floor)
+            dynamic_rr_applied = True
+            dynamic_rr_ratio = realized_ratio
     effective_rr_floor = rr_floor
     existing_reward = abs(existing_take - planned_entry)
     projection_reward = 0.0
@@ -3826,6 +4014,8 @@ def _resolve_execution_target_reward(
             "analytic_mfe_reward": float(analytic_mfe_reward) if analytic_mfe_reward > 0.0 else None,
             "projection_reward": float(projection_reward) if projection_reward > 0.0 else None,
             "selected_reward": float(final_reward),
+            "dynamic_rr_floor_applied": bool(dynamic_rr_applied),
+            "dynamic_realized_rr_ratio": float(dynamic_rr_ratio) if dynamic_rr_ratio is not None else None,
         },
     }
 
@@ -4744,7 +4934,7 @@ def _lookup_raw_ev_fallback_threshold(model: Mapping[str, Any], quantile: float)
 def _apply_trade_decision_model(
     *,
     result: Dict[str, Any],
-    horizon_label: str | None,
+    horizon_label: str | None = None,
     regime_state: str,
     residual_std: float,
     policy: Mapping[str, Any],
@@ -6671,7 +6861,12 @@ def _build_direction_output(
     if not enabled or not scoped:
         return payload
 
-    neutral_band = float(policy.get("neutral_band", 0.0) or 0.0)
+    horizon_value = _parse_horizon_label(label)
+    neutral_band = _lookup_horizon_value(
+        policy.get("neutral_band_by_horizon", {}),
+        horizon_value,
+        float(policy.get("neutral_band", 0.0) or 0.0),
+    )
     internal_direction = base_direction
     ret_side = _direction_from_ret_pred(ret_pred)
     projected_side = _direction_from_projected_price(close, projected_price)
@@ -6703,7 +6898,7 @@ def _build_direction_output(
 
     marginal_rerank_policy = policy.get("marginal_rerank") if isinstance(policy.get("marginal_rerank"), Mapping) else {}
     marginal_horizons = set(marginal_rerank_policy.get("horizons", []))
-    if bool(marginal_rerank_policy.get("enabled", False)) and _parse_horizon_label(label) in marginal_horizons:
+    if bool(marginal_rerank_policy.get("enabled", False)) and horizon_value in marginal_horizons:
         gate_probability = float(raw_probability) if bool(marginal_rerank_policy.get("use_raw_probability_gate", True)) else float(probability)
         lower = float(marginal_rerank_policy.get("lower", 0.5) or 0.5)
         upper = float(marginal_rerank_policy.get("upper", 0.6) or 0.6)
@@ -6735,6 +6930,33 @@ def _build_direction_output(
                 calibration_used_regime_key = False
                 calibration_skipped_due_to_marginal_rerank = True
 
+    shrinkage_policy = policy.get("probability_shrinkage") if isinstance(policy.get("probability_shrinkage"), Mapping) else {}
+    shrinkage_payload = {
+        "enabled": bool(shrinkage_policy.get("enabled", False)),
+        "applied": False,
+        "strength": 0.0,
+        "bypass_edge": float(shrinkage_policy.get("bypass_edge", 1.0) or 1.0),
+    }
+    if bool(shrinkage_policy.get("enabled", False)):
+        scoped_horizons = set(shrinkage_policy.get("horizons", []))
+        scoped_regimes = set(shrinkage_policy.get("regimes", []))
+        in_horizon_scope = (not scoped_horizons) or (horizon_value in scoped_horizons)
+        in_regime_scope = (not scoped_regimes) or (regime_state in scoped_regimes)
+        if in_horizon_scope and in_regime_scope:
+            strength = _lookup_horizon_value(
+                shrinkage_policy.get("strength_by_horizon", {}),
+                horizon_value,
+                float(shrinkage_policy.get("default_strength", 0.0) or 0.0),
+            )
+            strength = max(min(float(strength), 0.95), 0.0)
+            bypass_edge = max(min(float(shrinkage_policy.get("bypass_edge", 1.0) or 1.0), 0.5), 0.0)
+            shrinkage_payload["strength"] = float(strength)
+            shrinkage_payload["bypass_edge"] = float(bypass_edge)
+            if strength > 0.0 and abs(float(probability) - 0.5) < bypass_edge:
+                probability = 0.5 + (float(probability) - 0.5) * (1.0 - strength)
+                source = "direction_output_probability_shrinkage"
+                shrinkage_payload["applied"] = True
+
     payload.update(
         {
             "direction": _direction_from_probability(probability, neutral_band=neutral_band),
@@ -6748,6 +6970,7 @@ def _build_direction_output(
                 "fallback_to_trade_probability": fallback_to_trade_probability,
                 "skipped_due_to_marginal_rerank": calibration_skipped_due_to_marginal_rerank,
             },
+            "probability_shrinkage": shrinkage_payload,
         }
     )
 

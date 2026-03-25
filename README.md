@@ -1,4 +1,4 @@
-# BTCUSDT Forecasting Pipeline (Binance-Only)
+# BTCUSDT Forecasting Pipeline 
 
 This repository contains a Binance-only BTCUSDT forecasting and reliability pipeline with:
 
@@ -142,6 +142,8 @@ The top-level payload now also includes:
 
 `execution_plan.stop_management` records whether stop guardrails widened, capped, or swapped the selected stop candidate to keep the stop width inside the configured ATR band.
 
+`execution_plan.stop_management.stop_scaling` now records whether stop width was expanded by regime template stop multipliers or by volatility-expansion rules (`volatility_expansion_stop`), including the multiplier, expansion trigger values, and pre/post risk unit.
+
 `probability_calibration` records the requested horizon/regime calibration key, the key actually applied, whether runtime fell back to the base horizon calibration, and any `forecast_alignment_guard` fallback used when a regime-specific calibration would have flipped a raw probability that already agreed with both forecast branches.
 
 `trade_decision.threshold_source`, `confidence_min_source`, and `abstention.reason` now make the applied horizon/regime policy resolution explicit inside each horizon payload.
@@ -151,6 +153,10 @@ The top-level payload now also includes:
 `forecast_coherence` now distinguishes hard gating from advisory low-trust conflicts. Strong disagreements still populate `reasons`, force `hold`, and can neutralize display direction. Low-edge `p_up` conflicts that are already non-tradable instead populate `advisory_reasons`, set `low_trust: true`, and exclude that horizon from confluence/bias voting without rewriting the numeric probability.
 
 `execution_plan` now carries weighted-bias and execution scores, pullback-quality diagnostics, and short-vs-mid disagreement severity. In the current runtime this is what drives rejections like `short_term_disagreement` and `pullback_quality_insufficient`, and it is also what feeds the compact operator summary.
+
+`execution_plan.target_management` now includes `dynamic_rr_floor_applied` and `dynamic_realized_rr_ratio` when dynamic risk-reward floor logic is enabled via `execution_policy.dynamic_rr_floor`.
+
+`direction_output.probability_shrinkage` now reports whether per-horizon and per-regime probability shrinkage was applied (configured in `direction_output_policy.probability_shrinkage`) before display-direction neutrality logic.
 
 `uncertainty.effective_policy` records the horizon/regime-specific uncertainty settings actually applied after override resolution.
 
@@ -239,6 +245,8 @@ Reliability configs:
 
 - `configs/reliability_workflow.default.yaml` - full monthly/default workflow with labeled-dataset rebuilds, overlap drift guard, trusted baseline pack generation, raw direction snapshots, and deployable-threshold fallback.
 - `configs/reliability_workflow.runtime.yaml` - lighter runtime workflow pinned to the current trusted snapshot lineage and shadow paper-live config.
+- runtime quality stage now includes `directional_objectives` evaluation through `src.scripts.evaluate_directional_objectives`, writing `summary/directional_objectives.json` and gating on overall, per-horizon, and per-regime Brier/ECE/F1 checks.
+- current runtime directional-objective defaults are `prob_col: p_up`, `label_col: y` (with runtime auto-resolution to `y_true` when present), `group_min_rows: 40`, `max_brier: 0.255`, and `max_ece_by_regime.chop: 0.18`.
 - `configs/reliability_workflow.midband_paper.yaml`
 
 Other configs currently present:
