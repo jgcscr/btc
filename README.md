@@ -11,6 +11,23 @@ This repository contains a Binance-only BTCUSDT forecasting and reliability pipe
 - Default-vs-midband matched-cycle paper tracking and longitudinal watchlist artifacts
 - Prediction and monitoring artifacts under `artifacts/`
 
+## Recent Changes (2026-03-25)
+
+- Added directional-objective reliability gate integration in runtime workflow via `src.scripts.evaluate_directional_objectives`.
+- Runtime directional-objective profile is now tuned to current production behavior:
+  - `group_min_rows: 40`
+  - `max_brier: 0.255`
+  - `max_ece_by_regime.chop: 0.18`
+- Directional-objective evaluator now resolves runtime label aliases (`y` and `y_true`) and normalizes missing regime labels to `unknown`.
+- Trade-decision runtime compatibility was hardened by allowing legacy callers to omit `horizon_label` in `_apply_trade_decision_model`.
+- Runtime output docs now explicitly describe:
+  - `execution_plan.stop_management.stop_scaling`
+  - `execution_plan.target_management.dynamic_rr_floor_applied`
+  - `execution_plan.target_management.dynamic_realized_rr_ratio`
+  - `direction_output.probability_shrinkage`
+
+These changes are reflected in `README.md`, `docs/operations_runbook.md`, and `docs/agent_system_handoff_20260320.md`.
+
 
 ## 1. Environment Setup
 
