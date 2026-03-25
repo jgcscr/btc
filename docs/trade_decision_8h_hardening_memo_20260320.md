@@ -1,8 +1,19 @@
-# 8h Hardening Memo (2026-03-20)
+# 8h Hardening Memo
+
+Historical caution reference.
+
+This note records the operator-safe interpretation of `8h` weakness after the post-fix validation pass.
+
+It does not replace the current live profile, the current trust basis, or the current runtime artifacts.
+
+Use these current sources instead:
+
+- `docs/live_trading_rollout_20260320.md`
+- `docs/trade_decision_post_fix_trust_basis_20260319.md`
+- `artifacts/predictions/latest.json`
+- `artifacts/monitoring/latest.json`
 
 ## Scope
-
-This memo documents the latest operator-safe interpretation of `8h` weakness after the post-fix validation pass.
 
 It does not replace the trusted default or the conservative live profile. It explains why the current live stance remains:
 
@@ -10,7 +21,7 @@ It does not replace the trusted default or the conservative live profile. It exp
 - underweight `8h` capital,
 - avoid forcing standalone `8h` longs without stronger stack confirmation.
 
-## Direct Covered 8h Extraction
+## 1. Direct Covered 8h Extraction
 
 The latest check used the dataset-covered pairwise summaries and filtered only rows where:
 
@@ -38,7 +49,7 @@ Largest losses in the covered `8h` set were concentrated in added longs, includi
 - window `default_profile_pairwise_extension6_954_post_fix_20260320`, offset `456`, signed return `-0.01903829723596573`
 - window `default_profile_pairwise_extension960_1152_post_fix_20260319`, offset `1146`, signed return `-0.015797356143593788`
 
-## Interpretation
+## 2. Interpretation
 
 This is weaker than the broad horizon-level aggregate and should be treated as an operator caution lens, not as a replacement for the official trust-basis aggregate.
 
@@ -49,7 +60,7 @@ What it means operationally:
 - the current risk control should continue to be capital underweighting rather than structural rerouting,
 - a blanket `8h` suppression rule is still not justified because the earlier direct suppression experiment degraded the wider covered aggregate.
 
-## Safe Action Now
+## 3. Safe Action Now
 
 Keep these rules active:
 
@@ -58,7 +69,7 @@ Keep these rules active:
 3. do not manually force a standalone `8h` long when `8h` is rejected for `insufficient_mfe_headroom`
 4. do not manually promote an `8h` long if `4h` is not ready or if `12h` is simultaneously failing headroom on the same side
 
-## Safest Next Structural Candidate
+## 4. Safest Next Structural Candidate
 
 If another code-level hardening pass is attempted, the safest candidate is:
 

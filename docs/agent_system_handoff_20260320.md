@@ -1,33 +1,47 @@
-# Agent System Handoff (2026-03-20)
+# Agent System Handoff
 
-This document is the shortest complete handoff for a new agent that needs to operate this repository safely.
+This document is the shortest safe handoff for an agent taking over this repository.
 
-It is written for the current workspace state, not for a hypothetical clean-room rebuild.
+It is not a changelog. Use it to understand which runtime path to use, which artifacts are authoritative, and which mistakes to avoid when switching between live-style refreshes, cadence operations, and reliability work.
 
-## What Is Trusted Right Now
+## 1. Operating Split
 
-There are two different runtime references and they serve different purposes:
+There are three distinct operating contexts in this workspace:
 
-- `configs/run_refresh_and_predict.default.yaml` is the trusted post-fix research and comparison baseline.
-- `configs/run_refresh_and_predict.live_conservative.yaml` is the approved initial live trading profile.
+1. Direct runtime refreshes for current market state.
+2. Cadence refreshes driven by the latest trustworthy reliability run.
+3. Reliability workflows that rebuild and validate deployable artifacts.
 
-Do not treat them as interchangeable.
+Do not treat these as interchangeable.
 
-Current live stance:
+Core runtime references:
 
-- the system is trusted for live trading with conservative risk discipline,
-- `8h` remains the weakest carry horizon,
-- live hardening is done with horizon-specific size caps, scoped horizon/regime overrides, and operator discipline, not with a blanket `8h` suppression rule.
+- `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline.
+- `configs/run_refresh_and_predict.live_conservative.yaml`: approved conservative live profile.
+- `configs/run_refresh_and_predict.shadow_simplified.yaml`: artifact-writing cadence refresh profile used by `daily`.
+- `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: active left-hand shadow comparison profile.
+- `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: active right-hand shadow comparison profile.
 
-Current state sources in this codespace:
+## 2. Source Of Truth
 
-- read the latest live-style runtime state from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
-- read the active deployed bundle from `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
-- treat those artifacts, not this handoff note, as the source of truth for the current run id, active variant, preferred horizon, and latest recommended action
+For the current runtime state, read these artifacts first:
 
-## Read Order For A New Agent
+- `artifacts/predictions/latest.json`
+- `artifacts/monitoring/latest.json`
+- `artifacts/monitoring/trade_ready_summary.json`
+- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
 
-Read these first, in this order:
+Treat those artifacts, not this handoff note, as the source of truth for:
+
+- current deploy lineage
+- latest trustworthy run usage
+- preferred horizon
+- recommended action
+- current blockers and execution state
+
+## 3. Read Order
+
+Read these first in order:
 
 1. `README.md`
 2. `docs/operations_runbook.md`
@@ -37,15 +51,15 @@ Read these first, in this order:
 6. `docs/trade_decision_8h_hardening_memo_20260320.md`
 7. `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
 
-If you need the older deployment decision context, then read:
+If older promotion context is needed, then read:
 
 - `docs/trade_decision_operator_handoff_20260316.md`
 
-## Golden Paths
+## 4. Golden Paths
 
-### 1. Fresh live-style prediction refresh
+### Direct conservative live-style refresh
 
-Use this when you need the current market state under the approved live rollout policy:
+Use this when the task is to read the current market under the approved live profile:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
@@ -56,48 +70,45 @@ Inspect immediately after the run:
 
 1. `artifacts/predictions/latest.json`
 2. `artifacts/monitoring/latest.json`
-3. `artifacts/monitoring/trade_ready_summary.json` only if that run path rewrote artifact-writing summaries
+3. `artifacts/monitoring/trade_ready_summary.json` only if that run path refreshed it
 
-### 2. Standard daily operations
+### Standard cadence refresh
 
-Use the cadence wrapper:
+Use this for scheduled or operational daily refreshes:
 
 ```bash
 bash ./scripts/run_cadence.sh daily
 ```
 
-Important behavior:
+Current behavior:
 
-- the cadence script resolves the latest trustworthy reliability run,
-- it refreshes predictions with `configs/run_refresh_and_predict.shadow_simplified.yaml`,
-- it is for scheduled operating cadence, not for the conservative discretionary live rollout.
-- the GitHub Actions workflow currently exposes only `daily`, `weekly`, and `monthly`; `shadow` remains a local wrapper path unless the workflow is extended.
+- resolves the latest trustworthy reliability run
+- refreshes with `configs/run_refresh_and_predict.shadow_simplified.yaml`
+- is for cadence operations, not for discretionary live execution
 
-### 2a. Shadow comparison cadence
+### Shadow comparison cadence
 
-Use this when you need repeated observational comparison between the simplified shadow profile and the chop-suppression candidate:
+Use this for observational profile comparison only:
 
 ```bash
 bash ./scripts/run_cadence.sh shadow
 ```
 
-Inspect immediately after the run:
+Current behavior:
+
+- compares `shadow_direction_enhanced_relaxed_chop` against `shadow_chop_suppression`
+- records `source_reliability_run_id` separately from the comparison run id
+- determines `latest` by `generated_at`, not by lexicographic run id order
+
+Read after the run:
 
 1. `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
 2. `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
 3. `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
 
-Important behavior:
+### Reliability workflow
 
-- the shadow cadence compares `shadow_simplified` vs `shadow_chop_suppression`,
-- the comparison run id is timestamped independently from the trustworthy reliability source,
-- the manifest records the source bundle as `source_reliability_run_id`,
-- the latest shadow run is determined by `generated_at`, not by lexicographic `run_id`,
-- the current decision-useful operator digest is the Markdown summary, not the raw pairwise comparison JSON.
-
-### 3. Reliability workflow refresh
-
-Runtime reliability pass:
+Runtime pass:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
@@ -105,7 +116,7 @@ Runtime reliability pass:
   --continue-on-promotion-fail
 ```
 
-Full monthly/default reliability pass:
+Default pass:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
@@ -113,9 +124,9 @@ Full monthly/default reliability pass:
   --continue-on-promotion-fail
 ```
 
-### 4. Replay validation against historical snapshots
+### Replay validation
 
-Use this when validating policy changes without touching the active live logic:
+Use this when validating policy changes without touching active live logic:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
@@ -124,24 +135,19 @@ Use this when validating policy changes without touching the active live logic:
   --replay-offset-bars 24
 ```
 
-For pairwise trust validation, the working utilities are:
-
-- `artifacts/tmp_validation/run_pairwise_replay_matrix.py`
-- `artifacts/tmp_validation/rebuild_pairwise_summary_from_snapshots.py`
-- `artifacts/tmp_validation/score_pairwise_return_proxy.py`
-
-## Files That Matter Most During Operations
+## 5. Files That Matter Most
 
 Runtime config and policy:
 
 - `configs/run_refresh_and_predict.default.yaml`
 - `configs/run_refresh_and_predict.live_conservative.yaml`
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`
+- `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`
 - `src/trading/feature_engineering.py`
 - `src/scripts/audit_feature_parity.py`
 
-Reliability workflow control:
+Reliability control:
 
 - `configs/reliability_workflow.runtime.yaml`
 - `configs/reliability_workflow.default.yaml`
@@ -151,8 +157,11 @@ Runtime outputs:
 
 - `artifacts/predictions/latest.json`
 - `artifacts/monitoring/latest.json`
-- `artifacts/monitoring/trade_ready_summary.json` when the selected path refreshes artifact-writing summaries
+- `artifacts/monitoring/trade_ready_summary.json`
 - `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+
+Shadow comparison outputs:
+
 - `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
 - `artifacts/predictions/comparisons/shadow_profile_comparison_summary.json`
 - `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
@@ -166,63 +175,42 @@ Reliability outputs:
 - `artifacts/reliability/<run-id>/summary/edge_trustworthiness.json`
 - `artifacts/reliability/<run-id>/summary/directional_objectives.json`
 
-Scratch validation area:
+## 6. Safe Operating Rules
 
-- keep temporary replay work under `artifacts/tmp_validation/`
-- do not treat scratch outputs as trusted until the manifest and configs match the intended run
+1. Do not weaken promotion gates to make a candidate pass.
+2. Do not replace the trusted default with an unvalidated policy change.
+3. Do not use shadow comparison outputs as live authorization inputs.
+4. Do not force entries when `execution_plan.status` is `waiting_pullback`, `bias_only_ready`, or `rejected`.
+5. Treat runtime config validation failures as correctness failures, not warnings.
+6. Keep scratch replay and validation work under `artifacts/tmp_validation/`.
 
-## Safe Operating Rules
+## 7. Checks Before Trusting A Change
 
-1. Do not weaken promotion gates just to keep a candidate moving.
-2. Do not replace the trusted default with an unscored policy change.
-3. Do not add a blanket `8h` suppression rule without covered replay validation.
-4. Prefer capital underweighting and operator discipline over speculative routing changes.
-5. If live output shows directional bias but `execution_plan` says `waiting_pullback` or `rejected`, do not force a market entry.
-6. Treat runtime config validation failures as correctness problems, not as warnings; stale weight keys and malformed threshold maps now fail fast by design.
-
-## What To Check Before Trusting A New Change
-
-For reliability and deployment changes:
+For reliability and deployment changes, read in this order:
 
 1. `summary/champion_gate_alignment_check.json`
 2. `summary/promotion_gate.json`
 3. `summary/directional_objectives.json`
 4. `summary/trade_decision_model_shift_guard.json`
-5. `summary/overlap_triggered_trade_diagnostics.json`
+5. `summary/overlap_triggered_trade_diagnostics.json` when present
 6. `summary/calibration_robustness.json`
 7. `summary/rolling_ab_report.json`
 
-For runtime policy changes:
+For runtime policy changes, verify:
 
-1. pairwise replay summary integrity
-2. manifest correctness for snapshot reuse
-3. covered return-proxy scoring against `artifacts/datasets/btc_features_multi_horizon_splits.npz`
-4. focused regression tests when code changes are involved
-5. train/serve feature parity using `src.scripts.audit_feature_parity` when local-feature overrides are part of the change
+1. replay behavior is consistent with the intended profile change
+2. snapshot and manifest lineage are correct
+3. feature parity holds if local-feature behavior changed
+4. focused regression tests pass when code changed
 
-## Current 8h Interpretation
+## 8. Minimal First Session
 
-The current direct covered operator-caution extraction for `8h` added trades is:
+If a new agent has to pick up the workspace quickly, the minimum safe sequence is:
 
-- total `8h` added trades: `11`
-- average signed return proxy: `-0.004160029236862267`
-- `8h` longs are the weakest slice
+1. Read the documents listed above.
+2. Inspect the current deploy manifest.
+3. Run a fresh conservative live-style refresh if the task is market-state related.
+4. Inspect `latest.json` and `monitoring/latest.json`.
+5. Decide whether the task belongs to live operations, cadence, reliability, or replay validation.
 
-Operationally this means:
-
-- keep `8h` enabled,
-- keep it underweighted,
-- allow the checked-in live conservative profile to act on `8h` when it is genuinely `ready`,
-- do not manually upsize or substitute a blocked `12h` setup for the ready `8h` setup.
-
-## Minimal First Session For A New Agent
-
-If a fresh agent has to pick up the repo quickly, the minimum safe sequence is:
-
-1. read the documents listed in the read order above
-2. inspect the current deploy manifest
-3. run a fresh conservative live prediction refresh
-4. inspect `latest.json` and `trade_ready_summary.json`
-5. only then decide whether the task is live operations, reliability, or replay validation
-
-That sequence is enough to avoid the most common mistake in this repo: mixing up the trusted research default, the conservative live rollout profile, and the cadence/shadow operating profile.
+The main failure mode in this repository is mixing up direct live-style refreshes, cadence refreshes, and reliability workflows. Keep those paths separate.

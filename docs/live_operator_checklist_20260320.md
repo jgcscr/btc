@@ -1,6 +1,6 @@
-# Live Operator Checklist (2026-03-20)
+# Live Operator Checklist
 
-This checklist is the shortest operator path for the approved conservative live rollout profile:
+This checklist is the shortest operator path for the approved conservative live profile:
 
 - `configs/run_refresh_and_predict.live_conservative.yaml`
 
@@ -9,102 +9,97 @@ Use it together with:
 - `docs/live_trading_rollout_20260320.md`
 - `docs/trade_decision_8h_hardening_memo_20260320.md`
 
-## Scope Boundary
+## 1. Scope Boundary
 
-This checklist applies only to the approved live conservative path:
+This checklist applies only to direct conservative live-style refreshes.
 
-- `configs/run_refresh_and_predict.live_conservative.yaml`
+Do not use cadence outputs or shadow comparison outputs as a substitute for a direct live-style refresh when making a live decision.
 
-Do not mix in observational shadow comparison outputs when making a live decision from this checklist.
-
-The following artifacts are shadow-only diagnostics and are not live trade-authorization inputs:
+Shadow-only diagnostics are:
 
 - `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
 - `artifacts/predictions/comparisons/shadow_profile_comparison_summary.json`
 - `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
 - `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
 
-Use them to judge whether the chop-suppression candidate is drifting operationally from `shadow_simplified`, not to override the current live conservative execution state.
+Those files are observational only. They are used to compare `shadow_direction_enhanced_relaxed_chop` against `shadow_chop_suppression`, not to authorize a live trade.
 
-## Current Snapshot Discipline
-
-Do not trust a hardcoded snapshot summary in this document.
+## 2. Snapshot Discipline
 
 After each fresh conservative run, read the current state directly from:
 
 - `artifacts/predictions/latest.json`
 - `artifacts/monitoring/latest.json`
-- `artifacts/monitoring/trade_ready_summary.json` when that run path refreshed artifact-writing summaries
+- `artifacts/monitoring/trade_ready_summary.json` only if that run path refreshed it
 
 Minimum fields to confirm before acting:
 
-- top-level `generated_at` is recent enough for the decision you are about to make
+- `generated_at` is recent enough for the decision window
 - `request.local_feature_overrides.feature_coverage.ok = true`
-- source freshness remains acceptable in `request.local_feature_overrides.source_freshness`
-- `prompt_ready_summary.operator_summary_compact` matches the preferred horizon and recommended action you intend to follow
+- `request.local_feature_overrides.source_freshness` is acceptable
+- `prompt_ready_summary.operator_summary_compact` matches the interpretation you intend to use
 - per-horizon `trade_action`, `execution_plan.status`, `execution_plan.reason`, `position_size_cap`, `confidence_min_source`, and `abstention.reason` support the same interpretation
 
-## Pre-Run Checks
+## 3. Pre-Run Checks
 
-Before each live refresh:
+Before each direct live-style refresh:
 
 1. Confirm the active profile is `configs/run_refresh_and_predict.live_conservative.yaml`.
-2. Confirm the latest trustworthy reliability deployment is still the intended incumbent.
+2. Confirm the latest trustworthy deployment is still the intended incumbent.
 3. Confirm no manual local edits have changed live sizing or threshold controls.
 4. Confirm data inputs are current enough for a live read.
 
-## Run Command
+## 4. Run Command
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
   --config configs/run_refresh_and_predict.live_conservative.yaml
 ```
 
-## Post-Run Hard Gates
+## 5. Post-Run Hard Gates
 
 Inspect these first:
 
 1. `artifacts/monitoring/latest.json`
 2. `artifacts/predictions/latest.json`
-3. `artifacts/monitoring/trade_ready_summary.json` only if the run path refreshed artifact-writing outputs
+3. `artifacts/monitoring/trade_ready_summary.json` only if the run path refreshed it
 
 Live trading stays enabled only if all of these remain true:
 
 1. feature coverage remains `ok = true`
-2. source freshness lag remains clean
+2. source freshness remains clean
 3. request-level caps still show:
    - `15m = 0.0`
    - `1h = 0.15`
    - `4h = 0.35`
    - `8h = 0.20`
    - `12h = 0.35`
-4. preferred live-ready horizon remains inside `4h`, `8h`, or `12h`
-5. no new cluster of `forecast_coherence_gate` or `bias_direction_conflict` appears in the mid-term stack
+4. the preferred actionable horizon remains within the mid-term live stack
+5. no new cluster of `forecast_coherence_gate`, `bias_direction_conflict`, or similar mid-term execution blockers appears
 
-Current workspace note:
+Operational note:
 
 - direct conservative refreshes should be read from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
-- `artifacts/monitoring/trade_ready_summary.json` may lag if the selected run path does not rewrite the artifact-writing summary outputs
-- shadow comparison summaries are observational only and should not be used as a substitute for the direct conservative refresh artifacts above
+- `artifacts/monitoring/trade_ready_summary.json` can lag if the selected path does not rewrite that summary
 
-## Execution Decision Tree
+## 6. Execution Decision Tree
 
 1. If feature coverage fails, pause live trading.
-2. If the preferred horizon is `ready` and `prompt_ready_summary.operator_summary_compact.recommended_operator_action = enter_now`, use that horizon's execution plan and keep size inside that horizon's configured cap.
-3. If lower horizons are rejected for execution-quality reasons such as `insufficient_mfe_headroom`, treat them as non-confirming rather than as automatic overrides of a ready mid-term setup.
-4. If a horizon is `bias_only_ready`, keep the directional bias but do not substitute that horizon for a separate horizon that is actually `ready`.
-5. If a later refresh changes the preferred ready horizon, re-evaluate from the fresh snapshot instead of carrying forward a stale earlier bias.
+2. If the preferred horizon is `ready` and `recommended_operator_action = enter_now`, use that horizon's execution plan and keep size inside that horizon's cap.
+3. If lower horizons are rejected for execution-quality reasons, treat them as non-confirming rather than as automatic overrides of a ready mid-term setup.
+4. If a horizon is `bias_only_ready`, keep the bias but do not substitute it for a different horizon that is actually `ready`.
+5. If a later refresh changes the preferred horizon or execution state, re-evaluate from the fresh snapshot rather than carrying forward a stale decision.
 
-## Escalate Or Pause
+## 7. Pause Or Escalate Conditions
 
 Reduce risk or pause if any of these appears:
 
-1. repeated `8h`-preferred setups without confirmation from `4h` or `12h`
-2. repeated preferred-horizon setups with deteriorating `edge_over_fee` or `insufficient_mfe_headroom` across the confirming stack
+1. repeated `8h`-preferred setups without meaningful confirmation from `4h` or `12h`
+2. repeated preferred-horizon setups with deteriorating execution quality across the confirming stack
 3. new feature freshness or coverage failure
-4. next qualified reliability run fails promotion or model-shift guards
+4. the next qualified reliability run fails promotion or model-shift guards
 
-## Logging Discipline
+## 8. Logging Discipline
 
 For every live session, record:
 

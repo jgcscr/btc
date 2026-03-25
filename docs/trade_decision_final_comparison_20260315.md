@@ -1,4 +1,4 @@
-## Trade-Decision Final Comparison
+# Trade-Decision Final Comparison
 
 Historical reference only.
 
@@ -10,10 +10,13 @@ Use these current sources instead:
 - `docs/trade_decision_post_fix_trust_basis_20260319.md`
 - `docs/operations_runbook.md`
 
-Date: 2026-03-16
-Primary finalized runs: `20260316T011019Z`, `20260316T013439Z`, `20260316T030147Z`
+## Reference Runs
 
-Compared candidates:
+- `20260316T011019Z`
+- `20260316T013439Z`
+- `20260316T030147Z`
+
+## Compared Candidates
 
 - Base candidate: `none`
 - Raw ablation: `reference_feature_ablation`
@@ -22,7 +25,7 @@ Compared candidates:
 - Diagnostic ranking-quality branch on tuned ablation: `reference_feature_ablation_threshold_0p555_neutral_abs_ret_pred_floor_0p00212`
 - Neutral `p_up` cap branch on tuned ablation: `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499`
 
-Summary:
+## Summary
 
 | Variant | Trade count | Net return total | Companion | Rolling delta | Recent rows | Recent AUC | Recent ECE | ECE drift | Status |
 | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -33,7 +36,7 @@ Summary:
 | Ablation `0.555` + neutral `abs_ret_pred >= 0.00212` | 28 | +0.0396 | fail at `p=0.118` | +0.0607 | 11 | 0.6000 | 0.0171 | -0.0114 | ranking and calibration improve, support still fails |
 | Ablation `0.555` + neutral `p_up < 0.499` | 25 | +0.0825 | pass at `p=0.039` | +0.1037 | 15 | 0.6296 | 0.0703 | -0.0072 | selected eligible shadow and deployed on `20260316T030147Z` |
 
-Decision:
+## Historical Decision
 
 - Keep the current promoted deployment from `20260316T030147Z` active.
 - Keep raw ablation out of consideration for promotion.
@@ -42,7 +45,7 @@ Decision:
 - `reference_feature_ablation_threshold_0p555_neutral_p_up_cap_0p499` remains the strongest workflow-integrated follow-up branch. It first became `selected_variant` and `best_eligible_variant` in run `20260316T013439Z`, then completed promotion and deployment in run `20260316T030147Z`.
 - The successful deployment required four workflow corrections: selected-shadow companion routing, selected-shadow overlap-triggered diagnostics routing, deploy-after-final-gate ordering, and evaluating the trade-decision model-shift guard against the effective promoted model with normalized incumbent reference provenance.
 
-What this means operationally:
+## Interpretation
 
 - The repo now has evidence that threshold tuning plus a neutral `p_up` cap can recover enough support to clear the current selection bar without weakening gates.
 - The former workflow blockers are now resolved, and the branch has been deployed without weakening promotion gates.

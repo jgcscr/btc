@@ -1,7 +1,20 @@
-# Direction Enhancement Closeout (2026-03-25)
+# Direction Enhancement Closeout
+
+Historical closeout reference.
+
+This note records the completed direction-enhancement iteration that produced the current shadow comparison baseline.
+
+It is useful for tracing why the current left-hand shadow profile exists, but it is not the source of truth for the latest comparison run, the latest runtime snapshot, or any live authorization decision.
+
+Use these current sources instead:
+
+- `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
+- `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
+- `docs/operations_runbook.md`
 
 ## Scope
-This note closes the direction-enhancement iteration performed on 2026-03-25, including:
+
+This note closes a direction-enhancement iteration that included:
 - policy/profile variants
 - model-candidate training variants
 - replay and shadow-cadence validation
@@ -27,10 +40,11 @@ This note closes the direction-enhancement iteration performed on 2026-03-25, in
 Interpretation:
 - The enhanced relaxed-chop lhs still differs materially from chop-suppression.
 - Current snapshot still contains blocking reasons across major horizons (coherence, confluence, execution).
-- This does not support additional live-promotion changes beyond the current shadow baseline at this time.
+- This batch did not justify any additional live-promotion change beyond the current shadow baseline.
 
 ## Labeling Of Experimental Assets
-These are experimental and should be treated as non-promoted test assets:
+
+These remain experimental and should be treated as non-promoted test assets.
 
 ### Experimental Policy Profiles
 - `configs/archive/direction_enhancement_20260325/run_refresh_and_predict.shadow_direction_enhanced.yaml`
@@ -78,6 +92,7 @@ These are experimental and should be treated as non-promoted test assets:
 - `artifacts/tmp_validation/candidate165_relaxedbins_probe_20260325`
 
 ## Final Verdict
+
 - Keep current shadow baseline as-is.
 - Do not promote experimental model-candidate profiles from this batch.
 - Treat this iteration as complete and archived for traceability.
