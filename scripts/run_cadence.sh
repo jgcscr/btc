@@ -27,7 +27,7 @@ Cadences:
   daily    Run fresh predictions from the latest trustworthy reliability run.
   weekly   Run the runtime reliability workflow, then refresh predictions.
   monthly  Run the full default reliability workflow, then refresh predictions.
-  shadow   Run simplified vs chop-suppression shadow profiles and archive a comparison artifact.
+  shadow   Run direction-enhanced-relaxed-chop vs chop-suppression shadow profiles and archive a comparison artifact.
 EOF
 }
 
@@ -105,9 +105,9 @@ run_shadow_comparison() {
   echo "Using trustworthy run for shadow comparison: $reliable_run_id"
   ensure_runtime_directories
   "$PYTHON_BIN" -m src.scripts.run_shadow_profile_comparison \
-    --lhs-config configs/run_refresh_and_predict.shadow_simplified.yaml \
+    --lhs-config configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml \
     --rhs-config configs/run_refresh_and_predict.shadow_chop_suppression.yaml \
-    --lhs-label shadow_simplified \
+    --lhs-label shadow_direction_enhanced_relaxed_chop \
     --rhs-label shadow_chop_suppression \
     --targets 0.25,1,4,8,12 \
     --thresholds-json "artifacts/reliability/${reliable_run_id}/summary/calibrated_thresholds.json" \

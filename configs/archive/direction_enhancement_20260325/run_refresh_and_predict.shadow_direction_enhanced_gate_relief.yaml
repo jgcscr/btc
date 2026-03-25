@@ -1,0 +1,448 @@
+# Default configuration for run_refresh_and_predict.py. Copy this file and tweak values
+# to point the refresh pipeline at alternate data sources or model bundles.
+hours: 360
+# Targets are expressed in hours; sub-hourly entries can use fractional values.
+targets:
+  - 0.25
+  - 1
+  - 4
+  - 8
+  - 12
+p_up_min: 0.45
+ret_min: 0.0
+# experiment: direction-only entry threshold tuned from historical A/B analysis
+direction_threshold: 0.6
+# automatically compute direction_threshold from calibrated p_up_min values
+# when true, the explicit direction_threshold value is ignored
+auto_direction_threshold: true
+thresholds_json: artifacts/models/calibrated_thresholds_merged.json
+data_quality:
+  enabled: false
+  max_staleness_hours: 6.0
+  max_missing_ratio: 0.01
+  max_zero_volume_ratio: 0.2
+  min_rows: 120
+confidence_min: 0.0
+position_size_floor: 0.0
+position_size_cap: 1.0
+abstention_policy:
+  enabled: true
+  min_confidence: 0.2
+  min_abs_expected_value: 0.0002
+  min_edge_over_fee: 0.0001
+  require_positive_ev: true
+  hold_prob_center: 0.5
+  hold_prob_band: 0.03
+uncertainty_policy:
+  enabled: true
+  alpha: 0.2
+  hold_prob_center: 0.5
+  max_interval_width: 0.75
+  require_center_cross: true
+  min_component_count: 3
+  thresholds_by_horizon_regime:
+    "1":
+      neutral:
+        max_interval_width: 0.65
+        require_center_cross: true
+      chop:
+        max_interval_width: 0.55
+        require_center_cross: true
+      trend_ignition:
+        max_interval_width: 0.7
+        require_center_cross: true
+    "4":
+      neutral:
+        max_interval_width: 0.85
+        require_center_cross: true
+      chop:
+        max_interval_width: 0.75
+        require_center_cross: true
+      trend_ignition:
+        max_interval_width: 0.9
+        require_center_cross: false
+    "8":
+      neutral:
+        max_interval_width: 0.95
+        require_center_cross: false
+      chop:
+        max_interval_width: 0.8
+        require_center_cross: true
+      trend_ignition:
+        max_interval_width: 1.0
+        require_center_cross: false
+    "12":
+      neutral:
+        max_interval_width: 1.0
+        require_center_cross: false
+      chop:
+        max_interval_width: 0.85
+        require_center_cross: true
+      trend_ignition:
+        max_interval_width: 1.05
+        require_center_cross: false
+trade_decision_policy:
+  enabled: true
+  model_path: artifacts/models/trade_decision_model.json
+  threshold: 0.5495
+  thresholds_by_horizon_regime:
+    "1":
+      chop: 0.525
+    "4":
+      chop: 0.525
+    "8":
+      chop: 0.525
+    "12":
+      chop: 0.525
+  use_oof_expected_value: true
+  oof_expected_value_mode: max_with_raw_calibrated
+  enforce_positive_oof_envelope: true
+  positive_oof_envelope_mode: populated_bin_sign
+  block_when_no_positive_oof_bin: true
+  positive_oof_min_samples: 4
+  allow_raw_ev_fallback_when_no_positive_oof_bin: true
+  raw_ev_fallback_quantile: 0.9
+  raw_ev_fallback_min_edge_over_fee: 0.0
+  min_expected_net: 0.0
+  min_edge_over_fee: 0.0
+  replace_threshold_rule: true
+  require_direction_ret_alignment: true
+  midband_veto:
+    enabled: true
+    p_up_low: 0.56
+    p_up_high: 0.59
+    high_inclusive: false
+    min_abs_ret_pred: 0.001
+    max_abs_ret_pred: null
+    regime_states: [chop]
+feature_coverage_policy:
+  enabled: true
+  max_imputed_zero_columns: 12
+  max_imputed_zero_ratio: 0.2
+  max_source_lag_hours: 6.0
+  block_on_violation: true
+  ignored_columns:
+    - funding_rate
+    - fut_close
+    - fut_close_delta_1h
+    - fut_close_pct_change_1h
+    - fut_close_zscore_7h
+    - fut_high
+    - fut_low
+    - fut_open
+    - fut_volume
+    - fut_volume_delta_1h
+    - fut_volume_pct_change_1h
+    - open_interest
+forecast_coherence_policy:
+  enabled: true
+  horizons: [1, 4, 8, 12]
+  block_on_direction_ret_mismatch: false
+  block_on_direction_projected_price_mismatch: true
+  block_on_p_up_ret_mismatch: false
+  p_up_neutral_band: 0.02
+  min_p_up_edge: 0.05
+  min_abs_ret_pred: 0.0
+  allow_consensus_p_up_ret_relief: true
+  consensus_relief_horizons: [1, 4]
+  consensus_relief_max_p_up_edge: 0.12
+  consensus_relief_exclude_from_voting: false
+  exclude_blocked_horizons_from_voting: true
+direction_output_policy:
+  enabled: true
+  horizons: [0.25, 1]
+  neutral_band: 0.02
+  neutral_band_by_horizon:
+    "0.25": 0.04
+    "1": 0.025
+  calibration_path: artifacts/models/direction_output_isotonic_1h_recent_regime.json
+  use_trade_probability_fallback: true
+  probability_shrinkage:
+    enabled: true
+    horizons: [0.25, 1]
+    regimes: [chop, neutral]
+    default_strength: 0.15
+    strength_by_horizon:
+      "0.25": 0.28
+      "1": 0.1
+    bypass_edge: 0.3
+  marginal_rerank:
+    enabled: true
+    horizons: [0.25, 1]
+    lower: 0.48
+    upper: 0.62
+    min_component_count: 2
+    use_raw_probability_gate: true
+    weight_specs:
+      default: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.2,cnn_lstm:0.5,cnn_bilstm:0.2,garch_lstm:0.2,xgb:0.8
+      trend_ignition: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.4,cnn_bilstm:0.2,garch_lstm:0.2,xgb:1.0
+      neutral: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.1,cnn_lstm:0.55,cnn_bilstm:0.2,garch_lstm:0.2,xgb:0.9
+      chop: transformer:0.9,lstm:1.0,bilstm:1.0,gru:1.1,cnn_lstm:0.7,cnn_bilstm:0.25,garch_lstm:0.2,xgb:1.2
+confluence_policy:
+  enabled: true
+  short_horizons: [1]
+  mid_horizons: [4, 8, 12]
+  min_support_ratio: 0.55
+  min_support_ratio_by_horizon:
+    "4": 0.67
+    "8": 0.67
+  min_aligned_horizons: 2
+  min_aligned_horizons_by_horizon:
+    "4": 2
+  require_mid_term_alignment: true
+  min_mid_term_ratio: 0.66
+  require_short_term_alignment: false
+  min_short_term_ratio: 1.0
+  dominant_ratio_floor: 0.55
+execution_policy:
+  enabled: true
+  bias_horizons: [4, 8, 12]
+  execution_horizons: [4, 8, 12]
+  horizon_bias_weights:
+    "1": 0.45
+    "4": 1.0
+    "8": 0.9
+    "12": 1.15
+  min_bias_alignment_ratio: 0.52
+  coherence_weighting:
+    enabled: true
+    low_trust_penalty: 0.45
+    blocked_penalty: 1.0
+    p_up_conflict_penalty: 0.25
+    consensus_bonus: 0.08
+    neutral_band: 0.02
+    min_multiplier: 0.1
+    by_horizon:
+      "1": 0.9
+      "4": 1.0
+      "8": 0.95
+      "12": 1.05
+  short_term_strict_horizons: []
+  short_term_min_mid_ratio: 0.7
+  short_term_min_support_ratio: 0.7
+  require_bias_alignment: true
+  immediate_entry_min_support_ratio: 0.8
+  pullback_entry_min_support_ratio: 0.5
+  immediate_entry_min_mid_ratio: 1.0
+  pullback_entry_min_mid_ratio: 0.66
+  high_execution_alignment_ratio: 0.45
+  medium_execution_alignment_ratio: 0.4
+  entry_zone_atr_mult: 0.25
+  max_chase_atr_mult: 0.35
+  session_lookback_bars: 8
+  swing_lookback_bars: 6
+  structure_buffer_atr_mult: 0.2
+  minimum_rr_by_horizon:
+    "0.25": 1.1
+    "1": 1.25
+    "4": 1.6
+    "8": 1.75
+    "12": 1.75
+  time_stop_bars_by_horizon:
+    "0.25": 4
+    "1": 3
+    "4": 2
+    "8": 2
+    "12": 2
+  partial_take_profit:
+    enabled: true
+    tp1_r_multiple: 1.0
+    tp1_size_fraction: 0.5
+    move_stop_to_break_even: true
+  trailing_stop:
+    enabled: true
+    activation_r_multiple: 1.0
+    trail_buffer_atr_mult: 0.75
+  analytics:
+    enabled: true
+    lookback_bars: 240
+    mae_quantile: 0.75
+    mfe_quantile: 0.75
+    min_samples: 40
+    regime_volatility_buckets:
+      enabled: true
+      regime_col: regime_state
+      volatility_col: volatility_realized_24h
+      min_bucket_samples: 12
+      low_vol_quantile: 0.5
+      max_projection_mfe_ratio: 1.25
+      breakout_score_threshold: 0.8
+      chop_score_threshold: 0.3
+  no_trade_guards:
+    enabled: true
+    min_stop_distance_atr_mult: 0.35
+    max_stop_distance_atr_mult: 3.0
+    max_entry_deviation_atr_mult: 1.25
+    require_favorable_entry_zone: true
+  adaptive_take_profit:
+    enabled: true
+    min_rr_fraction_of_floor: 0.85
+  dynamic_rr_floor:
+    enabled: true
+    mfe_mae_scale: 0.9
+    max_adjustment: 0.35
+    min_samples: 40
+    default_floor: 0.9
+    min_floor_by_horizon:
+      "0.25": 0.9
+      "1": 1.0
+      "4": 1.2
+      "8": 1.35
+      "12": 1.35
+    max_floor_by_horizon:
+      "0.25": 1.2
+      "1": 1.35
+      "4": 1.75
+      "8": 1.9
+      "12": 1.9
+    regime_multiplier:
+      chop: 0.95
+      neutral: 1.0
+      trend_ignition: 1.05
+  volatility_expansion_stop:
+    enabled: true
+    expansion_threshold: 1.1
+    stop_multiplier: 1.12
+    max_multiplier: 1.35
+    regimes: [trend_ignition, neutral]
+  pullback_quality:
+    enabled: true
+    min_score_by_horizon:
+      "1": 0.55
+      "4": 0.45
+      "8": 0.40
+      "12": 0.35
+    max_vwap_deviation_atr: 1.5
+    max_candle_expansion_ratio: 2.0
+    candle_expansion_window: 8
+    range_expansion_penalty_threshold: 1.25
+  disagreement_severity:
+    enabled: true
+    block_threshold: 0.7
+    pullback_threshold: 0.45
+    vwap_extension_penalty_atr: 0.75
+    range_expansion_penalty_threshold: 1.0
+  target_range_stop_refinement:
+    enabled: true
+    horizons: [8, 12]
+    confidence_min: 0.72
+    buffer_std_mult: 1.5
+    min_tighten_fraction: 0.1
+  regime_templates:
+    chop:
+      tp_multiplier: 0.85
+      stop_multiplier: 0.95
+      time_stop_multiplier: 0.75
+      size_multiplier: 0.75
+      entry_mode_by_tier:
+        high: pullback
+        medium: blocked
+        low: blocked
+      entry_zone_atr_mult: 0.2
+      max_chase_atr_mult: 0.2
+      pullback_quality_floor: 0.45
+    neutral:
+      tp_multiplier: 1.0
+      stop_multiplier: 1.0
+      time_stop_multiplier: 1.0
+      size_multiplier: 1.0
+      entry_mode_by_tier:
+        high: immediate
+        medium: pullback
+        low: blocked
+      entry_zone_atr_mult: 0.25
+      max_chase_atr_mult: 0.3
+      pullback_quality_floor: 0.4
+    trend_ignition:
+      tp_multiplier: 1.25
+      stop_multiplier: 1.15
+      time_stop_multiplier: 1.5
+      size_multiplier: 1.1
+      entry_mode_by_tier:
+        high: immediate
+        medium: pullback
+        low: blocked
+      entry_zone_atr_mult: 0.3
+      max_chase_atr_mult: 0.45
+      pullback_quality_floor: 0.35
+degradation_monitoring:
+  enabled: true
+  lookback_snapshots: 30
+  min_snapshots: 10
+  min_ready_ratio: 0.1
+  max_blocked_ratio: 0.9
+  min_expected_net: 0.0
+  min_confidence: 0.2
+spot_provider: binanceus
+write_artifacts: false
+disable_monitoring_latest: false
+# Promoted live policy aligned with the validated runtime profile.
+dir_model_weights: transformer:0.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.0
+trend_ignition:
+  enabled: false
+  model_path: artifacts/models/trend_ignition/xgb_trend_ignition.joblib
+  probability_threshold: 0.6
+  cooldown_hours: 6
+direction_only_fallback:
+  enabled: false
+  prob_threshold: 0.62
+  max_negative_ev: 0.0005
+  size_factor: 0.5
+  stop_take_ratio: 0.01
+  cooldown_hours: 4
+  ignition_ev_extension: 0.0002
+adaptive_thresholds:
+  enabled: true
+  breakout_score_threshold: 0.8
+  chop_score_threshold: 0.3
+  breakout_scale: 0.9
+  chop_scale: 1.1
+  p_up_min_floor: 0.35
+  p_up_min_ceiling: 0.75
+  ret_min_floor: -0.0005
+  ret_min_ceiling: 0.003
+regime_model_weights:
+  enabled: true
+  trend_ignition:
+    "1": "transformer:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5"
+    "4": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "8": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "12": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+  neutral:
+    "1": "transformer:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5"
+    "4": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "8": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "12": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+  chop:
+    "1": "transformer:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5"
+    "4": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5"
+    "8": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5"
+    "12": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5"
+regime_model_dirs:
+  enabled: true
+  trend_ignition:
+    "1h": artifacts/models/xgb_dir1h_v5
+    "4h": artifacts/models/xgb_dir4h_v2
+    "8h": artifacts/models/xgb_dir8h_v2
+    "12h": artifacts/models/xgb_dir12h_v2
+  neutral:
+    "1h": artifacts/models/xgb_dir1h_v5
+    "4h": artifacts/models/xgb_dir4h_v2
+    "8h": artifacts/models/xgb_dir8h_v2
+    "12h": artifacts/models/xgb_dir12h_v2
+  chop:
+    "1h": artifacts/models/xgb_dir1h_v5
+    "4h": artifacts/models/xgb_dir4h_v2
+    "8h": artifacts/models/xgb_dir8h_v2
+    "12h": artifacts/models/xgb_dir12h_v2
+intrabar_aggregation:
+  enabled: true
+  interval: 15m
+  hours_multiplier: 4
+  max_rows: 4000
+target_range_models:
+  enabled: true
+  model_dir: artifacts/models/target_ranges
+  horizons: [4, 8, 12]
+  override_ratio: 0.01
+  confidence_rmse_scale: 0.01
