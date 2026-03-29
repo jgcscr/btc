@@ -22,6 +22,7 @@ from src.trading.volatility import (
     split_volatility_arrays,
 )
 from src.scripts import build_training_dataset as hourly_builder
+from src.data.macro_loader import MACRO_FEATURE_COLUMNS
 
 
 PROCESSED_PATHS = hourly_builder.PROCESSED_PATHS
@@ -66,6 +67,7 @@ CORE_MODEL_FEATURES_15M = [
     "vwap_deviation_8h",
     "momentum_slope_2h",
     "momentum_slope_4h",
+    *MACRO_FEATURE_COLUMNS,
 ]
 
 ZERO_VARIANCE_CANDIDATES = hourly_builder.ZERO_VARIANCE_CANDIDATES

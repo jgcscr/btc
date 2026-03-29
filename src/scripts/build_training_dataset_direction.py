@@ -25,11 +25,13 @@ from src.trading.volatility import (
     add_volatility_columns,
     split_volatility_arrays,
 )
+from src.data.macro_loader import MACRO_FEATURE_COLUMNS
 
 
 PROCESSED_PATHS = [
     Path("data/processed/technical/hourly_features.parquet"),
     Path("data/processed/funding/hourly_features.parquet"),
+    Path("data/processed/macro/daily_features.parquet"),
 ]
 
 META_PATH = Path("artifacts/datasets/btc_features_1h_direction_meta.json")
@@ -69,6 +71,7 @@ CORE_MODEL_FEATURES = [
     "vwap_deviation_8h",
     "momentum_slope_2h",
     "momentum_slope_4h",
+    *MACRO_FEATURE_COLUMNS,
 ]
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
@@ -96,6 +99,7 @@ EXTERNAL_SOURCE_COLUMNS = {
 }
 PRESERVED_EXTERNAL_COLUMNS = {
     "funding_rate_zscore_24h",
+    *MACRO_FEATURE_COLUMNS,
 }
 
 TECHNICAL_PREFIXES = (

@@ -5,6 +5,7 @@ This repository contains the BTCUSDT forecasting, reliability, and execution-dec
 It supports:
 
 - Binance US spot kline ingestion for live-style refreshes
+- Free macro context ingestion for dollar strength, US10Y, and EUR/USD
 - Feature generation for 15m, 1h, 4h, 8h, and 12h horizons
 - Multi-horizon direction forecasting with calibrated runtime policies
 - Trade-decision, confluence, coherence, uncertainty, and execution-plan gating
@@ -59,13 +60,20 @@ Before acting on any fresh run, confirm:
 The checked-in runtime profiles are not interchangeable.
 
 - `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline; includes trade-decision, confluence, forecast-coherence, uncertainty, direction-output, and execution-policy controls.
-- `configs/run_refresh_and_predict.live_conservative.yaml`: approved conservative live profile; keeps the same target set while enforcing tighter confidence and size discipline.
+- `configs/run_refresh_and_predict.live_conservative.yaml`: backward-compatible conservative live profile.
+- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved conservative live profile for current Binance-only operations; keeps the same target set while enforcing tighter confidence and size discipline.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: cadence-friendly artifact-writing runtime profile used by the daily cadence refresh.
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: active left-hand shadow comparison profile used by the `shadow` cadence path.
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: shadow comparison candidate profile.
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`: additional shadow-only profile for stricter abstention experiments.
 
-Current live-conservative position caps are defined in `configs/run_refresh_and_predict.live_conservative.yaml`:
+Current live-source assumption:
+
+- Approved live-style runtime refreshes are Binance-spot first.
+- Macro context is available for research and local augmentation, but it is not currently treated as a blocking live coverage dependency for Binance-only runtime profiles.
+- If macro is later promoted to a required live dependency, the runtime profile must merge that source on every refresh before tightening feature-coverage gates again.
+
+Current live-conservative position caps are defined in `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`:
 
 - `15m = 0.0`
 - `1h = 0.15`
@@ -115,7 +123,7 @@ Approved conservative live refresh:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
-  --config configs/run_refresh_and_predict.live_conservative.yaml
+  --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
 ```
 
 Refresh against the currently deployed shared bundle:
@@ -157,6 +165,25 @@ Dry run:
   --config configs/run_refresh_and_predict.default.yaml \
   --dry-run --targets 0.25,1,4,8,12
 ```
+
+Refresh the free macro context bundle used by local dataset builds:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.refresh_macro_features --full-refresh
+```
+
+This writes:
+
+- `data/processed/macro/daily_features.parquet`
+- `data/processed/macro/source_manifest.json`
+
+The checked-in macro implementation uses:
+
+- `DTWEXBGS` from FRED as the operational free dollar-strength proxy instead of exact DXY
+- `DGS10` from FRED for the 10-year Treasury yield
+- `EUR/USD` from Frankfurter/ECB for FX context
+
+Macro observations are timestamped at the next UTC midnight before merge to avoid same-day publication leakage.
 
 Replay mode for hourly horizons:
 

@@ -65,6 +65,7 @@ from src.trading.volatility import DEFAULT_REALIZED_WINDOWS, add_volatility_colu
 from src.trading.data_quality import DataQualityError, DataQualityPolicy, evaluate_ohlcv_quality
 from src.config_trading import DEFAULT_DIR_MODEL_DIR_1H
 from src.utils.model_artifact_selection import resolve_best_versioned_model_file
+from src.data.macro_loader import MACRO_FEATURE_COLUMNS
 
 DEFAULT_HOURS = 360
 DEFAULT_TARGETS = (0.25, 1, 4, 8, 12)
@@ -6386,6 +6387,7 @@ def _prepare_local_feature_bundle(
             "vwap_deviation_8h",
             "momentum_slope_2h",
             "momentum_slope_4h",
+            *MACRO_FEATURE_COLUMNS,
         ]
         for column in supplemental_feature_names:
             if column not in feature_names:
@@ -8141,7 +8143,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--macro-path",
         type=str,
         default=None,
-        help="Optional macro parquet/CSV used only for metadata when --use-local-features is enabled.",
+        help="Optional macro parquet/CSV merged into local features when --use-local-features is enabled.",
     )
     parser.add_argument(
         "--onchain-path",

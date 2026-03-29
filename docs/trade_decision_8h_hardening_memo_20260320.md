@@ -65,7 +65,7 @@ What it means operationally:
 Keep these rules active:
 
 1. leave `configs/run_refresh_and_predict.default.yaml` unchanged
-2. keep `configs/run_refresh_and_predict.live_conservative.yaml` with `8h` capped below `4h` and `12h`
+2. keep `configs/run_refresh_and_predict.live_conservative_binance_only.yaml` with `8h` capped below `4h` and `12h`
 3. do not manually force a standalone `8h` long when `8h` is rejected for `insufficient_mfe_headroom`
 4. do not manually promote an `8h` long if `4h` is not ready or if `12h` is simultaneously failing headroom on the same side
 

@@ -17,10 +17,14 @@ Do not treat these as interchangeable.
 Core runtime references:
 
 - `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline.
-- `configs/run_refresh_and_predict.live_conservative.yaml`: approved conservative live profile.
+- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved conservative live profile for current operations.
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: artifact-writing cadence refresh profile used by `daily`.
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: active left-hand shadow comparison profile.
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: active right-hand shadow comparison profile.
+
+Backward compatibility note:
+
+- `configs/run_refresh_and_predict.live_conservative.yaml` remains available as a legacy-equivalent alias.
 
 ## 2. Source Of Truth
 
@@ -63,7 +67,7 @@ Use this when the task is to read the current market under the approved live pro
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
-  --config configs/run_refresh_and_predict.live_conservative.yaml
+  --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
 ```
 
 Inspect immediately after the run:
@@ -140,7 +144,7 @@ Use this when validating policy changes without touching active live logic:
 Runtime config and policy:
 
 - `configs/run_refresh_and_predict.default.yaml`
-- `configs/run_refresh_and_predict.live_conservative.yaml`
+- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`

@@ -34,6 +34,7 @@ bash ./scripts/run_cadence.sh shadow
 3. Do not force entries when `execution_plan.status` is `waiting_pullback`, `bias_only_ready`, or `rejected`.
 4. Do not deploy artifacts from a reliability run that fails promotion or alignment checks.
 5. Treat feature coverage, source freshness, and trustworthy-run resolution as preconditions, not optional diagnostics.
+6. For the current Binance-only live runtime, do not treat macro context as a blocking live-data prerequisite unless the runtime profile explicitly wires it in on every refresh.
 
 ## 3. Current Source Of Truth Artifacts
 
@@ -66,10 +67,20 @@ Minimum runtime checks before trusting a fresh prediction snapshot:
 Use the profile that matches the task. The intended roles are:
 
 - `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline
-- `configs/run_refresh_and_predict.live_conservative.yaml`: approved conservative live profile
+- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved conservative live profile for current operations
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: artifact-writing cadence refresh profile used by `daily`
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: active left-hand shadow comparison profile used by `shadow`
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: active right-hand shadow comparison profile used by `shadow`
+
+Backward compatibility note:
+
+- `configs/run_refresh_and_predict.live_conservative.yaml` remains available as a legacy-equivalent alias.
+
+Current live-source assumption:
+
+- Binance spot is the only hard live data source for approved runtime refreshes.
+- Macro context is currently research-contextual and runtime-optional unless a profile explicitly merges a maintained macro parquet or equivalent source on every run.
+- If macro is promoted back to required live coverage later, update all approved runtime profiles and restore the stricter feature-coverage expectation before relying on that policy.
 
 Current live-conservative size caps from config:
 
@@ -355,7 +366,7 @@ Approved conservative live refresh:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
-  --config configs/run_refresh_and_predict.live_conservative.yaml
+  --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
 ```
 
 After either command, inspect:

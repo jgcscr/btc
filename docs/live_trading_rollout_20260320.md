@@ -9,9 +9,14 @@ It is intentionally narrower than the README and runbook. Its purpose is to expl
 The approved runtime profiles are:
 
 - `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline
-- `configs/run_refresh_and_predict.live_conservative.yaml`: approved live profile
+- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved live profile for current operations
 
-These profiles serve different purposes. The default profile is the research and validation anchor. The live conservative profile is the operational profile for direct live-style refreshes.
+These profiles serve different purposes. The default profile is the research and validation anchor. The Binance-only live conservative profile is the operational profile for direct live-style refreshes.
+
+Backward compatibility note:
+
+- `configs/run_refresh_and_predict.live_conservative.yaml` remains available as a legacy-equivalent alias of the same policy set.
+- Operators should prefer the Binance-only named profile because it matches the current live source contract.
 
 ## 2. Why The Conservative Live Profile Exists
 
@@ -40,7 +45,7 @@ Shadow comparison outputs remain observational only and are not part of the live
 
 ## 3. Conservative Risk Limits
 
-The checked-in live conservative profile enforces:
+The checked-in live conservative Binance-only profile enforces:
 
 - `confidence_min = 0.33`
 - global `position_size_cap = 0.35`
@@ -60,7 +65,7 @@ Interpretation:
 
 ## 4. Active Live Conservative Overrides
 
-The checked-in live conservative profile currently includes these notable scoped overrides:
+The checked-in live conservative Binance-only profile currently includes these notable scoped overrides:
 
 - `confidence_min_by_horizon_regime.8h.trend_ignition = 0.23`
 - `trade_decision_policy.thresholds_by_horizon_regime.8h.trend_ignition = 0.4175`
@@ -77,10 +82,15 @@ These are intended to harden live operation without introducing a blanket routin
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
-  --config configs/run_refresh_and_predict.live_conservative.yaml
+  --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
 ```
 
 This is the direct live-style refresh path. Do not substitute cadence or shadow commands when the task is a live decision.
+
+Live data contract:
+
+- Binance spot is the only hard live source assumed by the approved direct live profile.
+- Macro context remains research-contextual and runtime-optional until a future live profile explicitly wires it in on every refresh.
 
 ## 6. Required Monitoring Artifacts
 

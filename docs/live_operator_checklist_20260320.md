@@ -1,8 +1,8 @@
 # Live Operator Checklist
 
-This checklist is the shortest operator path for the approved conservative live profile:
+This checklist is the shortest operator path for the approved conservative Binance-only live profile:
 
-- `configs/run_refresh_and_predict.live_conservative.yaml`
+- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`
 
 Use it together with:
 
@@ -44,17 +44,23 @@ Minimum fields to confirm before acting:
 
 Before each direct live-style refresh:
 
-1. Confirm the active profile is `configs/run_refresh_and_predict.live_conservative.yaml`.
+1. Confirm the active profile is `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`.
 2. Confirm the latest trustworthy deployment is still the intended incumbent.
 3. Confirm no manual local edits have changed live sizing or threshold controls.
 4. Confirm data inputs are current enough for a live read.
+5. Treat Binance spot as the only hard live source unless the selected profile explicitly wires macro or other external context into the refresh path.
 
 ## 4. Run Command
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
-  --config configs/run_refresh_and_predict.live_conservative.yaml
+  --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
 ```
+
+Compatibility note:
+
+- `configs/run_refresh_and_predict.live_conservative.yaml` remains available as a backward-compatible equivalent profile.
+- Use the Binance-only named profile for new operator runs so the live data contract is explicit.
 
 ## 5. Post-Run Hard Gates
 

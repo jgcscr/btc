@@ -137,6 +137,18 @@ feature_coverage_policy:
     - fut_volume
     - fut_volume_delta_1h
     - fut_volume_pct_change_1h
+    - macro_dollar_proxy
+    - macro_dollar_proxy_change_1d
+    - macro_dollar_proxy_zscore_30d
+    - macro_dollar_proxy_trend_5d
+    - macro_us10y
+    - macro_us10y_change_1d
+    - macro_us10y_zscore_30d
+    - macro_us10y_trend_5d
+    - macro_eurusd
+    - macro_eurusd_change_1d
+    - macro_eurusd_zscore_30d
+    - macro_eurusd_trend_5d
     - open_interest
 forecast_coherence_policy:
   enabled: true

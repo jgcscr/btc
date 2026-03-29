@@ -26,6 +26,7 @@ from src.trading.feature_engineering import (
     apply_funding_rate_features as _shared_apply_funding_rate_features,
     augment_hourly_price_features as _shared_augment_hourly_price_features,
 )
+from src.data.macro_loader import MACRO_FEATURE_COLUMNS
 
 
 def _load_local_features() -> pd.DataFrame:
@@ -84,7 +85,7 @@ def _load_local_features() -> pd.DataFrame:
             f"rows={len(source_df)}, ts_min={source_df['ts'].min()}, ts_max={source_df['ts'].max()}",
         )
 
-    return _merge_processed_features(source_df, PROCESSED_PATHS)
+    return source_df
 
 
 def _interval_to_timedelta(interval: str) -> pd.Timedelta:
@@ -196,6 +197,7 @@ def _load_spot_ohlcv_from_raw(interval: str, raw_dir: Path | None = None) -> pd.
 PROCESSED_PATHS = [
     Path("data/processed/technical/hourly_features.parquet"),
     Path("data/processed/funding/hourly_features.parquet"),
+    Path("data/processed/macro/daily_features.parquet"),
 ]
 
 SPOT_KLINES_DIR = Path("data/spot_klines")
@@ -245,6 +247,7 @@ CORE_MODEL_FEATURES = [
     "vwap_deviation_8h",
     "momentum_slope_2h",
     "momentum_slope_4h",
+    *MACRO_FEATURE_COLUMNS,
 ]
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
@@ -271,6 +274,7 @@ EXTERNAL_SOURCE_COLUMNS = {
 }
 PRESERVED_EXTERNAL_COLUMNS = {
     "funding_rate_zscore_24h",
+    *MACRO_FEATURE_COLUMNS,
 }
 
 NON_BINANCE_BREAKOUT_PREFIXES = (
