@@ -21,6 +21,7 @@ Core runtime references:
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: artifact-writing cadence refresh profile used by `daily`.
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: active left-hand shadow comparison profile.
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: active right-hand shadow comparison profile.
+- `.github/workflows/validation-guards.yml`: parity, leakage, and report-freshness guard workflow.
 
 Backward compatibility note:
 
@@ -34,6 +35,11 @@ For the current runtime state, read these artifacts first:
 - `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json`
 - `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+
+For March 31 model-improvement context, also read:
+
+- `artifacts/analysis/featurelift_20260331_rerun/comparison_report.md`
+- `artifacts/analysis/featurelift_20260331_rerun/comparison_report.json`
 
 Treat those artifacts, not this handoff note, as the source of truth for:
 
@@ -54,6 +60,7 @@ Read these first in order:
 5. `docs/live_operator_checklist_20260320.md`
 6. `docs/trade_decision_8h_hardening_memo_20260320.md`
 7. `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+8. `artifacts/analysis/featurelift_20260331_rerun/comparison_report.md` when the task touches features, datasets, or model quality
 
 If older promotion context is needed, then read:
 
@@ -89,6 +96,7 @@ Current behavior:
 - resolves the latest trustworthy reliability run
 - refreshes with `configs/run_refresh_and_predict.shadow_simplified.yaml`
 - is for cadence operations, not for discretionary live execution
+- local feature builders can also refresh macro and on-chain bundles opportunistically during runtime rebuilds
 
 ### Shadow comparison cadence
 
@@ -149,7 +157,11 @@ Runtime config and policy:
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`
 - `src/trading/feature_engineering.py`
+- `src/trading/intrabar_features.py`
 - `src/scripts/audit_feature_parity.py`
+- `src/scripts/generate_featurelift_comparison_report.py`
+- `src/scripts/check_featurelift_report_references.py`
+- `src/scripts/refresh_onchain_features.py`
 
 Reliability control:
 
@@ -179,6 +191,13 @@ Reliability outputs:
 - `artifacts/reliability/<run-id>/summary/edge_trustworthiness.json`
 - `artifacts/reliability/<run-id>/summary/directional_objectives.json`
 
+Local processed-source outputs worth checking when feature coverage or rebuild quality is in scope:
+
+- `data/processed/macro/daily_features.parquet`
+- `data/processed/macro/source_manifest.json`
+- `data/processed/onchain/hourly_features.parquet`
+- `data/processed/onchain/source_manifest.json`
+
 ## 6. Safe Operating Rules
 
 1. Do not weaken promotion gates to make a candidate pass.
@@ -187,6 +206,8 @@ Reliability outputs:
 4. Do not force entries when `execution_plan.status` is `waiting_pullback`, `bias_only_ready`, or `rejected`.
 5. Treat runtime config validation failures as correctness failures, not warnings.
 6. Keep scratch replay and validation work under `artifacts/tmp_validation/`.
+7. Do not rely on the superseded `featurelift_20260331` comparison report for current model-quality claims.
+8. Regenerate local processed macro or on-chain bundles rather than assuming they exist on a fresh clone.
 
 ## 7. Checks Before Trusting A Change
 
@@ -206,6 +227,15 @@ For runtime policy changes, verify:
 2. snapshot and manifest lineage are correct
 3. feature parity holds if local-feature behavior changed
 4. focused regression tests pass when code changed
+
+For feature or dataset changes, also verify:
+
+1. `tests/test_intrabar_feature_parity.py`
+2. `tests/test_onchain_loader_and_integration.py`
+3. `tests/test_feature_leakage_guards.py`
+4. `tests/test_featurelift_report_reference_check.py`
+5. `python -m src.scripts.generate_featurelift_comparison_report`
+6. `python -m src.scripts.check_featurelift_report_references`
 
 ## 8. Minimal First Session
 

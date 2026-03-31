@@ -11,6 +11,27 @@ It supports:
 - Trade-decision, confluence, coherence, uncertainty, and execution-plan gating
 - Reliability workflows for calibration, promotion, overlap checks, and deployment handoff
 - Shadow-profile comparison and cadence automation
+- Shared 15m-to-1h intrabar feature generation for both training and runtime inference
+- Slice-aware feature reliability filtering for 15m and 1h training paths
+- Local macro and on-chain feature refresh paths that can run without private paid data sources
+
+## Current Codespace State
+
+This codespace includes the March 31, 2026 feature-lift and leakage-fix work.
+
+That state includes:
+
+- a shared intrabar feature builder at `src/trading/intrabar_features.py`
+- expanded hourly price-state features in `src/trading/feature_engineering.py`
+- processed on-chain features refreshed to `data/processed/onchain/hourly_features.parquet`
+- a corrected feature-lift rerun report at `artifacts/analysis/featurelift_20260331_rerun/comparison_report.md`
+- a validation workflow at `.github/workflows/validation-guards.yml`
+
+Important workspace caveat:
+
+- `data/` and most of `artifacts/` are gitignored local state
+- another agent or a fresh clone should regenerate local processed features and runtime artifacts rather than assuming they already exist
+- the corrected feature-lift report is authoritative; the older `featurelift_20260331` report is intentionally marked superseded
 
 ## 1. What This Repository Does
 
@@ -37,6 +58,12 @@ The cadence wrapper is:
 bash ./scripts/run_cadence.sh <daily|weekly|monthly|shadow>
 ```
 
+For agent handoff and operating discipline, also read:
+
+- `docs/operations_runbook.md`
+- `docs/agent_system_handoff_20260320.md`
+- `docs/live_operator_checklist_20260320.md`
+
 ## 2. Source Of Truth For Current State
 
 Use runtime artifacts for the latest state. Do not rely on static notes in this README for the current market snapshot.
@@ -47,6 +74,7 @@ Primary runtime state sources:
 - `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json`
 - `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- `artifacts/analysis/featurelift_20260331_rerun/comparison_report.json` for the corrected March 31 feature-lift evaluation
 
 Before acting on any fresh run, confirm:
 
@@ -54,6 +82,11 @@ Before acting on any fresh run, confirm:
 - `request.local_feature_overrides.feature_coverage.ok` is `true`
 - source freshness in `request.local_feature_overrides.source_freshness` is acceptable
 - the preferred horizon and recommended action in `prompt_ready_summary.operator_summary_compact` match the interpretation you are about to use
+
+Before trusting any model-improvement narrative, confirm:
+
+- you are reading `artifacts/analysis/featurelift_20260331_rerun/comparison_report.json` or `.md`
+- you are not using the older pre-rerun March 31 feature-lift summary as a performance source
 
 ## 3. Runtime Profiles
 
@@ -177,6 +210,25 @@ This writes:
 - `data/processed/macro/daily_features.parquet`
 - `data/processed/macro/source_manifest.json`
 
+Refresh the on-chain bundle used by local dataset builds and runtime augmentation:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.refresh_onchain_features --full-refresh
+```
+
+This writes:
+
+- `data/processed/onchain/hourly_features.parquet`
+- `data/processed/onchain/source_manifest.json`
+
+On-chain refresh behavior in this codespace:
+
+- first uses the configured on-chain API when available
+- otherwise falls back to public Blockchain chart series for the supported BTC metrics
+- derives hourly change, 24h z-score, and 6h trend columns from the raw metric frame
+
+`run_refresh_and_predict` now attempts to refresh both macro and on-chain local feature bundles automatically on each local rebuild path. Failures in those refreshes are warning-level unless the selected runtime profile later makes them hard dependencies.
+
 The checked-in macro implementation uses:
 
 - `DTWEXBGS` from FRED as the operational free dollar-strength proxy instead of exact DXY
@@ -195,6 +247,42 @@ Replay mode for hourly horizons:
 ```
 
 Replay mode overwrites the standard prediction artifact paths, so run a fresh live-style refresh afterward if you want to restore the latest live snapshot.
+
+## 6A. Training And Feature-Lift Rebuilds
+
+For the current March 31, 2026 feature-engineering stack, the exact rebuild sequence used in this codespace was:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.refresh_macro_features --full-refresh
+/workspaces/btc/.venv/bin/python -m src.scripts.refresh_onchain_features --full-refresh
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset_15m --output-dir artifacts/datasets
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset_direction_15m \
+  --output-dir artifacts/datasets \
+  --feature-reliability-json artifacts/analysis/feature_reliability_15m_1h_slice_20260331.json \
+  --feature-reliability-min-score 0.55
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset \
+  --output-dir artifacts/datasets \
+  --feature-reliability-json artifacts/analysis/feature_reliability_15m_1h_slice_20260331.json \
+  --feature-reliability-min-score 0.80
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset_direction \
+  --output-dir artifacts/datasets \
+  --feature-reliability-json artifacts/analysis/feature_reliability_15m_1h_slice_20260331.json \
+  --feature-reliability-min-score 0.55
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset_multi_horizon \
+  --output-dir artifacts/datasets --horizons 1 4 8 12
+```
+
+Current reliability expectations for those dataset builders:
+
+- 15m direction uses the slice-aware reliability payload at horizon `0.25`
+- 1h regression uses the same payload with a tuned minimum score of `0.80`
+- 1h direction uses the same payload with a minimum score of `0.55`
+- multi-horizon builders now exclude forward-return leakage columns instead of allowing them into the feature matrix
+
+Corrected feature-lift outputs now live under:
+
+- `artifacts/models/featurelift_20260331_rerun/`
+- `artifacts/analysis/featurelift_20260331_rerun/`
 
 ## 6. Runtime Outputs
 
@@ -248,6 +336,44 @@ Important execution diagnostics recorded in runtime output:
 - `confidence_min_source`
 - `abstention.reason`
 - `uncertainty.effective_policy`
+
+Additional local feature-source outputs relevant to agents:
+
+- `data/processed/macro/daily_features.parquet`
+- `data/processed/macro/source_manifest.json`
+- `data/processed/onchain/hourly_features.parquet`
+- `data/processed/onchain/source_manifest.json`
+
+These are local working-state files. Regenerate them if they are absent or stale.
+
+## 6B. Validation Guards
+
+The repository now includes a dedicated validation workflow:
+
+- `.github/workflows/validation-guards.yml`
+
+Its local equivalent command path is:
+
+```bash
+/workspaces/btc/.venv/bin/python -m pytest \
+  tests/test_runtime_feature_parity_and_validation.py \
+  tests/test_intrabar_feature_parity.py \
+  tests/test_macro_loader_and_integration.py \
+  tests/test_onchain_loader_and_integration.py \
+  tests/test_direction_feature_reliability_filters.py \
+  tests/test_feature_leakage_guards.py \
+  tests/test_featurelift_report_reference_check.py
+
+/workspaces/btc/.venv/bin/python -m src.scripts.generate_featurelift_comparison_report
+/workspaces/btc/.venv/bin/python -m src.scripts.check_featurelift_report_references
+```
+
+Those guards are intended to catch:
+
+- train/runtime intrabar drift
+- macro and on-chain integration regressions
+- leakage reintroduction in hourly or multi-horizon datasets
+- stale references to the superseded March 31 feature-lift report
 
 ## 7. Cadence Operations
 

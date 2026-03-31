@@ -65,7 +65,29 @@ from src.trading.volatility import DEFAULT_REALIZED_WINDOWS, add_volatility_colu
 from src.trading.data_quality import DataQualityError, DataQualityPolicy, evaluate_ohlcv_quality
 from src.config_trading import DEFAULT_DIR_MODEL_DIR_1H
 from src.utils.model_artifact_selection import resolve_best_versioned_model_file
-from src.data.macro_loader import MACRO_FEATURE_COLUMNS
+from src.data.macro_loader import (
+    DEFAULT_MACRO_METADATA_PATH,
+    DEFAULT_MACRO_OUTPUT_PATH,
+    DEFAULT_MACRO_START_DATE,
+    MACRO_FEATURE_COLUMNS,
+    build_macro_feature_frame,
+    build_source_manifest as build_macro_source_manifest,
+    load_macro_features,
+    resolve_incremental_start_date,
+)
+from src.data.onchain_loader import (
+    DEFAULT_ONCHAIN_METADATA_PATH,
+    DEFAULT_ONCHAIN_OUTPUT_PATH,
+    DEFAULT_ONCHAIN_START_DATE,
+    ONCHAIN_FEATURE_COLUMNS,
+    OnchainAPIError,
+    build_onchain_feature_frame,
+    build_onchain_source_manifest,
+    load_onchain_features,
+    resolve_incremental_start_timestamp,
+    write_onchain_source_manifest,
+)
+from src.trading.intrabar_features import compute_hourly_intrabar_features
 
 DEFAULT_HOURS = 360
 DEFAULT_TARGETS = (0.25, 1, 4, 8, 12)
@@ -126,7 +148,7 @@ LOCAL_FEATURE_OPTIONAL_PATHS: tuple[tuple[str, str], ...] = (
 LOCAL_FEATURE_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "macro": tuple(),
     "funding": ("funding_rate", "funding_rate_annualized"),
-    "onchain": ("onchain_large_transfer_count", "onchain_whale_transfer_count"),
+    "onchain": ("onchain_active_addresses", "onchain_transaction_count"),
 }
 
 HORIZON_PRECISION = 6
@@ -5898,68 +5920,10 @@ def _pivot_tidy_spot_ohlcv(path: Path) -> pd.DataFrame:
 
 def _compute_intrabar_features_from_15m(path_15m_tidy: Path) -> pd.DataFrame:
     frame = _pivot_tidy_spot_ohlcv(path_15m_tidy)
-    required = {"open", "high", "low", "close", "volume"}
-    missing = [col for col in required if col not in frame.columns]
-    if missing:
-        raise RuntimeError(f"15m frame missing columns required for intrabar aggregation: {missing}")
-
-    for col in ("open", "high", "low", "close", "volume"):
-        frame[col] = pd.to_numeric(frame[col], errors="coerce")
-    for optional_col in ("num_trades", "taker_buy_base_volume"):
-        if optional_col not in frame.columns:
-            frame[optional_col] = 0.0
-        frame[optional_col] = pd.to_numeric(frame[optional_col], errors="coerce").fillna(0.0)
-    frame = frame.dropna(subset=["open", "high", "low", "close", "volume"]).copy()
-
-    frame["hour_ts"] = frame["ts"].dt.ceil("h")
-    frame["bar_ret"] = frame["close"].pct_change().replace([np.inf, -np.inf], np.nan)
-    frame["is_up_bar"] = (frame["close"] > frame["open"]).astype(float)
-    frame["range"] = (frame["high"] - frame["low"]).abs()
-    frame["body"] = (frame["close"] - frame["open"]).abs()
-    wick = (frame["range"] - frame["body"]).clip(lower=0.0)
-    frame["wick_ratio"] = wick / frame["range"].replace(0.0, np.nan)
-
-    grouped = frame.groupby("hour_ts", as_index=False).agg(
-        intrabar_ret_std_15m_1h=("bar_ret", "std"),
-        intrabar_up_bar_ratio_15m_1h=("is_up_bar", "mean"),
-        intrabar_wick_ratio_15m_1h=("wick_ratio", "mean"),
-        intrabar_sum_range_15m_1h=("range", "sum"),
-        intrabar_sum_volume_15m_1h=("volume", "sum"),
-        intrabar_mean_trade_count_15m_1h=("num_trades", "mean"),
-        intrabar_taker_buy_base_sum_15m_1h=("taker_buy_base_volume", "sum"),
-        intrabar_open_first_15m_1h=("open", "first"),
-        intrabar_close_last_15m_1h=("close", "last"),
-        intrabar_high_max_15m_1h=("high", "max"),
-        intrabar_low_min_15m_1h=("low", "min"),
-    )
-
-    grouped["intrabar_trend_strength_15m_1h"] = (
-        (grouped["intrabar_close_last_15m_1h"] - grouped["intrabar_open_first_15m_1h"]).abs()
-        /
-        (grouped["intrabar_high_max_15m_1h"] - grouped["intrabar_low_min_15m_1h"]).replace(0.0, np.nan)
-    )
-    grouped["intrabar_range_ratio_15m_1h"] = (
-        grouped["intrabar_sum_range_15m_1h"]
-        /
-        grouped["intrabar_close_last_15m_1h"].replace(0.0, np.nan)
-    )
-    grouped["intrabar_taker_buy_ratio_15m_1h"] = (
-        grouped["intrabar_taker_buy_base_sum_15m_1h"]
-        /
-        grouped["intrabar_sum_volume_15m_1h"].replace(0.0, np.nan)
-    )
-
-    grouped = grouped.rename(columns={"hour_ts": "ts"})
-    grouped = grouped.drop(
-        columns=[
-            "intrabar_open_first_15m_1h",
-            "intrabar_close_last_15m_1h",
-            "intrabar_high_max_15m_1h",
-            "intrabar_low_min_15m_1h",
-        ],
-        errors="ignore",
-    )
-    return grouped.sort_values("ts").reset_index(drop=True)
+    intrabar = compute_hourly_intrabar_features(frame)
+    if intrabar.empty:
+        raise RuntimeError("15m frame did not produce any intrabar features; check source cadence and required columns.")
+    return intrabar
 
 
 def _build_ohlcv_frame_from_tidy(df: pd.DataFrame) -> pd.DataFrame:
@@ -6019,6 +5983,56 @@ def run_feature_builders(price_source: Path | None = None) -> Dict[str, str]:
     print("Recomputing technical indicator features...")
     technical_path = process_technical_features(price_source=price_source, include_history=True)
     results["technical"] = str(technical_path)
+
+    try:
+        existing_macro = load_macro_features(DEFAULT_MACRO_OUTPUT_PATH) if DEFAULT_MACRO_OUTPUT_PATH.exists() else None
+        macro_start = resolve_incremental_start_date(
+            existing_macro,
+            default_start_date=DEFAULT_MACRO_START_DATE,
+        )
+        macro_frame = build_macro_feature_frame(start_date=macro_start, existing=existing_macro)
+        DEFAULT_MACRO_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        macro_frame.to_parquet(DEFAULT_MACRO_OUTPUT_PATH, index=False)
+        macro_manifest = build_macro_source_manifest()
+        macro_manifest["row_count"] = int(len(macro_frame))
+        macro_manifest["ts_start"] = macro_frame["ts"].min().isoformat() if not macro_frame.empty else None
+        macro_manifest["ts_end"] = macro_frame["ts"].max().isoformat() if not macro_frame.empty else None
+        macro_manifest["refresh"] = {
+            "requested_start_date": macro_start,
+            "output_path": str(DEFAULT_MACRO_OUTPUT_PATH),
+        }
+        DEFAULT_MACRO_METADATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DEFAULT_MACRO_METADATA_PATH.write_text(json.dumps(macro_manifest, indent=2), encoding="utf-8")
+        results["macro"] = str(DEFAULT_MACRO_OUTPUT_PATH)
+        print(f"Refreshed macro features at {DEFAULT_MACRO_OUTPUT_PATH}")
+    except Exception as exc:
+        print(f"Warning: macro feature refresh failed: {exc}", file=sys.stderr)
+
+    try:
+        existing_onchain = load_onchain_features(DEFAULT_ONCHAIN_OUTPUT_PATH) if DEFAULT_ONCHAIN_OUTPUT_PATH.exists() else None
+        onchain_start = resolve_incremental_start_timestamp(
+            existing_onchain,
+            default_start=DEFAULT_ONCHAIN_START_DATE,
+        )
+        onchain_frame = build_onchain_feature_frame(start_ts=onchain_start, existing=existing_onchain)
+        DEFAULT_ONCHAIN_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        onchain_frame.to_parquet(DEFAULT_ONCHAIN_OUTPUT_PATH, index=False)
+        onchain_manifest = build_onchain_source_manifest()
+        onchain_manifest["row_count"] = int(len(onchain_frame))
+        onchain_manifest["ts_start"] = onchain_frame["ts"].min().isoformat() if not onchain_frame.empty else None
+        onchain_manifest["ts_end"] = onchain_frame["ts"].max().isoformat() if not onchain_frame.empty else None
+        onchain_manifest["refresh"] = {
+            "requested_start_ts": onchain_start,
+            "output_path": str(DEFAULT_ONCHAIN_OUTPUT_PATH),
+        }
+        write_onchain_source_manifest(DEFAULT_ONCHAIN_METADATA_PATH, onchain_manifest)
+        results["onchain"] = str(DEFAULT_ONCHAIN_OUTPUT_PATH)
+        print(f"Refreshed on-chain features at {DEFAULT_ONCHAIN_OUTPUT_PATH}")
+    except OnchainAPIError as exc:
+        print(f"Warning: on-chain feature refresh skipped: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"Warning: on-chain feature refresh failed: {exc}", file=sys.stderr)
+
     return results
 
 
@@ -6388,6 +6402,7 @@ def _prepare_local_feature_bundle(
             "momentum_slope_2h",
             "momentum_slope_4h",
             *MACRO_FEATURE_COLUMNS,
+            *ONCHAIN_FEATURE_COLUMNS,
         ]
         for column in supplemental_feature_names:
             if column not in feature_names:
@@ -8524,6 +8539,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                         key: value
                         for key, value in {
                             "technical": technical_features_path,
+                            "macro": feature_build_results.get("macro"),
+                            "onchain": feature_build_results.get("onchain"),
                             "intrabar": intrabar_features_path,
                         }.items()
                         if value

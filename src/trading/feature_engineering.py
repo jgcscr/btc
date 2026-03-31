@@ -27,6 +27,14 @@ def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     return ranges.max(axis=1, skipna=True)
 
 
+def _rolling_percentile_rank(series: pd.Series, window: int, min_periods: int) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    return numeric.rolling(window=window, min_periods=min_periods).apply(
+        lambda values: float(pd.Series(values).rank(pct=True).iloc[-1]),
+        raw=False,
+    )
+
+
 def apply_funding_rate_features(
     df: pd.DataFrame,
     *,
@@ -83,6 +91,7 @@ def augment_hourly_price_features(
         result[f"{base}_pct_change_1h"] = _safe_pct(result[base])
 
     if "close" in result.columns:
+        returns_1h = _safe_pct(result["close"])
         std_7 = result["close"].rolling(window=7, min_periods=3).std(ddof=0)
         std_24 = result["close"].rolling(window=24, min_periods=6).std(ddof=0)
         if "ma_close_7h" in result.columns:
@@ -91,6 +100,14 @@ def augment_hourly_price_features(
         if "ma_close_24h" in result.columns:
             denom = std_24.replace(0.0, np.nan)
             result["close_zscore_24h"] = ((result["close"] - result["ma_close_24h"]) / denom).fillna(0.0)
+
+        abs_path_4h = result["close"].diff().abs().rolling(window=4, min_periods=2).sum().replace(0.0, np.nan)
+        abs_path_8h = result["close"].diff().abs().rolling(window=8, min_periods=3).sum().replace(0.0, np.nan)
+        result["trend_path_efficiency_4h"] = (result["close"].diff(4).abs() / abs_path_4h).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 1.0)
+        result["trend_path_efficiency_8h"] = (result["close"].diff(8).abs() / abs_path_8h).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 1.0)
+        direction = np.sign(returns_1h).replace([np.inf, -np.inf], np.nan)
+        result["trend_directional_persistence_4h"] = direction.rolling(window=4, min_periods=2).mean().abs().fillna(0.0).clip(0.0, 1.0)
+        result["trend_directional_persistence_8h"] = direction.rolling(window=8, min_periods=3).mean().abs().fillna(0.0).clip(0.0, 1.0)
 
     if "fut_close" in result.columns:
         rolling_mean = result["fut_close"].rolling(window=7, min_periods=3).mean()
@@ -111,6 +128,9 @@ def augment_hourly_price_features(
         cvd_std = cvd_window.rolling(window=24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
         zscore = ((cvd_window - cvd_mean) / cvd_std).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         result["cvd_zscore_6h"] = zscore.clip(-10.0, 10.0)
+        imbalance = ((2.0 * taker_buy - total_volume) / total_volume.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
+        result["trades_taker_imbalance_acceleration_3h"] = imbalance.diff().rolling(window=3, min_periods=1).mean().fillna(0.0)
+        result["trades_taker_imbalance_persistence_6h"] = np.sign(imbalance).rolling(window=6, min_periods=2).mean().abs().fillna(0.0).clip(0.0, 1.0)
     elif strict_missing:
         missing = ", ".join(sorted(required_cvd - set(result.columns)))
         raise ValueError(f"Cannot compute CVD features; missing columns: {missing}.")
@@ -144,10 +164,21 @@ def augment_hourly_price_features(
 
         atr_24h = true_range.rolling(window=24, min_periods=6).mean().replace(0.0, np.nan)
         result["range_expansion_1h"] = (true_range / atr_24h).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 10.0)
+        short_range = true_range.rolling(window=4, min_periods=2).mean()
+        long_range = true_range.rolling(window=24, min_periods=6).mean().replace(0.0, np.nan)
+        range_regime = (short_range / long_range).replace([np.inf, -np.inf], np.nan)
+        result["range_compression_ratio_4h_24h"] = range_regime.fillna(0.0).clip(0.0, 10.0)
+        result["range_compression_transition_8h"] = range_regime.diff(8).fillna(0.0).clip(-10.0, 10.0)
         session_high = high.rolling(window=8, min_periods=2).max().replace(0.0, np.nan)
         session_low = low.rolling(window=8, min_periods=2).min().replace(0.0, np.nan)
         result["distance_from_session_high_8h"] = ((close / session_high) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
         result["distance_from_session_low_8h"] = ((close / session_low) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        rolling_high_24h = high.rolling(window=24, min_periods=6).max()
+        rolling_low_24h = low.rolling(window=24, min_periods=6).min()
+        result["price_distance_to_high_atr_24h"] = ((rolling_high_24h - close) / atr_24h).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 20.0)
+        result["price_distance_to_low_atr_24h"] = ((close - rolling_low_24h) / atr_24h).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 20.0)
+        result["price_distance_to_high_pct_rank_24h"] = _rolling_percentile_rank(result["price_distance_to_high_atr_24h"], window=24, min_periods=6).fillna(0.0)
+        result["price_distance_to_low_pct_rank_24h"] = _rolling_percentile_rank(result["price_distance_to_low_atr_24h"], window=24, min_periods=6).fillna(0.0)
 
         if "volume" in result.columns:
             volume = result["volume"].astype(float)
@@ -156,11 +187,19 @@ def augment_hourly_price_features(
             rolling_volume = volume.rolling(window=8, min_periods=2).sum().replace(0.0, np.nan)
             rolling_vwap = (rolling_notional / rolling_volume).replace([np.inf, -np.inf], np.nan)
             result["vwap_deviation_8h"] = ((close / rolling_vwap) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+            volume_mean = volume.rolling(window=24, min_periods=6).mean()
+            volume_std = volume.rolling(window=24, min_periods=6).std(ddof=0).replace(0.0, np.nan)
+            volume_zscore = ((volume - volume_mean) / volume_std).replace([np.inf, -np.inf], np.nan)
+            result["volume_regime_zscore_24h"] = volume_zscore.fillna(0.0).clip(-10.0, 10.0)
         else:
             result["vwap_deviation_8h"] = 0.0
+            result["volume_regime_zscore_24h"] = 0.0
 
         result["momentum_slope_2h"] = _safe_pct(close).rolling(window=2, min_periods=1).mean().fillna(0.0)
         result["momentum_slope_4h"] = _safe_pct(close).rolling(window=4, min_periods=1).mean().fillna(0.0)
+        result["interaction_momentum_volatility_4h"] = (result["momentum_slope_4h"] * result.get("range_compression_ratio_4h_24h", 0.0)).fillna(0.0)
+        result["interaction_breakout_volume_8h"] = (result["range_expansion_1h"] * result.get("volume_regime_zscore_24h", 0.0)).fillna(0.0)
+        result["interaction_imbalance_trend_6h"] = (result.get("cvd_ratio_6h", 0.0) * result["momentum_slope_4h"]).fillna(0.0)
     elif strict_missing:
         missing = ", ".join(sorted(required_liquidity - set(result.columns)))
         raise ValueError(f"Cannot compute liquidity features; missing OHLC columns: {missing}.")
@@ -181,6 +220,26 @@ def augment_hourly_price_features(
             result["momentum_slope_2h"] = 0.0
         if "momentum_slope_4h" not in result.columns:
             result["momentum_slope_4h"] = 0.0
+        for column in (
+            "trend_path_efficiency_4h",
+            "trend_path_efficiency_8h",
+            "trend_directional_persistence_4h",
+            "trend_directional_persistence_8h",
+            "trades_taker_imbalance_acceleration_3h",
+            "trades_taker_imbalance_persistence_6h",
+            "range_compression_ratio_4h_24h",
+            "range_compression_transition_8h",
+            "price_distance_to_high_atr_24h",
+            "price_distance_to_low_atr_24h",
+            "price_distance_to_high_pct_rank_24h",
+            "price_distance_to_low_pct_rank_24h",
+            "volume_regime_zscore_24h",
+            "interaction_momentum_volatility_4h",
+            "interaction_breakout_volume_8h",
+            "interaction_imbalance_trend_6h",
+        ):
+            if column not in result.columns:
+                result[column] = 0.0
         _emit_warning(
             warn,
             "liquidity_features",

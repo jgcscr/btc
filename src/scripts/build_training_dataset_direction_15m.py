@@ -16,6 +16,7 @@ from src.data.labeling import binary_direction_labels_with_no_trade
 from src.data.bq_loader import load_btc_features_15m
 from src.data.dataset_preparation import make_features_and_target, time_series_train_val_test_split
 from src.scripts import build_training_dataset as hourly_builder
+from src.scripts.build_training_dataset_direction import _filter_features_by_reliability
 from src.scripts.build_training_dataset_15m import (
     CORE_MODEL_FEATURES_15M,
     EXPECTED_FREQ,
@@ -168,10 +169,11 @@ def build_direction_dataset(
         if column in df.columns and column not in allowed_features:
             allowed_features.append(column)
     allowed_features = hourly_builder._append_technical_feature_columns(df, allowed_features)
-    allowed_features = hourly_builder._filter_features_by_reliability(
+    allowed_features = _filter_features_by_reliability(
         allowed_features,
         reliability_json=feature_reliability_json,
         min_score=feature_reliability_min_score,
+        target_horizon=0.25,
     )
     df = hourly_builder._enforce_feature_coverage(df, allowed_features)
 

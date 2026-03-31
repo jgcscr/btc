@@ -50,6 +50,11 @@ Before each direct live-style refresh:
 4. Confirm data inputs are current enough for a live read.
 5. Treat Binance spot as the only hard live source unless the selected profile explicitly wires macro or other external context into the refresh path.
 
+Current local-runtime note:
+
+- the refresh path now attempts best-effort macro and on-chain local feature refreshes
+- those enrich the local feature bundle when present, but they are not a substitute for the approved hard live-source contract
+
 ## 4. Run Command
 
 ```bash
@@ -87,6 +92,7 @@ Operational note:
 
 - direct conservative refreshes should be read from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json` can lag if the selected path does not rewrite that summary
+- `data/processed/macro/` and `data/processed/onchain/` are local support bundles, not operator-facing decision artifacts
 
 ## 6. Execution Decision Tree
 

@@ -27,6 +27,8 @@ from src.trading.feature_engineering import (
     augment_hourly_price_features as _shared_augment_hourly_price_features,
 )
 from src.data.macro_loader import MACRO_FEATURE_COLUMNS
+from src.data.onchain_loader import ONCHAIN_FEATURE_COLUMNS
+from src.trading.intrabar_features import compute_hourly_intrabar_features
 
 
 def _load_local_features() -> pd.DataFrame:
@@ -198,6 +200,7 @@ PROCESSED_PATHS = [
     Path("data/processed/technical/hourly_features.parquet"),
     Path("data/processed/funding/hourly_features.parquet"),
     Path("data/processed/macro/daily_features.parquet"),
+    Path("data/processed/onchain/hourly_features.parquet"),
 ]
 
 SPOT_KLINES_DIR = Path("data/spot_klines")
@@ -248,6 +251,7 @@ CORE_MODEL_FEATURES = [
     "momentum_slope_2h",
     "momentum_slope_4h",
     *MACRO_FEATURE_COLUMNS,
+    *ONCHAIN_FEATURE_COLUMNS,
 ]
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
@@ -255,7 +259,12 @@ ZERO_VARIANCE_CANDIDATES: set[str] = set()
 EXCLUDED_FEATURES = {
     "funding_rate_zscore_24h",
     "ret_1h",
+    "ret_4h",
+    "ret_8h",
+    "ret_12h",
 }
+
+HOURLY_REGRESSION_RELIABILITY_DEFAULT_MIN_SCORE = 0.60
 
 EXTERNAL_SOURCE_PREFIXES = (
     "cq_",
@@ -275,11 +284,11 @@ EXTERNAL_SOURCE_COLUMNS = {
 PRESERVED_EXTERNAL_COLUMNS = {
     "funding_rate_zscore_24h",
     *MACRO_FEATURE_COLUMNS,
+    *ONCHAIN_FEATURE_COLUMNS,
 }
 
 NON_BINANCE_BREAKOUT_PREFIXES = (
     "cq_",
-    "onchain_",
     "orderbook_",
     "depth_",
     "lob_",
@@ -369,6 +378,35 @@ def _append_return_feature_columns(df: pd.DataFrame, allowed: list[str]) -> list
         if column not in allowed:
             allowed.append(column)
     return allowed
+
+
+def _filter_allowed_features_by_reliability(
+    allowed_features: list[str],
+    *,
+    reliability_json: str | None,
+    min_score: float,
+    target_horizon: float | None,
+) -> list[str]:
+    if not reliability_json:
+        return allowed_features
+
+    from src.scripts.build_training_dataset_direction import _filter_features_by_reliability
+
+    return _filter_features_by_reliability(
+        allowed_features,
+        reliability_json=reliability_json,
+        min_score=min_score,
+        target_horizon=target_horizon,
+    )
+
+
+def _drop_uncovered_allowed_features(df: pd.DataFrame, allowed_features: list[str]) -> list[str]:
+    dropped = [feature for feature in allowed_features if feature in df.columns and df[feature].notna().sum() == 0]
+    if dropped:
+        preview = ", ".join(dropped[:5])
+        suffix = "..." if len(dropped) > 5 else ""
+        print(f"Dropped {len(dropped)} all-null allowed features: {preview}{suffix}")
+    return [feature for feature in allowed_features if feature not in set(dropped)]
 
 
 def _drop_external_source_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -652,78 +690,24 @@ def _load_binance_intrahour_features(directory: Path = RAW_SPOT_METRICS_DIR) -> 
         print("Intrahour 15m features unavailable: raw spot cadence is hourly.")
         return None
 
-    close = pd.to_numeric(wide["spot_close"], errors="coerce")
-    log_ret_15m = np.log(close.replace(0.0, np.nan)).diff()
-    spread = (pd.to_numeric(wide["spot_high"], errors="coerce") - pd.to_numeric(wide["spot_low"], errors="coerce")).replace(
-        0.0,
-        np.nan,
+    renamed = wide.rename(
+        columns={
+            "spot_open": "open",
+            "spot_high": "high",
+            "spot_low": "low",
+            "spot_close": "close",
+            "spot_volume": "volume",
+            "spot_quote_volume": "quote_volume",
+            "spot_num_trades": "num_trades",
+            "spot_taker_buy_base_volume": "taker_buy_base_volume",
+            "spot_taker_buy_quote_volume": "taker_buy_quote_volume",
+        }
     )
-    upper_wick = pd.to_numeric(wide["spot_high"], errors="coerce") - np.maximum(
-        pd.to_numeric(wide["spot_open"], errors="coerce"),
-        close,
-    )
-    lower_wick = np.minimum(pd.to_numeric(wide["spot_open"], errors="coerce"), close) - pd.to_numeric(
-        wide["spot_low"],
-        errors="coerce",
-    )
-    wick_asym = ((upper_wick - lower_wick) / spread).replace([np.inf, -np.inf], np.nan)
-    volume = pd.to_numeric(wide["spot_volume"], errors="coerce")
-    taker_buy = pd.to_numeric(wide["spot_taker_buy_base_volume"], errors="coerce")
-    imbalance = ((2.0 * taker_buy - volume) / volume.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
-
-    enriched = wide.copy()
-    enriched["hour_ts"] = enriched["ts"].dt.ceil("h")
-    enriched["_log_ret_15m"] = log_ret_15m
-    enriched["_wick_asym"] = wick_asym
-    enriched["_imbalance"] = imbalance
-
-    grouped = enriched.groupby("hour_ts", as_index=False)
-    hourly = grouped.agg(
-        intrabar_path_range=("spot_high", "max"),
-        intrabar_low_min=("spot_low", "min"),
-        intrabar_close_last=("spot_close", "last"),
-        intrabar_realized_vol_15m=("_log_ret_15m", "std"),
-        intrabar_taker_imbalance_mean=("_imbalance", "mean"),
-        intrabar_wick_asymmetry_mean=("_wick_asym", "mean"),
-        intrabar_volume_sum=("spot_volume", "sum"),
-        intrabar_quote_volume_sum=("spot_quote_volume", "sum"),
-    )
-    hourly["intrabar_path_range"] = (
-        (hourly["intrabar_path_range"] - hourly["intrabar_low_min"])
-        / hourly["intrabar_close_last"].replace(0.0, np.nan)
-    )
-    hourly = hourly.drop(columns=["intrabar_low_min", "intrabar_close_last"])
-
-    persist_rows = []
-    for hour_ts, bucket in grouped:
-        persist_rows.append(
-            {
-                "hour_ts": hour_ts,
-                "intrabar_taker_imbalance_persistence": _sign_persistence(bucket["_imbalance"]),
-                "intrabar_wick_asymmetry_persistence": _sign_persistence(bucket["_wick_asym"]),
-            }
-        )
-    persist_df = pd.DataFrame(persist_rows)
-    hourly = hourly.merge(persist_df, on="hour_ts", how="left")
-
-    hourly = hourly.sort_values("hour_ts").reset_index(drop=True)
-    rv_short = hourly["intrabar_realized_vol_15m"].rolling(window=6, min_periods=3).mean()
-    rv_long = hourly["intrabar_realized_vol_15m"].rolling(window=24, min_periods=8).mean().replace(0.0, np.nan)
-    hourly["intrabar_vol_term_structure_6h_24h"] = (rv_short / rv_long).replace([np.inf, -np.inf], np.nan)
-
-    vol_mean = hourly["intrabar_volume_sum"].rolling(window=24, min_periods=8).mean()
-    vol_std = hourly["intrabar_volume_sum"].rolling(window=24, min_periods=8).std(ddof=0).replace(0.0, np.nan)
-    hourly["intrabar_volume_regime_zscore_24h"] = (
-        (hourly["intrabar_volume_sum"] - vol_mean) / vol_std
-    ).replace([np.inf, -np.inf], np.nan)
-    hourly["intrabar_volume_regime_transition"] = hourly["intrabar_volume_regime_zscore_24h"].diff().abs()
-
-    intrabar_cols = [col for col in hourly.columns if col.startswith("intrabar_")]
-    for col in intrabar_cols:
-        hourly[col] = pd.to_numeric(hourly[col], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    output = hourly.rename(columns={"hour_ts": "ts"})
-    _BINANCE_INTRAHOUR_FEATURES = output[["ts", *intrabar_cols]].copy()
+    output = compute_hourly_intrabar_features(renamed)
+    if output.empty:
+        return None
+    intrabar_cols = [col for col in output.columns if col != "ts"]
+    _BINANCE_INTRAHOUR_FEATURES = output.copy()
     print(
         f"Built {len(intrabar_cols)} intrahour Binance features from {len(parquet_paths)} raw parquet files.",
     )
@@ -781,7 +765,12 @@ def _load_binance_spot_features(directory: Path = SPOT_KLINES_DIR) -> Optional[p
     return combined
 
 
-def main(output_dir: str) -> None:
+def main(
+    output_dir: str,
+    *,
+    feature_reliability_json: str | None = None,
+    feature_reliability_min_score: float = HOURLY_REGRESSION_RELIABILITY_DEFAULT_MIN_SCORE,
+) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     # Load from local instead of BigQuery
@@ -851,8 +840,15 @@ def main(output_dir: str) -> None:
         if column not in allowed_features:
             allowed_features.append(column)
     allowed_features = _append_futures_feature_columns(df, allowed_features)
-    allowed_features = _append_return_feature_columns(df, allowed_features)
     allowed_features = _append_technical_feature_columns(df, allowed_features)
+    allowed_features = [feature for feature in allowed_features if feature != TREND_IGNITION_LABEL]
+    allowed_features = _filter_allowed_features_by_reliability(
+        allowed_features,
+        reliability_json=feature_reliability_json,
+        min_score=feature_reliability_min_score,
+        target_horizon=1.0,
+    )
+    allowed_features = _drop_uncovered_allowed_features(df, allowed_features)
     df = _enforce_feature_coverage(df, allowed_features)
     df = df.sort_values("ts").reset_index(drop=True)
     label_series = df[TREND_IGNITION_LABEL].astype(int)
@@ -973,5 +969,21 @@ if __name__ == "__main__":
         default="artifacts/datasets",
         help="Directory to save the prepared dataset splits.",
     )
+    parser.add_argument(
+        "--feature-reliability-json",
+        type=str,
+        default=None,
+        help="Optional reliability JSON used to prune the 1h regression feature set.",
+    )
+    parser.add_argument(
+        "--feature-reliability-min-score",
+        type=float,
+        default=HOURLY_REGRESSION_RELIABILITY_DEFAULT_MIN_SCORE,
+        help="Minimum reliability score when filtering 1h regression features.",
+    )
     args = parser.parse_args()
-    main(args.output_dir)
+    main(
+        args.output_dir,
+        feature_reliability_json=args.feature_reliability_json,
+        feature_reliability_min_score=args.feature_reliability_min_score,
+    )

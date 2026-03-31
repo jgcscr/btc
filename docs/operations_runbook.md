@@ -62,6 +62,11 @@ Minimum runtime checks before trusting a fresh prediction snapshot:
 - `prompt_ready_summary.operator_summary_compact` matches the interpretation being used
 - per-horizon `trade_action`, `execution_plan.status`, `execution_plan.reason`, `confidence_min_source`, and `abstention.reason` support the same conclusion
 
+Minimum documentation checks before trusting a performance claim:
+
+- use `artifacts/analysis/featurelift_20260331_rerun/comparison_report.json` or `.md` as the March 31 source of truth
+- treat the older pre-rerun March 31 comparison summary as superseded only
+
 ## 4. Runtime Profiles And Their Roles
 
 Use the profile that matches the task. The intended roles are:
@@ -81,6 +86,13 @@ Current live-source assumption:
 - Binance spot is the only hard live data source for approved runtime refreshes.
 - Macro context is currently research-contextual and runtime-optional unless a profile explicitly merges a maintained macro parquet or equivalent source on every run.
 - If macro is promoted back to required live coverage later, update all approved runtime profiles and restore the stricter feature-coverage expectation before relying on that policy.
+
+Current local rebuild-source assumption:
+
+- `run_refresh_and_predict` now attempts best-effort local macro and on-chain refreshes before feature-bundle assembly
+- on-chain refresh writes `data/processed/onchain/hourly_features.parquet` and `data/processed/onchain/source_manifest.json`
+- on-chain refresh can fall back to public Blockchain chart series when a configured API is unavailable
+- failures in those best-effort refreshes are warnings unless a profile later makes them blocking dependencies
 
 Current live-conservative size caps from config:
 
@@ -206,6 +218,14 @@ Evaluator behavior that matters operationally:
 
 Treat any non-empty `failed_checks` in `summary/directional_objectives.json` as a reliability gate failure.
 
+For March 31, 2026 feature work, also treat these as mandatory safety checks before believing a lift result:
+
+- `tests/test_feature_leakage_guards.py`
+- `tests/test_intrabar_feature_parity.py`
+- `tests/test_onchain_loader_and_integration.py`
+- `src/scripts.generate_featurelift_comparison_report`
+- `src/scripts.check_featurelift_report_references`
+
 ## 7. Review Order After A Reliability Run
 
 Read these in order:
@@ -312,6 +332,34 @@ Shared deployment targets currently include:
 - promoted and incumbent labeled profiles
 - promotion and calibration summaries
 - the deployment manifest
+
+## 10A. Model-Improvement Discipline
+
+The March 31 feature-lift rerun changed how agents should evaluate modeling changes.
+
+Use these rules:
+
+1. Do not cite the older pre-rerun March 31 comparison summary as a current performance report.
+2. Use `artifacts/analysis/featurelift_20260331_rerun/comparison_report.json` and `.md` for the corrected view.
+3. Treat strong multi-horizon metrics as suspect until leakage guards and walk-forward checks have passed.
+4. If a dataset rebuild changes 15m or 1h feature selection, rerun the validation-guards subset before trusting the result.
+5. Regenerate the comparison report after retraining so the checked-in summary matches the current saved artifacts.
+
+Local command sequence:
+
+```bash
+/workspaces/btc/.venv/bin/python -m pytest \
+  tests/test_runtime_feature_parity_and_validation.py \
+  tests/test_intrabar_feature_parity.py \
+  tests/test_macro_loader_and_integration.py \
+  tests/test_onchain_loader_and_integration.py \
+  tests/test_direction_feature_reliability_filters.py \
+  tests/test_feature_leakage_guards.py \
+  tests/test_featurelift_report_reference_check.py
+
+/workspaces/btc/.venv/bin/python -m src.scripts.generate_featurelift_comparison_report
+/workspaces/btc/.venv/bin/python -m src.scripts.check_featurelift_report_references
+```
 
 ## 11. Rollback Guidance
 

@@ -26,12 +26,14 @@ from src.trading.volatility import (
     split_volatility_arrays,
 )
 from src.data.macro_loader import MACRO_FEATURE_COLUMNS
+from src.data.onchain_loader import ONCHAIN_FEATURE_COLUMNS
 
 
 PROCESSED_PATHS = [
     Path("data/processed/technical/hourly_features.parquet"),
     Path("data/processed/funding/hourly_features.parquet"),
     Path("data/processed/macro/daily_features.parquet"),
+    Path("data/processed/onchain/hourly_features.parquet"),
 ]
 
 META_PATH = Path("artifacts/datasets/btc_features_1h_direction_meta.json")
@@ -72,6 +74,7 @@ CORE_MODEL_FEATURES = [
     "momentum_slope_2h",
     "momentum_slope_4h",
     *MACRO_FEATURE_COLUMNS,
+    *ONCHAIN_FEATURE_COLUMNS,
 ]
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
@@ -100,6 +103,7 @@ EXTERNAL_SOURCE_COLUMNS = {
 PRESERVED_EXTERNAL_COLUMNS = {
     "funding_rate_zscore_24h",
     *MACRO_FEATURE_COLUMNS,
+    *ONCHAIN_FEATURE_COLUMNS,
 }
 
 TECHNICAL_PREFIXES = (
@@ -127,6 +131,8 @@ def _filter_features_by_reliability(
     allowed_features: list[str],
     reliability_json: str | None,
     min_score: float,
+    *,
+    target_horizon: float | None = None,
 ) -> list[str]:
     if not reliability_json:
         return allowed_features
@@ -135,6 +141,78 @@ def _filter_features_by_reliability(
         print(f"Feature reliability file not found at {payload_path}; skipping reliability filter.")
         return allowed_features
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    horizon_key = None
+    if target_horizon is not None:
+        numeric = float(target_horizon)
+        horizon_key = f"{int(numeric)}h" if numeric >= 1.0 and float(numeric).is_integer() else f"{int(round(numeric * 60))}m"
+
+    if horizon_key:
+        horizon_regime_scores = payload.get("horizon_regime_feature_scores", {}) if isinstance(payload, dict) else {}
+        if isinstance(horizon_regime_scores, dict) and isinstance(horizon_regime_scores.get(horizon_key), dict):
+            filtered_from_scores: list[str] = []
+            for feature in allowed_features:
+                best_score = None
+                for regime_scores in horizon_regime_scores[horizon_key].values():
+                    if not isinstance(regime_scores, dict):
+                        continue
+                    score_obj = regime_scores.get(feature)
+                    if isinstance(score_obj, dict) and "score" in score_obj:
+                        try:
+                            score = float(score_obj["score"])
+                        except Exception:
+                            score = None
+                        if score is not None and (best_score is None or score > best_score):
+                            best_score = score
+                if best_score is not None and best_score >= float(min_score):
+                    filtered_from_scores.append(feature)
+            if filtered_from_scores:
+                print(
+                    f"Feature reliability horizon-regime score filter kept {len(filtered_from_scores)} / {len(allowed_features)} features for {horizon_key}.",
+                )
+                return filtered_from_scores
+
+        horizon_regime = payload.get("accepted_features_by_horizon_regime", {}) if isinstance(payload, dict) else {}
+        if isinstance(horizon_regime, dict) and isinstance(horizon_regime.get(horizon_key), dict):
+            accepted_union: set[str] = set()
+            for slice_features in horizon_regime[horizon_key].values():
+                if isinstance(slice_features, list):
+                    accepted_union.update(str(value) for value in slice_features)
+            filtered = [feature for feature in allowed_features if feature in accepted_union]
+            if filtered:
+                print(
+                    f"Feature reliability horizon-regime filter kept {len(filtered)} / {len(allowed_features)} features for {horizon_key}.",
+                )
+                return filtered
+
+        horizon_scores = payload.get("horizon_feature_scores", {}) if isinstance(payload, dict) else {}
+        if isinstance(horizon_scores, dict) and isinstance(horizon_scores.get(horizon_key), dict):
+            filtered_from_scores = []
+            for feature in allowed_features:
+                score_obj = horizon_scores[horizon_key].get(feature)
+                score = None
+                if isinstance(score_obj, dict) and "score" in score_obj:
+                    try:
+                        score = float(score_obj["score"])
+                    except Exception:
+                        score = None
+                if score is not None and score >= float(min_score):
+                    filtered_from_scores.append(feature)
+            if filtered_from_scores:
+                print(
+                    f"Feature reliability horizon score filter kept {len(filtered_from_scores)} / {len(allowed_features)} features for {horizon_key}.",
+                )
+                return filtered_from_scores
+
+        accepted_by_horizon = payload.get("accepted_features_by_horizon", {}) if isinstance(payload, dict) else {}
+        if isinstance(accepted_by_horizon, dict) and isinstance(accepted_by_horizon.get(horizon_key), list):
+            accepted_set = {str(value) for value in accepted_by_horizon[horizon_key]}
+            filtered = [feature for feature in allowed_features if feature in accepted_set]
+            if filtered:
+                print(
+                    f"Feature reliability horizon filter kept {len(filtered)} / {len(allowed_features)} features for {horizon_key}.",
+                )
+                return filtered
+
     accepted = payload.get("accepted_features")
     feature_scores = payload.get("feature_scores", {}) if isinstance(payload, dict) else {}
 
@@ -369,7 +447,9 @@ def prepare_direction_feature_frame(
         allowed_features,
         reliability_json=reliability_json,
         min_score=reliability_min_score,
+        target_horizon=1.0,
     )
+    allowed_features = [feature for feature in allowed_features if feature not in {col for col in allowed_features if col in df.columns and df[col].notna().sum() == 0}]
 
     if allowed_features:
         df = _enforce_feature_coverage(df, allowed_features)

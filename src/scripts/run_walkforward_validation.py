@@ -34,8 +34,13 @@ def _load_npz(path: Path, y_key: str) -> tuple[np.ndarray, np.ndarray, np.ndarra
     data = np.load(path, allow_pickle=True)
     if "X_train" not in data or "X_val" not in data or "X_test" not in data:
         raise KeyError("NPZ missing split arrays")
-    if y_key not in data and y_key != "y":
-        raise KeyError(f"Missing target key {y_key}")
+    if y_key == "y":
+        required_target_keys = {"y_train", "y_val", "y_test"}
+    else:
+        required_target_keys = {f"{y_key}_train", f"{y_key}_val", f"{y_key}_test"}
+    missing_targets = [key for key in required_target_keys if key not in data]
+    if missing_targets:
+        raise KeyError(f"Missing target key {y_key}: required split arrays not found {missing_targets}")
 
     X = np.vstack([data["X_train"], data["X_val"], data["X_test"]]).astype(np.float32)
     if y_key == "y":

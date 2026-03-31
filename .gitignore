@@ -11,6 +11,8 @@ artifacts/
 # ignore all data; we'll recreate needed inputs dynamically
 data/
 mlruns/
+tmp_validation/1h_ret_threshold_sweep/
+tmp_validation/1h_ret_threshold_sweep_v2/
 
 # legacy granular ignores (covered by above rule)
 data/spot_klines/

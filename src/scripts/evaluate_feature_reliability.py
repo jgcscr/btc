@@ -54,6 +54,88 @@ def _feature_score(series: pd.Series, baseline_window: int, recent_window: int) 
     }
 
 
+def _format_horizon_key(value: Any) -> str | None:
+    try:
+        numeric = float(value)
+    except Exception:
+        return None
+    if not np.isfinite(numeric) or numeric <= 0.0:
+        return None
+    if numeric >= 1.0 and float(numeric).is_integer():
+        return f"{int(numeric)}h"
+    return f"{int(round(numeric * 60))}m"
+
+
+def _derive_regime_state(df: pd.DataFrame) -> pd.Series:
+    if "regime_state" in df.columns:
+        return df["regime_state"].fillna("unknown").astype(str).str.strip().str.lower()
+
+    volatility = pd.to_numeric(df.get("volatility_realized_24h"), errors="coerce")
+    range_expansion = pd.to_numeric(df.get("range_expansion_1h"), errors="coerce")
+    momentum = pd.to_numeric(df.get("momentum_slope_4h"), errors="coerce")
+    ignition = pd.to_numeric(df.get("trend_ignition_6h"), errors="coerce")
+
+    regime = pd.Series("neutral", index=df.index, dtype=object)
+    trend_mask = (
+        ignition.fillna(0.0) >= 0.55
+    ) | (
+        momentum.abs().fillna(0.0) >= volatility.fillna(0.0).clip(lower=0.001)
+    )
+    chop_mask = (
+        range_expansion.fillna(0.0) <= 0.9
+    ) & (
+        momentum.abs().fillna(0.0) <= volatility.fillna(0.0).clip(lower=0.001) * 0.75
+    )
+    regime.loc[trend_mask] = "trend"
+    regime.loc[chop_mask & ~trend_mask] = "chop"
+    return regime.astype(str)
+
+
+def _compute_scores(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    *,
+    baseline_window: int,
+    recent_window: int,
+) -> Dict[str, Dict[str, float]]:
+    return {
+        col: _feature_score(
+            df[col],
+            baseline_window=baseline_window,
+            recent_window=recent_window,
+        )
+        for col in feature_cols
+    }
+
+
+def _accepted_from_scores(
+    scores: Dict[str, Dict[str, float]],
+    *,
+    min_score: float,
+    max_features: int,
+) -> List[str]:
+    ranked = sorted(scores.items(), key=lambda kv: kv[1]["score"], reverse=True)
+    accepted = [name for name, meta in ranked if meta["score"] >= float(min_score)]
+    if int(max_features) > 0:
+        accepted = accepted[: int(max_features)]
+    return accepted
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(inner) for key, inner in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (np.floating, float)):
+        numeric = float(value)
+        return numeric if np.isfinite(numeric) else None
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute feature reliability scores from recent drift and missingness.")
     parser.add_argument("--input", type=Path, required=True, help="Input parquet/csv with feature columns.")
@@ -61,6 +143,11 @@ def main() -> None:
     parser.add_argument("--recent-window", type=int, default=120)
     parser.add_argument("--min-score", type=float, default=0.55)
     parser.add_argument("--max-features", type=int, default=0, help="Optional cap on accepted feature count (0 disables).")
+    parser.add_argument("--horizon", type=float, default=None, help="Optional fixed horizon for the evaluated frame.")
+    parser.add_argument("--horizon-col", type=str, default="horizon", help="Column containing horizon labels when evaluating tabular inputs.")
+    parser.add_argument("--regime-col", type=str, default="regime_state", help="Column containing regime labels when available.")
+    parser.add_argument("--derive-regime", action="store_true", help="Derive a simple trend/chop/neutral regime when no regime column exists.")
+    parser.add_argument("--min-slice-rows", type=int, default=80, help="Minimum rows required to emit horizon/regime slice scores.")
     parser.add_argument("--output", type=Path, default=Path("artifacts/monitoring/feature_reliability.json"))
     args = parser.parse_args()
 
@@ -83,18 +170,81 @@ def main() -> None:
         for c in df.columns
         if c not in {"ts", "timestamp", "y", "y_true", "ret_1h", "horizon", "signal_ensemble", "ret_pred", "p_up"}
     ]
-    scores: Dict[str, Dict[str, float]] = {}
-    for col in feature_cols:
-        scores[col] = _feature_score(
-            df[col],
-            baseline_window=int(args.baseline_window),
-            recent_window=int(args.recent_window),
-        )
+    scores = _compute_scores(
+        df,
+        feature_cols,
+        baseline_window=int(args.baseline_window),
+        recent_window=int(args.recent_window),
+    )
+    accepted = _accepted_from_scores(
+        scores,
+        min_score=float(args.min_score),
+        max_features=int(args.max_features),
+    )
 
-    ranked = sorted(scores.items(), key=lambda kv: kv[1]["score"], reverse=True)
-    accepted = [name for name, meta in ranked if meta["score"] >= float(args.min_score)]
-    if int(args.max_features) > 0:
-        accepted = accepted[: int(args.max_features)]
+    accepted_by_horizon: Dict[str, List[str]] = {}
+    horizon_feature_scores: Dict[str, Dict[str, Dict[str, float]]] = {}
+    accepted_by_horizon_regime: Dict[str, Dict[str, List[str]]] = {}
+    horizon_regime_feature_scores: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
+
+    horizon_series = None
+    if args.horizon is not None:
+        horizon_key = _format_horizon_key(args.horizon)
+        if horizon_key is not None:
+            horizon_series = pd.Series(horizon_key, index=df.index, dtype=object)
+    elif args.horizon_col in df.columns:
+        horizon_series = df[args.horizon_col].map(_format_horizon_key)
+
+    regime_series = None
+    if args.regime_col in df.columns:
+        regime_series = df[args.regime_col].fillna("unknown").astype(str).str.strip().str.lower()
+    elif args.derive_regime:
+        regime_series = _derive_regime_state(df)
+
+    if horizon_series is not None:
+        working = df.copy()
+        working["_horizon_key"] = horizon_series
+        if regime_series is not None:
+            working["_regime_key"] = regime_series
+
+        for horizon_key, horizon_frame in working.groupby("_horizon_key"):
+            if not isinstance(horizon_key, str) or not horizon_key or len(horizon_frame) < int(args.min_slice_rows):
+                continue
+            slice_scores = _compute_scores(
+                horizon_frame,
+                feature_cols,
+                baseline_window=int(args.baseline_window),
+                recent_window=int(args.recent_window),
+            )
+            horizon_feature_scores[horizon_key] = slice_scores
+            accepted_by_horizon[horizon_key] = _accepted_from_scores(
+                slice_scores,
+                min_score=float(args.min_score),
+                max_features=int(args.max_features),
+            )
+
+            if "_regime_key" not in horizon_frame.columns:
+                continue
+            regime_payload: Dict[str, List[str]] = {}
+            regime_scores_payload: Dict[str, Dict[str, Dict[str, float]]] = {}
+            for regime_key, regime_frame in horizon_frame.groupby("_regime_key"):
+                if not isinstance(regime_key, str) or not regime_key or len(regime_frame) < int(args.min_slice_rows):
+                    continue
+                regime_scores = _compute_scores(
+                    regime_frame,
+                    feature_cols,
+                    baseline_window=int(args.baseline_window),
+                    recent_window=int(args.recent_window),
+                )
+                regime_scores_payload[regime_key] = regime_scores
+                regime_payload[regime_key] = _accepted_from_scores(
+                    regime_scores,
+                    min_score=float(args.min_score),
+                    max_features=int(args.max_features),
+                )
+            if regime_payload:
+                accepted_by_horizon_regime[horizon_key] = regime_payload
+                horizon_regime_feature_scores[horizon_key] = regime_scores_payload
 
     payload = {
         "rows": int(len(df)),
@@ -103,14 +253,21 @@ def main() -> None:
             "recent_window": int(args.recent_window),
             "min_score": float(args.min_score),
             "max_features": int(args.max_features),
+            "min_slice_rows": int(args.min_slice_rows),
         },
         "accepted_features": accepted,
         "feature_scores": scores,
+        "accepted_features_by_horizon": accepted_by_horizon,
+        "horizon_feature_scores": horizon_feature_scores,
+        "accepted_features_by_horizon_regime": accepted_by_horizon_regime,
+        "horizon_regime_feature_scores": horizon_regime_feature_scores,
     }
 
+    safe_payload = _json_safe(payload)
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
-    print(json.dumps(payload, indent=2, allow_nan=False))
+    args.output.write_text(json.dumps(safe_payload, indent=2, allow_nan=False), encoding="utf-8")
+    print(json.dumps(safe_payload, indent=2, allow_nan=False))
 
 
 if __name__ == "__main__":

@@ -32,6 +32,8 @@ from src.scripts.build_training_dataset import _apply_funding_rate_features
 from src.scripts.build_training_dataset import _load_local_features as _load_hourly_local_features
 from src.trading.feature_engineering import augment_hourly_price_features as _shared_augment_hourly_price_features
 from src.data.macro_loader import MACRO_FEATURE_COLUMNS
+from src.data.onchain_loader import ONCHAIN_FEATURE_COLUMNS
+from src.scripts.build_training_dataset import _drop_uncovered_allowed_features
 
 
 DEFAULT_HORIZONS: List[int] = [1, 4, 8, 12]
@@ -39,6 +41,7 @@ PROCESSED_PATHS = [
     Path("data/processed/technical/hourly_features.parquet"),
     Path("data/processed/funding/hourly_features.parquet"),
     Path("data/processed/macro/daily_features.parquet"),
+    Path("data/processed/onchain/hourly_features.parquet"),
 ]
 
 CORE_MODEL_FEATURES = [
@@ -78,6 +81,7 @@ CORE_MODEL_FEATURES = [
     "momentum_slope_2h",
     "momentum_slope_4h",
     *MACRO_FEATURE_COLUMNS,
+    *ONCHAIN_FEATURE_COLUMNS,
 ]
 
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
@@ -85,6 +89,9 @@ ZERO_VARIANCE_CANDIDATES: set[str] = set()
 EXCLUDED_FEATURES: set[str] = {
     "funding_rate_zscore_24h",
     "ret_1h",
+    "ret_4h",
+    "ret_8h",
+    "ret_12h",
 }
 
 EXTERNAL_SOURCE_PREFIXES = (
@@ -105,6 +112,7 @@ EXTERNAL_SOURCE_COLUMNS = {
 PRESERVED_EXTERNAL_COLUMNS = {
     "funding_rate_zscore_24h",
     *MACRO_FEATURE_COLUMNS,
+    *ONCHAIN_FEATURE_COLUMNS,
 }
 
 FUTURES_FEATURE_PREFIXES = (
@@ -413,8 +421,8 @@ def build_multi_horizon_dataset(
         if column in df_targets.columns and column not in allowed_features:
             allowed_features.append(column)
     allowed_features = _append_futures_feature_columns(df_targets, allowed_features)
-    allowed_features = _append_return_feature_columns(df_targets, allowed_features)
     allowed_features = _append_technical_feature_columns(df_targets, allowed_features)
+    allowed_features = _drop_uncovered_allowed_features(df_targets, allowed_features)
     df_targets = _enforce_feature_coverage(df_targets, allowed_features)
     X, y_ret1h = make_features_and_target(
         df_targets,

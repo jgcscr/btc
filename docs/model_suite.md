@@ -65,6 +65,45 @@ Train only sequence and transformer models:
 
 In this codespace, prefer the explicit interpreter path above unless you have already activated `.venv` in your shell.
 
+## Current March 31, 2026 Notes
+
+The current codespace includes additional feature-engineering and validation paths that are not captured by the older one-command summary alone.
+
+Current important facts:
+
+- 15m and runtime 1h intrabar aggregation now share `src/trading/intrabar_features.py`
+- 1h regression dataset rebuilds can use slice-aware reliability filtering via `--feature-reliability-json` and `--feature-reliability-min-score`
+- the tuned 1h regression score threshold used in this codespace is `0.80`
+- the corrected March 31 comparison report is `artifacts/analysis/featurelift_20260331_rerun/comparison_report.md`
+- the older pre-rerun March 31 comparison summary is superseded and should not be used as a model-quality summary
+
+When reproducing the corrected rerun, refresh local external features first:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.refresh_macro_features --full-refresh
+/workspaces/btc/.venv/bin/python -m src.scripts.refresh_onchain_features --full-refresh
+```
+
+Then rebuild the dataset stack with the current thresholds:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset_15m --output-dir artifacts/datasets
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset_direction_15m \
+  --output-dir artifacts/datasets \
+  --feature-reliability-json artifacts/analysis/feature_reliability_15m_1h_slice_20260331.json \
+  --feature-reliability-min-score 0.55
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset \
+  --output-dir artifacts/datasets \
+  --feature-reliability-json artifacts/analysis/feature_reliability_15m_1h_slice_20260331.json \
+  --feature-reliability-min-score 0.80
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset_direction \
+  --output-dir artifacts/datasets \
+  --feature-reliability-json artifacts/analysis/feature_reliability_15m_1h_slice_20260331.json \
+  --feature-reliability-min-score 0.55
+/workspaces/btc/.venv/bin/python -m src.scripts.build_training_dataset_multi_horizon \
+  --output-dir artifacts/datasets --horizons 1 4 8 12
+```
+
 ## Datasets used per horizon
 
 - 15m: `btc_features_15m_splits.npz`, `btc_features_15m_direction_splits.npz`
@@ -87,3 +126,5 @@ Where `{horizon}` is one of `15m`, `1h`, `4h`, `8h`, `12h`.
 
 - 15m/1h targets use flat label keys in the dataset; multi-horizon targets use `y_dir{horizon}h_*` and `y_ret{horizon}h_*` fields.
 - The suite script shells out to the existing CLIs so model hyperparameters and logging remain consistent with prior runs.
+- Multi-horizon feature builders now explicitly exclude forward-return leakage columns.
+- Use `src.scripts.generate_featurelift_comparison_report` after retraining if the checked-in March 31 comparison artifacts need to be refreshed.
