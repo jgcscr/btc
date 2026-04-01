@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 import numpy as np
 from joblib import dump as joblib_dump
 
+from src.utils.model_summary import build_model_summary, write_model_summary
+
 try:
     from lightgbm import LGBMClassifier
 except ImportError as exc:  # pragma: no cover
@@ -172,19 +174,20 @@ def train_and_evaluate(
     with open(meta_path, "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2)
 
-    summary = {
-        "model_type": "lightgbm_classifier",
-        "target": f"direction_{resolved_suffix}",
-        "dataset_path": dataset_path,
-        "threshold": threshold,
-        "feature_names": feature_names,
-        "params": params,
-        "metrics": metrics_by_split,
-        "model_path": model_path,
-    }
+    summary = build_model_summary(
+        model_type="lightgbm_classifier",
+        target=f"direction_{resolved_suffix}",
+        dataset_path=dataset_path,
+        model_path=model_path,
+        metrics=metrics_by_split,
+        feature_names=feature_names,
+        params=params,
+        threshold=threshold,
+        horizon_hours=horizon,
+        trained_at=metadata["trained_at"],
+    )
     summary_path = os.path.join(output_dir, "summary.json")
-    with open(summary_path, "w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2)
+    write_model_summary(summary_path, summary)
 
     print(f"Saved {horizon}h LightGBM direction model to: {model_path}")
     print("Saved metadata to:", meta_path)

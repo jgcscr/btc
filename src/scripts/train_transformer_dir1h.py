@@ -16,6 +16,7 @@ from torch.optim import AdamW
 from src.models.transformer_classifier import TransformerDirectionClassifier
 from src.training.transformer_dataset import prepare_transformer_data, save_scaler
 from src.training.transformer_training import Metrics, evaluate, resolve_device, train_epoch
+from src.utils.model_summary import build_model_summary
 
 
 TRANSFORMER_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -321,35 +322,44 @@ def train_transformer(args: argparse.Namespace) -> None:
         mlflow.register_model(model_uri, f"transformer_dir{args.horizon}h")
 
         # Log summary as artifact
-        summary: Dict[str, Any] = {
-            "dataset_path": args.dataset_path,
-            "horizon_hours": int(args.horizon),
-            "preset": args.preset,
-            "seq_len": args.seq_len,
-            "hyperparams": {
-                "hidden_dim": args.hidden_dim,
-                "num_heads": args.num_heads,
-                "ffn_dim": args.ffn_dim,
-                "num_layers": args.num_layers,
-                "dropout": args.dropout,
-                "use_layer_norm": args.use_layer_norm,
-                "learning_rate": args.learning_rate,
-                "weight_decay": args.weight_decay,
-                "batch_size": args.batch_size,
-                "epochs": args.epochs,
-                "patience": args.patience,
-                "max_steps": args.max_steps,
-            },
-            "feature_names": data_bundle.splits.feature_names,
-            "threshold": data_bundle.splits.threshold,
-            "best_epoch": best_state["epoch"] if best_state else args.epochs,
-            "val_metrics": asdict(best_metrics) if best_metrics else None,
-            "test_metrics": asdict(test_metrics),
-            "history": history,
-            "params_json": args.params_json,
-            "model_path": model_path,
-            "scaler_path": scaler_path,
+        hyperparams = {
+            "hidden_dim": args.hidden_dim,
+            "num_heads": args.num_heads,
+            "ffn_dim": args.ffn_dim,
+            "num_layers": args.num_layers,
+            "dropout": args.dropout,
+            "use_layer_norm": args.use_layer_norm,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "patience": args.patience,
+            "max_steps": args.max_steps,
         }
+        summary: Dict[str, Any] = build_model_summary(
+            model_type="transformer_direction_classifier",
+            target=f"direction_{int(args.horizon)}h",
+            dataset_path=args.dataset_path,
+            model_path=model_path,
+            metrics={
+                "val": asdict(best_metrics) if best_metrics else {},
+                "test": asdict(test_metrics),
+            },
+            feature_names=data_bundle.splits.feature_names,
+            hyperparams=hyperparams,
+            threshold=data_bundle.splits.threshold,
+            horizon_hours=int(args.horizon),
+            seq_len=args.seq_len,
+            scaler_path=scaler_path,
+            extra_fields={
+                "preset": args.preset,
+                "best_epoch": best_state["epoch"] if best_state else args.epochs,
+                "val_metrics": asdict(best_metrics) if best_metrics else None,
+                "test_metrics": asdict(test_metrics),
+                "history": history,
+                "params_json": args.params_json,
+            },
+        )
 
         summary_path = os.path.join(output_dir, "summary.json")
         _save_summary(summary_path, summary)

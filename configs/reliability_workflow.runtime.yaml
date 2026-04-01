@@ -253,6 +253,9 @@ quality:
   calibration_robustness:
     enabled: true
     method: platt
+    use_calibrated_input: true
+    fit_base_horizons_from_labeled_input: true
+    skip_model_fit_when_labeled_input: true
     baseline_window: 240
     recent_window: 288
     max_ece_drift: 0.02
@@ -268,6 +271,7 @@ quality:
     min_regime_rows: 20
   directional_objectives:
     enabled: true
+    use_calibrated_input: true
     prob_col: p_up
     label_col: y
     regime_col: regime_state
@@ -277,6 +281,10 @@ quality:
     max_brier: 0.255
     max_ece: 0.10
     min_f1: 0.40
+    min_rows_by_regime:
+      chop: 40
+    max_brier_by_regime:
+      chop: 0.255
     min_f1_by_horizon:
       1h: 0.40
       4h: 0.40
@@ -284,6 +292,8 @@ quality:
       12h: 0.35
     max_ece_by_regime:
       chop: 0.18
+    min_f1_by_regime:
+      chop: 0.40
   leakage_audit:
     enabled: true
     y_key: y

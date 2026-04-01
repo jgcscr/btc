@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--min-rows", type=int, default=300)
     parser.add_argument("--group-min-rows", type=int, default=80)
+    parser.add_argument("--min-rows-by-regime", default="")
     parser.add_argument("--max-brier", type=float, default=0.25)
     parser.add_argument("--max-ece", type=float, default=0.08)
     parser.add_argument("--min-f1", type=float, default=0.45)
@@ -204,6 +205,7 @@ def main() -> int:
         "min_f1": _parse_threshold_map(args.min_f1_by_horizon),
     }
     regime_overrides = {
+        "min_rows": _parse_threshold_map(args.min_rows_by_regime),
         "max_brier": _parse_threshold_map(args.max_brier_by_regime),
         "max_ece": _parse_threshold_map(args.max_ece_by_regime),
         "min_f1": _parse_threshold_map(args.min_f1_by_regime),
@@ -223,7 +225,7 @@ def main() -> int:
     for key, metrics in per_regime.items():
         scoped = dict(group_thresholds)
         lookup = str(key).strip().lower()
-        for metric_name in ("max_brier", "max_ece", "min_f1"):
+        for metric_name in ("min_rows", "max_brier", "max_ece", "min_f1"):
             if lookup in regime_overrides[metric_name]:
                 scoped[metric_name] = regime_overrides[metric_name][lookup]
         failed_checks.extend(_evaluate_thresholds(metrics, scoped, prefix=f"regime:{key}"))

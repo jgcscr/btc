@@ -33,6 +33,7 @@ from src.training.lstm_data import (
     estimate_feature_stats,
 )
 from src.training.lstm_model import LSTMDirectionClassifier
+from src.utils.model_summary import build_model_summary, write_model_summary
 
 ModelBuilder = Callable[[int, argparse.Namespace], nn.Module]
 
@@ -266,27 +267,27 @@ def train_model(
     if extra_hyperparams:
         hyperparams.update(extra_hyperparams)
 
-    summary = {
-        "model_type": model_label,
-        "dataset_path": args.dataset_path,
-        "horizon_hours": int(args.horizon),
-        "seq_len": args.seq_len,
-        "feature_names": splits.feature_names,
-        "threshold": splits.threshold,
-        "device": str(device),
-        "hyperparams": hyperparams,
-        "metrics": {
+    summary = build_model_summary(
+        model_type=model_label,
+        target=f"direction_{int(args.horizon)}h",
+        dataset_path=args.dataset_path,
+        model_path=str(model_path),
+        metrics={
             "train": {**train_metrics, "loss": train_loss},
             "val": {**val_metrics, "loss": val_loss},
             "test": {**test_metrics, "loss": test_loss},
         },
-        "model_path": str(model_path),
-        "scaler_path": str(scaler_path),
-    }
+        feature_names=splits.feature_names,
+        hyperparams=hyperparams,
+        threshold=splits.threshold,
+        horizon_hours=int(args.horizon),
+        seq_len=args.seq_len,
+        scaler_path=str(scaler_path),
+        extra_fields={"device": str(device)},
+    )
 
     summary_path = output_dir / "summary.json"
-    with summary_path.open("w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2)
+    write_model_summary(summary_path, summary)
 
     print(f"Saved model weights to {model_path}")
     print(f"Saved scaler stats to {scaler_path}")

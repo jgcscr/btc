@@ -710,6 +710,191 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     return numeric
 
 
+def _calibration_label_from_value(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return "1h"
+    if text.endswith("h"):
+        return text
+    try:
+        numeric = float(text)
+    except (TypeError, ValueError):
+        return text
+    if numeric.is_integer():
+        return f"{int(numeric)}h"
+    normalized = f"{numeric:.6f}".rstrip("0").rstrip(".")
+    return f"{normalized}h"
+
+
+def _write_calibrated_quality_input(
+    *,
+    source_path: Path,
+    calibration_path: Path,
+    output_path: Path,
+    regime_col: str = "regime_state",
+) -> Dict[str, Any]:
+    if not source_path.exists():
+        return {
+            "written": False,
+            "reason": "source_missing",
+            "source": str(source_path),
+            "output": str(output_path),
+        }
+    if not calibration_path.exists():
+        return {
+            "written": False,
+            "reason": "calibration_missing",
+            "source": str(source_path),
+            "output": str(output_path),
+            "calibration": str(calibration_path),
+        }
+
+    frame = pd.read_csv(source_path)
+    if "p_up" not in frame.columns:
+        return {
+            "written": False,
+            "reason": "missing_p_up",
+            "source": str(source_path),
+            "output": str(output_path),
+            "calibration": str(calibration_path),
+        }
+
+    calibration_payload = _load_json(calibration_path)
+    working = frame.copy()
+    raw_p_up = pd.to_numeric(working.get("raw_p_up", working["p_up"]), errors="coerce")
+    raw_p_up = raw_p_up.fillna(pd.to_numeric(working["p_up"], errors="coerce")).fillna(0.5)
+
+    calibrated_values: List[float] = []
+    applied_keys: List[str] = []
+    guard_applied: List[float] = []
+    used_regime_key: List[float] = []
+
+    for row in working.to_dict(orient="records"):
+        raw_probability = _safe_float(row.get("raw_p_up", row.get("p_up", 0.5)), 0.5)
+        horizon_label = _calibration_label_from_value(row.get("horizon", "1h"))
+        regime_state = str(row.get(regime_col, "unknown") or "unknown").strip().lower() or "unknown"
+        close = _safe_float(row.get("close", 0.0), 0.0)
+        projected_price = _safe_float(row.get("projected_price", close), close)
+        ret_pred = _safe_float(row.get("ret_pred", 0.0), 0.0)
+        calibrated_probability, applied_key, used_regime, guard_payload = rrp._resolve_trade_probability_for_horizon(
+            platt_calibration=calibration_payload,
+            label=horizon_label,
+            regime_state=regime_state,
+            raw_probability=raw_probability,
+            close=close,
+            projected_price=projected_price,
+            ret_pred=ret_pred,
+        )
+        calibrated_values.append(float(calibrated_probability))
+        applied_keys.append(str(applied_key or ""))
+        used_regime_key.append(float(bool(used_regime)))
+        guard_applied.append(float(bool(isinstance(guard_payload, Mapping) and guard_payload.get("applied"))))
+
+    calibrated_series = pd.Series(calibrated_values, index=working.index, dtype=float)
+    working["raw_p_up"] = raw_p_up.astype(float)
+    working["p_up"] = calibrated_series
+    working["raw_calibrated_probability_gap"] = calibrated_series - working["raw_p_up"]
+    working["probability_calibration_used_regime_key"] = pd.Series(used_regime_key, index=working.index, dtype=float)
+    working["probability_calibration_guard_applied"] = pd.Series(guard_applied, index=working.index, dtype=float)
+    working["probability_calibration_applied_key"] = pd.Series(applied_keys, index=working.index, dtype=object)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    working.to_csv(output_path, index=False)
+    return {
+        "written": True,
+        "source": str(source_path),
+        "output": str(output_path),
+        "calibration": str(calibration_path),
+        "rows": int(len(working)),
+        "mean_abs_delta": float((working["raw_calibrated_probability_gap"].abs().mean())),
+        "regime_col": regime_col,
+    }
+
+
+def _write_meta_component_frame(
+    *,
+    source_path: Path,
+    output_path: Path,
+    requested_columns: Sequence[str] | None = None,
+) -> Dict[str, Any]:
+    if not source_path.exists():
+        return {
+            "written": False,
+            "reason": "source_missing",
+            "source": str(source_path),
+            "output": str(output_path),
+        }
+
+    frame = pd.read_csv(source_path)
+    ts_col = "ts" if "ts" in frame.columns else None
+    if ts_col is None:
+        return {
+            "written": False,
+            "reason": "missing_ts",
+            "source": str(source_path),
+            "output": str(output_path),
+        }
+
+    ret_col = None
+    for candidate in ("ret_1h", "ret_realized"):
+        if candidate in frame.columns:
+            ret_col = candidate
+            break
+    if ret_col is None:
+        return {
+            "written": False,
+            "reason": "missing_return_column",
+            "source": str(source_path),
+            "output": str(output_path),
+        }
+
+    candidate_columns = [
+        str(column)
+        for column in frame.columns
+        if str(column).startswith("p_up_") and str(column) not in {"p_up_meta", "p_up_gate"}
+    ]
+    if requested_columns:
+        aliases = {column: column for column in candidate_columns}
+        aliases.update(
+            {
+                column.removeprefix("p_up_"): column
+                for column in candidate_columns
+                if column.startswith("p_up_")
+            }
+        )
+        component_columns: List[str] = []
+        for raw_column in requested_columns:
+            key = str(raw_column).strip().lower()
+            if not key:
+                continue
+            resolved = aliases.get(key)
+            if resolved and resolved not in component_columns:
+                component_columns.append(resolved)
+    else:
+        component_columns = sorted(candidate_columns)
+
+    if not component_columns:
+        return {
+            "written": False,
+            "reason": "missing_component_columns",
+            "source": str(source_path),
+            "output": str(output_path),
+        }
+
+    derived = frame[[ts_col, ret_col, *component_columns]].copy()
+    if ret_col != "ret_1h":
+        derived = derived.rename(columns={ret_col: "ret_1h"})
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    derived.to_csv(output_path, index=False)
+    return {
+        "written": True,
+        "source": str(source_path),
+        "output": str(output_path),
+        "rows": int(len(derived)),
+        "component_columns": component_columns,
+    }
+
+
 def _format_threshold_variant_name(threshold: float) -> str:
     normalized = f"{float(threshold):.4f}".rstrip("0").rstrip(".")
     return f"threshold_{normalized.replace('.', 'p')}"
@@ -999,6 +1184,7 @@ def _build_directional_objectives_command(
     if label_col:
         cmd.extend(["--label-col", str(label_col)])
     for flag, key in (
+        ("--min-rows-by-regime", "min_rows_by_regime"),
         ("--max-brier-by-horizon", "max_brier_by_horizon"),
         ("--max-ece-by-horizon", "max_ece_by_horizon"),
         ("--min-f1-by-horizon", "min_f1_by_horizon"),
@@ -3795,13 +3981,41 @@ def main() -> None:
         results.append(_run_step("threshold_search", thresholds_cmd, logs_dir / "threshold_search.log", args.dry_run))
 
     if not args.skip_ensemble:
+        meta_component_frame_csv = search_cfg.get("meta_component_frame_csv")
+        meta_component_columns = search_cfg.get("meta_component_columns")
+        meta_component_frame_source = search_cfg.get("meta_component_frame_source")
         default_meta_inputs = [
             Path("artifacts/backtests/historical_1h_pup060_full_simplified/backtest_signals.csv"),
             Path("artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv"),
             Path("artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv"),
         ]
+        component_frame_path = Path(str(meta_component_frame_csv)) if meta_component_frame_csv else None
+        component_frame_source_path = Path(str(meta_component_frame_source)) if meta_component_frame_source else None
+        component_frame_status: Dict[str, Any] | None = None
+        if component_frame_path is not None and component_frame_source_path is not None and not args.dry_run:
+            try:
+                component_frame_status = _write_meta_component_frame(
+                    source_path=component_frame_source_path,
+                    output_path=component_frame_path,
+                    requested_columns=meta_component_columns if isinstance(meta_component_columns, Sequence) and not isinstance(meta_component_columns, (str, bytes)) else None,
+                )
+                if not bool(component_frame_status.get("written", False)):
+                    print(
+                        "Warning: failed to derive meta component frame: "
+                        f"{component_frame_status.get('reason', 'unknown')}",
+                        file=sys.stderr,
+                    )
+            except Exception as exc:
+                component_frame_status = {
+                    "written": False,
+                    "reason": f"exception:{exc}",
+                    "source": str(component_frame_source_path),
+                    "output": str(component_frame_path),
+                }
+                print(f"Warning: failed to derive meta component frame: {exc}", file=sys.stderr)
         missing_meta_inputs = [str(path) for path in default_meta_inputs if not path.exists()]
-        if missing_meta_inputs:
+        has_component_frame = component_frame_path is not None and component_frame_path.exists()
+        if missing_meta_inputs and not has_component_frame:
             print(
                 "Warning: skipping meta-ensemble training because required inputs are missing: "
                 + ", ".join(missing_meta_inputs),
@@ -3816,7 +4030,18 @@ def main() -> None:
                     try:
                         meta_component_weight_spec = _extract_audit_weight_spec(
                             _load_json(audit_path),
-                            allowed_components=("transformer", "lstm", "xgb"),
+                            allowed_components=(
+                                "transformer",
+                                "transformer_large",
+                                "lstm",
+                                "bilstm",
+                                "gru",
+                                "cnn_lstm",
+                                "cnn_bilstm",
+                                "garch_lstm",
+                                "xgb",
+                                "lgbm",
+                            ),
                         )
                     except Exception as exc:
                         print(f"Warning: failed to load meta component weights from audit {audit_path}: {exc}", file=sys.stderr)
@@ -3831,9 +4056,19 @@ def main() -> None:
                 "--weight-threshold",
                 str(search_cfg.get("meta_weight_threshold", 0.5)),
             ]
+            if has_component_frame and component_frame_path is not None:
+                meta_cmd.extend(["--component-frame-csv", str(component_frame_path)])
+                if isinstance(meta_component_columns, Sequence) and not isinstance(meta_component_columns, (str, bytes)):
+                    for column in meta_component_columns:
+                        meta_cmd.extend(["--component-column", str(column)])
             if meta_component_weight_spec:
                 meta_cmd.extend(["--component-weight-spec", meta_component_weight_spec])
             results.append(_run_step("meta_ensemble_train", meta_cmd, logs_dir / "meta_ensemble_train.log", args.dry_run))
+            if component_frame_status is not None:
+                (summary_dir / "meta_component_frame_status.json").write_text(
+                    json.dumps(component_frame_status, indent=2),
+                    encoding="utf-8",
+                )
 
     if not args.skip_quality_evals and bool(quality_cfg.get("enabled", False)):
         quality_input = Path(quality_cfg.get("quality_input") or (summary_dir / "backtest_signals_meta_ensemble.csv"))
@@ -6025,9 +6260,71 @@ def main() -> None:
 
             if bool(calibration_cfg.get("enabled", True)):
                 calibration_horizon_key = str(quality_cfg.get("calibration_horizon", "1h"))
+                if bool(calibration_cfg.get("regime_aware", True)):
+                    regime_calib_cmd = [
+                        python,
+                        "-m",
+                        "src.scripts.train_platt_calibration",
+                        "--horizons",
+                        *[str(h) for h in calibration_horizons],
+                        "--output-path",
+                        str(summary_dir / "platt_calibration.json"),
+                        "--coverage-output-path",
+                        str(summary_dir / "platt_calibration_coverage.json"),
+                        "--method",
+                        str(calibration_cfg.get("method", "platt")),
+                        "--labeled-input",
+                        str(quality_input),
+                        "--regime-col",
+                        str(calibration_cfg.get("regime_col", "regime_state")),
+                        "--min-regime-rows",
+                        str(int(calibration_cfg.get("min_regime_rows", 100))),
+                    ]
+                    if bool(calibration_cfg.get("fit_base_horizons_from_labeled_input", True)):
+                        regime_calib_cmd.append("--fit-base-horizons-from-labeled-input")
+                    if bool(calibration_cfg.get("skip_model_fit_when_labeled_input", True)):
+                        regime_calib_cmd.append("--skip-model-fit")
+                    results.append(
+                        _run_step(
+                            "platt_calibration_regime_aware",
+                            regime_calib_cmd,
+                            logs_dir / "platt_calibration_regime_aware.log",
+                            args.dry_run,
+                        )
+                    )
+
+                calibration_quality_input = quality_input
+                if bool(calibration_cfg.get("use_calibrated_input", True)):
+                    calibration_calibrated_input_path = summary_dir / "labeled_backtest.calibrated.csv"
+                    calibration_input_status: Dict[str, Any] | None = None
+                    if not args.dry_run and quality_input.exists() and (summary_dir / "platt_calibration.json").exists():
+                        try:
+                            calibration_input_status = _write_calibrated_quality_input(
+                                source_path=quality_input,
+                                calibration_path=summary_dir / "platt_calibration.json",
+                                output_path=calibration_calibrated_input_path,
+                                regime_col=str(calibration_cfg.get("regime_col", "regime_state")),
+                            )
+                            if bool(calibration_input_status.get("written", False)):
+                                calibration_quality_input = calibration_calibrated_input_path
+                        except Exception as exc:
+                            calibration_input_status = {
+                                "written": False,
+                                "reason": f"exception:{exc}",
+                                "source": str(quality_input),
+                                "output": str(calibration_calibrated_input_path),
+                                "calibration": str(summary_dir / "platt_calibration.json"),
+                            }
+                            print(f"Warning: failed to write calibrated robustness input: {exc}", file=sys.stderr)
+                        if calibration_input_status is not None:
+                            (summary_dir / "calibration_calibrated_input_status.json").write_text(
+                                json.dumps(calibration_input_status, indent=2),
+                                encoding="utf-8",
+                            )
+
                 calibration_cmd = _build_calibration_robustness_command(
                     python=python,
-                    input_path=quality_input,
+                    input_path=calibration_quality_input,
                     output_path=summary_dir / "calibration_robustness.json",
                     calibration_cfg=calibration_cfg,
                     quality_cfg=quality_cfg,
@@ -6058,39 +6355,51 @@ def main() -> None:
                         except Exception as exc:
                             print(f"Warning: failed to extract recent calibration diagnostics: {exc}", file=sys.stderr)
 
-                if bool(calibration_cfg.get("regime_aware", True)):
-                    regime_calib_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.train_platt_calibration",
-                        "--horizons",
-                        *[str(h) for h in calibration_horizons],
-                        "--output-path",
-                        str(summary_dir / "platt_calibration.json"),
-                        "--coverage-output-path",
-                        str(summary_dir / "platt_calibration_coverage.json"),
-                        "--method",
-                        str(calibration_cfg.get("method", "platt")),
-                        "--labeled-input",
-                        str(quality_input),
-                        "--regime-col",
-                        str(calibration_cfg.get("regime_col", "regime_state")),
-                        "--min-regime-rows",
-                        str(int(calibration_cfg.get("min_regime_rows", 100))),
-                    ]
-                    results.append(
-                        _run_step(
-                            "platt_calibration_regime_aware",
-                            regime_calib_cmd,
-                            logs_dir / "platt_calibration_regime_aware.log",
-                            args.dry_run,
+            directional_quality_input = calibration_quality_input if 'calibration_quality_input' in locals() else quality_input
+            if bool(directional_objectives_cfg.get("use_calibrated_input", True)):
+                directional_calibrated_input_path = summary_dir / "labeled_backtest.directional_calibrated.csv"
+                directional_calibration_status: Dict[str, Any] | None = None
+                if directional_quality_input == quality_input and not args.dry_run and quality_input.exists() and (summary_dir / "platt_calibration.json").exists():
+                    try:
+                        directional_calibration_status = _write_calibrated_quality_input(
+                            source_path=quality_input,
+                            calibration_path=summary_dir / "platt_calibration.json",
+                            output_path=directional_calibrated_input_path,
+                            regime_col=str(calibration_cfg.get("regime_col", "regime_state")),
                         )
+                        if bool(directional_calibration_status.get("written", False)):
+                            directional_quality_input = directional_calibrated_input_path
+                    except Exception as exc:
+                        directional_calibration_status = {
+                            "written": False,
+                            "reason": f"exception:{exc}",
+                            "source": str(quality_input),
+                            "output": str(directional_calibrated_input_path),
+                            "calibration": str(summary_dir / "platt_calibration.json"),
+                        }
+                        print(f"Warning: failed to write calibrated directional input: {exc}", file=sys.stderr)
+                    if directional_calibration_status is not None:
+                        (summary_dir / "directional_calibrated_input_status.json").write_text(
+                            json.dumps(directional_calibration_status, indent=2),
+                            encoding="utf-8",
+                        )
+                elif directional_quality_input != quality_input and not args.dry_run:
+                    directional_calibration_status = {
+                        "written": True,
+                        "source": str(quality_input),
+                        "output": str(directional_quality_input),
+                        "calibration": str(summary_dir / "platt_calibration.json"),
+                        "reused_from": "calibration_robustness",
+                    }
+                    (summary_dir / "directional_calibrated_input_status.json").write_text(
+                        json.dumps(directional_calibration_status, indent=2),
+                        encoding="utf-8",
                     )
 
             if bool(directional_objectives_cfg.get("enabled", False)):
                 directional_cmd = _build_directional_objectives_command(
                     python=python,
-                    input_path=quality_input,
+                    input_path=directional_quality_input,
                     output_path=summary_dir / "directional_objectives.json",
                     directional_cfg=directional_objectives_cfg,
                 )
@@ -9828,6 +10137,10 @@ def main() -> None:
                                 "--min-regime-rows",
                                 str(int(calibration_cfg.get("min_regime_rows", 100))),
                             ]
+                            if bool(calibration_cfg.get("fit_base_horizons_from_labeled_input", True)):
+                                policy_regime_calib_cmd.append("--fit-base-horizons-from-labeled-input")
+                            if bool(calibration_cfg.get("skip_model_fit_when_labeled_input", True)):
+                                policy_regime_calib_cmd.append("--skip-model-fit")
                             results.append(
                                 _run_step(
                                     "platt_calibration_regime_aware_policy_aligned_official",

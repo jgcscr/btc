@@ -245,6 +245,12 @@ def _enrich_with_history_decision_features(
         "volatility_ewm_24h",
         "volatility_garch_like",
     ]
+    component_cols = [
+        column
+        for column in history_df.columns
+        if str(column).startswith("p_up_") and str(column) not in {"p_up_meta", "p_up_gate"}
+    ]
+    enrich_cols.extend(sorted(component_cols))
     available_cols = [c for c in enrich_cols if c in history_df.columns]
     if not available_cols:
         return base

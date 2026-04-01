@@ -8,6 +8,8 @@ import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
 
+from src.utils.model_summary import build_model_summary, write_model_summary
+
 
 def _load_params_json(params_path: Optional[str]) -> Optional[Dict[str, Any]]:
     if not params_path:
@@ -170,18 +172,19 @@ def train_and_evaluate(
     with open(os.path.join(output_dir, "metadata.json"), "w", encoding="utf-8") as handle:
         json.dump(metadata_simple, handle, indent=2)
 
-    summary = {
-        "model_type": "xgboost_regressor",
-        "target": f"ret_{resolved_suffix}",
-        "dataset_path": dataset_path,
-        "feature_names": feature_names,
-        "params": params,
-        "metrics": metrics_by_split,
-        "model_path": model_path,
-    }
+    summary = build_model_summary(
+        model_type="xgboost_regressor",
+        target=f"ret_{resolved_suffix}",
+        dataset_path=dataset_path,
+        model_path=model_path,
+        metrics=metrics_by_split,
+        feature_names=feature_names,
+        params=params,
+        horizon_hours=horizon,
+        trained_at=metadata["trained_at"],
+    )
     summary_path = os.path.join(output_dir, "summary.json")
-    with open(summary_path, "w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2)
+    write_model_summary(summary_path, summary)
 
     print(f"Saved {resolved_suffix} regression model to:", model_path)
     print("Saved metadata to:", meta_path)

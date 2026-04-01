@@ -7,16 +7,22 @@ import numpy as np
 import pandas as pd
 
 from src.config_trading import (
+    DEFAULT_BILSTM_MODEL_DIR_1H,
+    DEFAULT_CNN_BILSTM_MODEL_DIR_1H,
     DEFAULT_DIR_MODEL_DIR_1H,
     DEFAULT_DIR_MODEL_WEIGHTS_1H,
     DEFAULT_DIR_MODELS_1H,
     DEFAULT_FEE_BPS,
     DEFAULT_CNN_LSTM_MODEL_DIR_1H,
+    DEFAULT_GARCH_LSTM_MODEL_DIR_1H,
+    DEFAULT_GRU_MODEL_DIR_1H,
+    DEFAULT_LGBM_MODEL_PATH_1H,
     DEFAULT_P_UP_MIN,
     DEFAULT_REG_MODEL_DIR_1H,
     DEFAULT_RET_MIN,
     DEFAULT_SLIPPAGE_BPS,
     DEFAULT_TRANSFORMER_MODEL_DIR_1H,
+    DEFAULT_TRANSFORMER_LARGE_MODEL_DIR_1H,
     OPTUNA_DIR_MODEL_DIR_1H,
     OPTUNA_DIR_MODEL_WEIGHTS_1H,
     OPTUNA_LSTM_MODEL_DIR_1H,
@@ -73,26 +79,50 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bilstm-dir-model",
         type=str,
-        default=None,
+        default=DEFAULT_BILSTM_MODEL_DIR_1H,
         help="Optional directory containing a BiLSTM direction model (model.pt, summary.json).",
     )
     parser.add_argument(
         "--gru-dir-model",
         type=str,
-        default=None,
+        default=DEFAULT_GRU_MODEL_DIR_1H,
         help="Optional directory containing a GRU direction model (model.pt, summary.json).",
     )
     parser.add_argument(
         "--cnn-lstm-dir-model",
         type=str,
-        default=None,
+        default=DEFAULT_CNN_LSTM_MODEL_DIR_1H,
         help="Optional directory containing a CNN-LSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--cnn-bilstm-dir-model",
+        type=str,
+        default=DEFAULT_CNN_BILSTM_MODEL_DIR_1H,
+        help="Optional directory containing a CNN-BiLSTM direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--garch-lstm-dir-model",
+        type=str,
+        default=DEFAULT_GARCH_LSTM_MODEL_DIR_1H,
+        help="Optional directory containing a GARCH-LSTM direction model (model.pt, summary.json).",
     )
     parser.add_argument(
         "--transformer-dir-model",
         type=str,
         default=None,
         help="Optional directory containing a transformer direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--transformer-large-dir-model",
+        type=str,
+        default=DEFAULT_TRANSFORMER_LARGE_MODEL_DIR_1H,
+        help="Optional directory containing a larger transformer direction model (model.pt, summary.json).",
+    )
+    parser.add_argument(
+        "--lgbm-dir-model",
+        type=str,
+        default=DEFAULT_LGBM_MODEL_PATH_1H,
+        help="Optional LightGBM direction model path or directory.",
     )
     parser.add_argument(
         "--dir-model-config-json",
@@ -202,7 +232,11 @@ def _build_direction_config_bundle(args: argparse.Namespace) -> tuple[List[Dict[
         "bilstm": args.bilstm_dir_model,
         "gru": args.gru_dir_model,
         "cnn_lstm": args.cnn_lstm_dir_model,
+        "cnn_bilstm": args.cnn_bilstm_dir_model,
+        "garch_lstm": args.garch_lstm_dir_model,
         "transformer": args.transformer_dir_model,
+        "transformer_large": args.transformer_large_dir_model,
+        "lgbm": args.lgbm_dir_model,
     }
     configs = resolve_direction_model_configs(
         DEFAULT_DIR_MODELS_1H,
@@ -294,6 +328,33 @@ def _compute_index_range(n: int, use_test_split: bool) -> range:
     return range(start, n)
 
 
+def _component_probability_frame(signals: List[Dict[str, Any]]) -> pd.DataFrame:
+    rows: List[Dict[str, float]] = []
+    all_columns: set[str] = set()
+    for signal in signals:
+        components = signal.get("p_up_components", {})
+        if not isinstance(components, dict):
+            rows.append({})
+            continue
+        row = {
+            f"p_up_{str(name).strip().lower()}": float(value)
+            for name, value in components.items()
+            if value is not None
+        }
+        rows.append(row)
+        all_columns.update(row.keys())
+
+    ordered_columns = sorted(all_columns)
+    if not ordered_columns:
+        return pd.DataFrame(index=range(len(signals)))
+
+    normalized_rows = [
+        {column: row.get(column, np.nan) for column in ordered_columns}
+        for row in rows
+    ]
+    return pd.DataFrame(normalized_rows, columns=ordered_columns)
+
+
 def backtest_signals(args: argparse.Namespace) -> None:
     _apply_optuna_profile(args)
 
@@ -333,6 +394,7 @@ def backtest_signals(args: argparse.Namespace) -> None:
     ret_pred_list = []
     sig_ens_list = []
     sig_dir_list = []
+    signal_rows: List[Dict[str, Any]] = []
 
     for i in idx_range:
         sig = compute_signal_for_index(
@@ -343,6 +405,7 @@ def backtest_signals(args: argparse.Namespace) -> None:
             ret_min=args.ret_min,
             dir_model_weights=dir_weight_map,
         )
+        signal_rows.append(sig)
 
         ts_list.append(sig["ts"])
         ret_idx = i - prepared_offset + ret_offset
@@ -432,6 +495,9 @@ def backtest_signals(args: argparse.Namespace) -> None:
                 "equity_dir_only_net": equity_dir_net,
             },
         )
+        component_frame = _component_probability_frame(signal_rows)
+        if not component_frame.empty:
+            df = pd.concat([df.reset_index(drop=True), component_frame.reset_index(drop=True)], axis=1)
 
         out_path = os.path.join(args.output_dir, "backtest_signals.csv")
         df.to_csv(out_path, index=False)

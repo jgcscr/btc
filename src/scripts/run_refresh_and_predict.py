@@ -202,6 +202,7 @@ CONFIG_ALLOWED_KEYS = {
     "execution_policy",
     "forecast_coherence_policy",
     "direction_output_policy",
+    "direction_ensemble_policy",
     "degradation_monitoring",
     "disabled_horizons",
 }
@@ -917,6 +918,49 @@ def _normalize_direction_output_policy_block(value: Mapping[str, Any]) -> Dict[s
     return normalized
 
 
+def _normalize_direction_ensemble_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("direction_ensemble_policy config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key == "enabled":
+            normalized[key] = bool(raw_value)
+        elif key in {"lookback_bars", "min_history_points"}:
+            normalized[key] = int(raw_value) if raw_value is not None else None
+        elif key in {"max_correlation", "min_mean_abs_probability_gap"}:
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key == "horizons":
+            if raw_value is None:
+                normalized[key] = None
+            elif isinstance(raw_value, str):
+                normalized[key] = parse_targets(raw_value)
+            elif isinstance(raw_value, Sequence):
+                normalized[key] = [_normalize_horizon_value(item) for item in raw_value]
+            else:
+                raise ValueError("horizons in direction_ensemble_policy must be a list/sequence")
+        elif key == "model_groups":
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("model_groups in direction_ensemble_policy must be a mapping")
+            normalized[key] = dict(raw_value)
+        elif key in {
+            "max_active_by_horizon",
+            "max_models_per_group_by_horizon",
+            "priority_by_horizon",
+            "preferred_groups_by_horizon",
+        }:
+            if not isinstance(raw_value, Mapping):
+                raise ValueError(f"{key} in direction_ensemble_policy must be a mapping")
+            normalized[key] = dict(raw_value)
+        else:
+            print(
+                f"Warning: Unknown direction_ensemble_policy config key '{raw_key}' ignored.",
+                file=sys.stderr,
+            )
+    return normalized
+
+
 def _normalize_config_value(name: str, value: Any) -> Any:
     if name == "targets":
         if value is None:
@@ -996,6 +1040,8 @@ def _normalize_config_value(name: str, value: Any) -> Any:
             return _normalize_forecast_coherence_policy_block(value)
         if name == "direction_output_policy" and value is not None:
             return _normalize_direction_output_policy_block(value)
+        if name == "direction_ensemble_policy" and value is not None:
+            return _normalize_direction_ensemble_policy_block(value)
         if name == "degradation_monitoring" and value is not None:
             return _normalize_degradation_monitoring_block(value)
         if name == "position_size_cap_by_horizon" and value is not None:
@@ -4600,6 +4646,140 @@ def _resolve_regime_model_weights_policy(config: Mapping[str, Any] | None) -> Op
     }
 
 
+def _resolve_direction_ensemble_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    cfg = config or {}
+    raw_groups = cfg.get("model_groups") if isinstance(cfg.get("model_groups"), Mapping) else {}
+    model_groups: Dict[str, str] = {}
+    for raw_group, raw_names in raw_groups.items():
+        group = str(raw_group).strip().lower()
+        if not group:
+            continue
+        if isinstance(raw_names, str):
+            names = [segment.strip().lower() for segment in raw_names.split(",") if segment.strip()]
+        elif isinstance(raw_names, Sequence):
+            names = [str(item).strip().lower() for item in raw_names if str(item).strip()]
+        else:
+            continue
+        for name in names:
+            model_groups[name] = group
+
+    max_active_by_horizon: Dict[float, int] = {}
+    raw_active = cfg.get("max_active_by_horizon") if isinstance(cfg.get("max_active_by_horizon"), Mapping) else {}
+    for raw_horizon, raw_limit in raw_active.items():
+        horizon = _coerce_numeric_horizon(raw_horizon)
+        if horizon is None or raw_limit is None:
+            continue
+        max_active_by_horizon[_normalize_horizon_value(horizon)] = int(raw_limit)
+
+    max_models_per_group_by_horizon: Dict[float, Dict[str, int]] = {}
+    raw_group_caps = (
+        cfg.get("max_models_per_group_by_horizon")
+        if isinstance(cfg.get("max_models_per_group_by_horizon"), Mapping)
+        else {}
+    )
+    for raw_horizon, raw_caps in raw_group_caps.items():
+        horizon = _coerce_numeric_horizon(raw_horizon)
+        if horizon is None or not isinstance(raw_caps, Mapping):
+            continue
+        resolved_caps = {
+            str(group).strip().lower(): int(limit)
+            for group, limit in raw_caps.items()
+            if str(group).strip() and limit is not None
+        }
+        if resolved_caps:
+            max_models_per_group_by_horizon[_normalize_horizon_value(horizon)] = resolved_caps
+
+    priority_by_horizon: Dict[float, List[str]] = {}
+    raw_priorities = cfg.get("priority_by_horizon") if isinstance(cfg.get("priority_by_horizon"), Mapping) else {}
+    for raw_horizon, raw_priority in raw_priorities.items():
+        horizon = _coerce_numeric_horizon(raw_horizon)
+        if horizon is None:
+            continue
+        if isinstance(raw_priority, str):
+            values = [segment.strip().lower() for segment in raw_priority.split(",") if segment.strip()]
+        elif isinstance(raw_priority, Sequence):
+            values = [str(item).strip().lower() for item in raw_priority if str(item).strip()]
+        else:
+            continue
+        if values:
+            priority_by_horizon[_normalize_horizon_value(horizon)] = values
+
+    preferred_groups_by_horizon: Dict[float, List[str]] = {}
+    raw_preferred_groups = (
+        cfg.get("preferred_groups_by_horizon")
+        if isinstance(cfg.get("preferred_groups_by_horizon"), Mapping)
+        else {}
+    )
+    for raw_horizon, raw_groups in raw_preferred_groups.items():
+        horizon = _coerce_numeric_horizon(raw_horizon)
+        if horizon is None:
+            continue
+        if isinstance(raw_groups, str):
+            groups = [segment.strip().lower() for segment in raw_groups.split(",") if segment.strip()]
+        elif isinstance(raw_groups, Sequence):
+            groups = [str(item).strip().lower() for item in raw_groups if str(item).strip()]
+        else:
+            continue
+        if groups:
+            preferred_groups_by_horizon[_normalize_horizon_value(horizon)] = groups
+
+    raw_horizons = cfg.get("horizons")
+    scoped_horizons = None
+    if isinstance(raw_horizons, Sequence) and not isinstance(raw_horizons, (str, bytes)):
+        scoped_horizons = {_normalize_horizon_value(item) for item in raw_horizons}
+
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "horizons": scoped_horizons,
+        "lookback_bars": max(int(cfg.get("lookback_bars", 96) or 96), 2),
+        "min_history_points": max(int(cfg.get("min_history_points", 24) or 24), 0),
+        "max_correlation": float(cfg.get("max_correlation", 0.985) or 0.985),
+        "min_mean_abs_probability_gap": float(
+            cfg.get("min_mean_abs_probability_gap", 0.02) or 0.02
+        ),
+        "model_groups": model_groups,
+        "max_active_by_horizon": max_active_by_horizon,
+        "max_models_per_group_by_horizon": max_models_per_group_by_horizon,
+        "priority_by_horizon": priority_by_horizon,
+        "preferred_groups_by_horizon": preferred_groups_by_horizon,
+    }
+
+
+def _scope_direction_ensemble_policy(policy: Mapping[str, Any] | None, horizon: float) -> Dict[str, Any]:
+    if not policy or not bool(policy.get("enabled", False)):
+        return {"enabled": False}
+    normalized_horizon = _normalize_horizon_value(horizon)
+    scoped_horizons = policy.get("horizons")
+    if isinstance(scoped_horizons, set) and scoped_horizons and normalized_horizon not in scoped_horizons:
+        return {"enabled": False}
+    priority_by_horizon = policy.get("priority_by_horizon") if isinstance(policy.get("priority_by_horizon"), Mapping) else {}
+    max_active_by_horizon = policy.get("max_active_by_horizon") if isinstance(policy.get("max_active_by_horizon"), Mapping) else {}
+    max_models_per_group_by_horizon = (
+        policy.get("max_models_per_group_by_horizon")
+        if isinstance(policy.get("max_models_per_group_by_horizon"), Mapping)
+        else {}
+    )
+    preferred_groups_by_horizon = (
+        policy.get("preferred_groups_by_horizon")
+        if isinstance(policy.get("preferred_groups_by_horizon"), Mapping)
+        else {}
+    )
+    return {
+        "enabled": True,
+        "lookback_bars": int(policy.get("lookback_bars", 96) or 96),
+        "min_history_points": int(policy.get("min_history_points", 24) or 24),
+        "max_correlation": float(policy.get("max_correlation", 0.985) or 0.985),
+        "min_mean_abs_probability_gap": float(
+            policy.get("min_mean_abs_probability_gap", 0.02) or 0.02
+        ),
+        "model_groups": dict(policy.get("model_groups") or {}),
+        "max_active_models": max_active_by_horizon.get(normalized_horizon),
+        "max_models_per_group": dict(max_models_per_group_by_horizon.get(normalized_horizon, {}) or {}),
+        "priority_order": list(priority_by_horizon.get(normalized_horizon, []) or []),
+        "preferred_groups": list(preferred_groups_by_horizon.get(normalized_horizon, []) or []),
+    }
+
+
 def _resolve_uncertainty_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
     cfg = config or {}
     alpha = float(cfg.get("alpha") or 0.2)
@@ -7138,6 +7318,7 @@ def run_predictions(
     execution_policy: Mapping[str, Any] | None = None,
     forecast_coherence_policy: Mapping[str, Any] | None = None,
     direction_output_policy: Mapping[str, Any] | None = None,
+    direction_ensemble_policy: Mapping[str, Any] | None = None,
     latest_close: float | None = None,
     confidence_min: float = CONFIDENCE_MIN_DEFAULT,
     confidence_min_by_horizon_regime: Mapping[float | int | str, Mapping[str, float]] | None = None,
@@ -7167,6 +7348,7 @@ def run_predictions(
     execution_policy_resolved = _resolve_execution_policy(execution_policy)
     forecast_coherence_policy_resolved = _resolve_forecast_coherence_policy(forecast_coherence_policy)
     direction_output_policy_resolved = _resolve_direction_output_policy(direction_output_policy)
+    direction_ensemble_policy_resolved = _resolve_direction_ensemble_policy(direction_ensemble_policy)
     confidence_min = max(0.0, min(1.0, float(confidence_min)))
     confidence_min_by_horizon_regime_resolved = _normalize_horizon_regime_float_map(
         confidence_min_by_horizon_regime,
@@ -7354,6 +7536,10 @@ def run_predictions(
             horizon=horizon,
             policy=regime_weight_policy,
         )
+        scoped_direction_ensemble_policy = _scope_direction_ensemble_policy(
+            direction_ensemble_policy_resolved,
+            horizon,
+        )
 
         signal = compute_signal_for_index(
             prepared=prepared,
@@ -7363,6 +7549,7 @@ def run_predictions(
             ret_min=horizon_ret,
             horizon=horizon,
             dir_model_weights=dir_weight_map,
+            direction_ensemble_policy=scoped_direction_ensemble_policy,
             volatility_snapshot=volatility_snapshot,
             volatility_policy=horizon_thresholds,
             p_up_calibration=None,
@@ -8688,6 +8875,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             execution_policy=getattr(args, "execution_policy", None),
             forecast_coherence_policy=getattr(args, "forecast_coherence_policy", None),
             direction_output_policy=direction_output_cfg,
+            direction_ensemble_policy=getattr(args, "direction_ensemble_policy", None),
             latest_close=latest_close,
             confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
             confidence_min_by_horizon_regime=getattr(args, "confidence_min_by_horizon_regime", None),

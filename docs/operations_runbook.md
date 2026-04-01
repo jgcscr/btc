@@ -208,8 +208,26 @@ Runtime reliability currently includes directional-objective gating through `src
 Current runtime directional-objective thresholds:
 
 - `group_min_rows: 40`
+- `min_rows_by_regime.chop: 40`
 - `max_brier: 0.255`
+- `max_brier_by_regime.chop: 0.255`
+- `min_f1_by_regime.chop: 0.40`
 - `max_ece_by_regime.chop: 0.18`
+
+Current runtime calibration-evaluation behavior:
+
+- calibration robustness evaluates the calibrated labeled snapshot, not raw `p_up`
+- directional objectives also evaluate the calibrated labeled snapshot
+
+Current chop-coverage reality:
+
+- `artifacts/monitoring/labeled_backtest_1h.csv` currently has `8761` rows but only `47` labeled `chop` rows
+- the broader repo backtest source `artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv` currently extends to `9193` rows only, so the repo does not yet contain enough extra older labeled coverage to justify tightening chop gates materially
+
+Tightening rule for chop:
+
+- do not tighten chop-specific row, Brier, or F1 overrides until the labeled 1h monitoring set contains at least `80` chop rows with calibrated directional metrics still passing for two consecutive reliability runs
+- when that threshold is reached, remove `min_rows_by_regime.chop` first, then retest before tightening `max_brier_by_regime.chop` or `min_f1_by_regime.chop`
 
 Evaluator behavior that matters operationally:
 

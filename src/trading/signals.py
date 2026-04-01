@@ -50,7 +50,7 @@ from src.training.cnn_lstm import CNNLSTMDirectionClassifier
 from src.training.garch_lstm import GarchLSTMDirectionClassifier
 from src.training.lstm_model import BiLSTMDirectionClassifier, GRUDirectionClassifier, LSTMDirectionClassifier
 from src.models.transformer_classifier import TransformerDirectionClassifier
-from src.trading.ensembles import simple_average, weighted_average
+from src.trading.ensembles import select_diverse_models, simple_average, weighted_average
 from src.trading.volatility import (
     DEFAULT_REALIZED_WINDOWS,
     add_volatility_columns,
@@ -82,6 +82,7 @@ _SEQUENCE_MODEL_ITER_ORDER = (
     "transformer_large",
 )
 _SEQUENCE_MODEL_TYPES = set(_SEQUENCE_MODEL_ITER_ORDER)
+_TREE_MODEL_TYPES = {"xgb", "lgbm"}
 _VOLATILITY_METRIC_DEFAULT = "volatility_realized_24h"
 _VOLATILITY_MULT_DEFAULT = 1.25
 _HORIZON_PRECISION = 6
@@ -382,8 +383,7 @@ def prepare_data_for_signals(
                 continue
             seen.add(column)
             ordered.append(column)
-        extras = [col for col in X_all.columns if col not in seen]
-        feature_names = ordered + extras
+        feature_names = ordered
 
     missing_in_all = set(feature_names) - set(X_all.columns)
     if missing_in_all:
@@ -1347,12 +1347,13 @@ def load_models(
 
             if cfg_type == "xgb":
                 models["dir"] = info["model"]
+                models["dir_xgb"] = info
                 feature_names = info.get("feature_names")
                 if feature_names:
                     models["dir_feature_names"] = list(feature_names)
-            elif cfg_type in {"lstm", "bilstm", "gru", "cnn_lstm"}:
-                models[f"dir_{cfg_type}"] = info
-            elif cfg_type in {"transformer", "transformer_large"}:
+            elif cfg_type == "lgbm":
+                models["dir_lgbm"] = info
+            elif cfg_type in _SEQUENCE_MODEL_TYPES:
                 models[f"dir_{cfg_type}"] = info
 
             _register_direction_entry(name, cfg_type, info, weight=weight, label=label)
@@ -1557,6 +1558,80 @@ def _sequence_model_probability(model_info: Dict[str, Any], index: int) -> Optio
     return float(prob)
 
 
+def _tree_model_probabilities(
+    info: Dict[str, Any],
+    scaled_frame: pd.DataFrame,
+    context: str,
+) -> np.ndarray:
+    model = info.get("model")
+    _ensure_estimator_type(model, "classifier")
+    feature_names = info.get("feature_names")
+    model_frame = scaled_frame
+    if feature_names:
+        model_frame = _ensure_feature_columns(model_frame.copy(), list(feature_names), context)
+        model_input = model_frame[list(feature_names)].to_numpy()
+    else:
+        model_input = model_frame.to_numpy()
+    return np.asarray(model.predict_proba(model_input)[:, 1], dtype=np.float64)
+
+
+def _direction_entry_probability(
+    entry: Mapping[str, Any],
+    index: int,
+    *,
+    scaled_row: pd.DataFrame,
+) -> Optional[float]:
+    model_type = str(entry.get("type", "")).lower()
+    info = entry.get("info")
+    if not isinstance(info, Mapping):
+        return None
+    if model_type in _TREE_MODEL_TYPES:
+        probs = _tree_model_probabilities(dict(info), scaled_row, f"direction_model_{entry.get('name', model_type)}")
+        return float(probs[0]) if probs.size else None
+    if model_type in _SEQUENCE_MODEL_TYPES:
+        return _sequence_model_probability(dict(info), index)
+    return None
+
+
+def _build_direction_history(
+    prepared: PreparedData,
+    index: int,
+    direction_entries: Sequence[Mapping[str, Any]],
+    *,
+    lookback_bars: int,
+) -> Dict[str, np.ndarray]:
+    if lookback_bars <= 1 or not direction_entries:
+        return {}
+
+    start = max(0, index - int(lookback_bars) + 1)
+    if start >= index:
+        return {}
+
+    base_features = prepared.X_all_ordered.iloc[start : index + 1]
+    scaled = prepared.scaler.transform(base_features)
+    scaled_frame = pd.DataFrame(scaled, columns=prepared.feature_names)
+    history: Dict[str, np.ndarray] = {}
+
+    for entry in direction_entries:
+        name = str(entry.get("name") or entry.get("type") or "")
+        model_type = str(entry.get("type", "")).lower()
+        info = entry.get("info")
+        if not name or not isinstance(info, Mapping):
+            continue
+        if model_type in _TREE_MODEL_TYPES:
+            history[name] = _tree_model_probabilities(dict(info), scaled_frame, f"direction_model_history_{name}")
+            continue
+        if model_type in _SEQUENCE_MODEL_TYPES:
+            values: list[float] = []
+            for history_index in range(start, index + 1):
+                prob = _sequence_model_probability(dict(info), history_index)
+                if prob is not None:
+                    values.append(float(prob))
+            if values:
+                history[name] = np.asarray(values, dtype=np.float64)
+    return history
+
+
 def compute_signal_for_index(
     prepared: PreparedData,
     index: int,
@@ -1566,6 +1641,7 @@ def compute_signal_for_index(
     *,
     horizon: float | None = None,
     dir_model_weights: Optional[Dict[str, float]] = None,
+    direction_ensemble_policy: Optional[Mapping[str, Any]] = None,
     volatility_snapshot: Optional[Mapping[str, float]] = None,
     volatility_policy: Optional[Mapping[str, Any]] = None,
     p_up_calibration: Optional[Mapping[str, Mapping[str, Any]]] = None,
@@ -1582,7 +1658,8 @@ def compute_signal_for_index(
     _ensure_estimator_type(reg, "regressor")
     target_scale = float(models.get("reg_target_scale", 1.0)) or 1.0
     dir_model = models.get("dir")
-    _ensure_estimator_type(dir_model, "classifier")
+    if dir_model is not None:
+        _ensure_estimator_type(dir_model, "classifier")
 
     reg_feature_names = models.get("reg_feature_names")
     if reg_feature_names:
@@ -1606,28 +1683,45 @@ def compute_signal_for_index(
         "cnn_bilstm": "cnn-bilstm",
         "garch_lstm": "garch-lstm",
         "transformer": "transformer",
+        "lgbm": "lightgbm",
     }
+    direction_entries = list(models.get("direction_models", []))
+    if direction_entries:
+        for entry in direction_entries:
+            name = str(entry.get("name") or entry.get("type") or "").lower()
+            prob = _direction_entry_probability(entry, index, scaled_row=X_scaled_df)
+            if name and prob is not None:
+                probabilities[name] = float(prob)
+    else:
+        if dir_model is not None:
+            dir_feature_names = models.get("dir_feature_names")
+            if dir_feature_names:
+                X_scaled_df = _ensure_feature_columns(X_scaled_df, dir_feature_names, "direction_model")
+                dir_input = X_scaled_df[dir_feature_names].to_numpy()
+            else:
+                dir_input = X_scaled
+            p_up_arr = dir_model.predict_proba(dir_input)[:, 1]
+            probabilities["xgb"] = float(p_up_arr[0])
 
-    if dir_model is not None:
-        dir_feature_names = models.get("dir_feature_names")
-        if dir_feature_names:
-            X_scaled_df = _ensure_feature_columns(X_scaled_df, dir_feature_names, "direction_model")
-            dir_input = X_scaled_df[dir_feature_names].to_numpy()
-        else:
-            dir_input = X_scaled
-        p_up_arr = dir_model.predict_proba(dir_input)[:, 1]
-        probabilities["xgb"] = float(p_up_arr[0])
-
-    for model_type in _SEQUENCE_MODEL_ITER_ORDER:
-        info = models.get(f"dir_{model_type}")
-        if info is None:
-            continue
-        seq_prob = _sequence_model_probability(info, index)
-        if seq_prob is not None:
-            probabilities[model_type] = seq_prob
+        for model_type in _SEQUENCE_MODEL_ITER_ORDER:
+            info = models.get(f"dir_{model_type}")
+            if info is None:
+                continue
+            seq_prob = _sequence_model_probability(info, index)
+            if seq_prob is not None:
+                probabilities[model_type] = seq_prob
 
     p_up: Optional[float]
     direction_model_kind: Optional[str]
+    ensemble_debug: Dict[str, Any] = {
+        "selected_models": sorted(probabilities.keys()),
+        "selected_groups": [],
+        "missing_preferred_groups": [],
+        "effective_weights": {},
+        "base_weights": {},
+        "rejected_models": [],
+        "policy_applied": False,
+    }
 
     if probabilities:
         if dir_model_weights:
@@ -1635,17 +1729,66 @@ def compute_signal_for_index(
         else:
             applicable_weights = {}
 
-        if applicable_weights:
-            try:
-                p_up = weighted_average(probabilities, applicable_weights)
-            except ValueError:
-                p_up = simple_average(probabilities.values())
+        selected_probabilities = dict(probabilities)
+        effective_weights = dict(applicable_weights)
+
+        if direction_ensemble_policy and bool(direction_ensemble_policy.get("enabled", False)) and len(probabilities) > 1:
+            history = _build_direction_history(
+                prepared,
+                index,
+                direction_entries,
+                lookback_bars=int(direction_ensemble_policy.get("lookback_bars", 0) or 0),
+            )
+            selection = select_diverse_models(
+                probabilities,
+                applicable_weights,
+                history=history,
+                priority_order=direction_ensemble_policy.get("priority_order"),
+                preferred_groups=direction_ensemble_policy.get("preferred_groups"),
+                max_active_models=direction_ensemble_policy.get("max_active_models"),
+                model_groups=direction_ensemble_policy.get("model_groups"),
+                max_models_per_group=direction_ensemble_policy.get("max_models_per_group"),
+                max_correlation=direction_ensemble_policy.get("max_correlation"),
+                min_mean_abs_probability_gap=direction_ensemble_policy.get("min_mean_abs_probability_gap"),
+                min_history_points=int(direction_ensemble_policy.get("min_history_points", 0) or 0),
+            )
+            selected_names = selection.get("selected_models") or list(probabilities.keys())
+            selected_probabilities = {
+                name: value
+                for name, value in probabilities.items()
+                if name in set(selected_names)
+            }
+            effective_weights = {
+                name: float(value)
+                for name, value in (selection.get("effective_weights") or {}).items()
+                if name in selected_probabilities
+            }
+            ensemble_debug = {
+                "selected_models": list(selected_names),
+                "selected_groups": list(selection.get("selected_groups", [])),
+                "missing_preferred_groups": list(selection.get("missing_preferred_groups", [])),
+                "effective_weights": effective_weights,
+                "base_weights": selection.get("base_weights", {}),
+                "rejected_models": selection.get("rejected_models", []),
+                "pairwise": selection.get("pairwise", []),
+                "policy_applied": True,
+            }
         else:
-            p_up = simple_average(probabilities.values())
+            ensemble_debug["selected_groups"] = []
+            ensemble_debug["effective_weights"] = effective_weights
+            ensemble_debug["base_weights"] = applicable_weights
+
+        if effective_weights:
+            try:
+                p_up = weighted_average(selected_probabilities, effective_weights)
+            except ValueError:
+                p_up = simple_average(selected_probabilities.values())
+        else:
+            p_up = simple_average(selected_probabilities.values())
 
         direction_model_kind = (
-            display_labels[next(iter(probabilities))]
-            if len(probabilities) == 1
+            display_labels.get(next(iter(selected_probabilities)), next(iter(selected_probabilities)))
+            if len(selected_probabilities) == 1
             else "ensemble"
         )
     else:
@@ -1781,6 +1924,7 @@ def compute_signal_for_index(
         result["p_up_components"] = probabilities.copy()
         for name, value in probabilities.items():
             result[f"p_up_{name}"] = value
+        result["direction_ensemble"] = ensemble_debug
 
     if direction_model_kind is not None:
         result["direction_model_kind"] = direction_model_kind

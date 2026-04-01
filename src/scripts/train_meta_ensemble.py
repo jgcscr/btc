@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -76,31 +76,45 @@ def parse_args() -> argparse.Namespace:
         help="Disable engineered regime/volatility meta features.",
     )
     parser.add_argument(
+        "--component-frame-csv",
+        type=Path,
+        default=None,
+        help="Optional CSV containing ts, ret_1h, and p_up_* component columns in one file.",
+    )
+    parser.add_argument(
+        "--component-column",
+        action="append",
+        default=[],
+        help="Optional component column or alias to keep when using --component-frame-csv.",
+    )
+    parser.add_argument(
         "--component-weight-spec",
         type=str,
         default=None,
         help="Optional comma-separated component weights, e.g. transformer:0,lstm:1.5,xgb:1.5.",
     )
+    parser.add_argument(
+        "--component-csv",
+        action="append",
+        default=[],
+        help="Optional extra component input in the form name=path/to/backtest.csv.",
+    )
     return parser.parse_args()
 
 
-def parse_component_weight_spec(spec: str | None) -> Dict[str, float]:
-    weights = {
-        "p_up_transformer": 1.0,
-        "p_up_lstm": 1.0,
-        "p_up_xgb": 1.0,
-    }
+def _component_column(name: str) -> str:
+    return f"p_up_{str(name).strip().lower()}"
+
+
+def parse_component_weight_spec(spec: str | None, component_columns: Sequence[str]) -> Dict[str, float]:
+    weights = {str(column): 1.0 for column in component_columns}
     if not spec:
         return weights
 
-    aliases = {
-        "transformer": "p_up_transformer",
-        "lstm": "p_up_lstm",
-        "xgb": "p_up_xgb",
-        "p_up_transformer": "p_up_transformer",
-        "p_up_lstm": "p_up_lstm",
-        "p_up_xgb": "p_up_xgb",
-    }
+    aliases = {}
+    for column in component_columns:
+        aliases[str(column)] = str(column)
+        aliases[str(column).removeprefix("p_up_")] = str(column)
     for raw_chunk in str(spec).split(","):
         chunk = raw_chunk.strip()
         if not chunk:
@@ -116,6 +130,27 @@ def parse_component_weight_spec(spec: str | None) -> Dict[str, float]:
     if sum(max(value, 0.0) for value in weights.values()) <= 0.0:
         raise ValueError("Component weight spec disabled all meta-ensemble inputs.")
     return weights
+
+
+def resolve_component_sources(args: argparse.Namespace) -> Dict[str, Path]:
+    sources: Dict[str, Path] = {
+        "transformer": args.transformer_csv,
+        "lstm": args.lstm_csv,
+        "xgb": args.xgb_csv,
+    }
+    for raw_spec in args.component_csv or []:
+        spec = str(raw_spec).strip()
+        if not spec:
+            continue
+        if "=" not in spec:
+            raise ValueError(f"Invalid --component-csv value '{spec}'. Expected name=path.")
+        raw_name, raw_path = spec.split("=", 1)
+        name = raw_name.strip().lower()
+        path = Path(raw_path.strip())
+        if not name:
+            raise ValueError(f"Invalid --component-csv value '{spec}'. Missing component name.")
+        sources[name] = path
+    return sources
 
 
 def weighted_probability_average(df: pd.DataFrame, columns: Sequence[str], component_weights: Dict[str, float]) -> pd.Series:
@@ -142,6 +177,80 @@ def load_model_frame(path: Path, prob_column_name: str) -> pd.DataFrame:
         raise ValueError(f"CSV {path} missing required columns: {sorted(missing)}")
     selected = ["ts", "ret_1h", "p_up", "signal_ensemble", "ret_ensemble_net"]
     return df[selected].rename(columns={"p_up": prob_column_name})
+
+
+def _component_aliases(columns: Sequence[str]) -> Dict[str, str]:
+    aliases: Dict[str, str] = {}
+    for column in columns:
+        name = str(column)
+        aliases[name] = name
+        if name.startswith("p_up_"):
+            aliases[name.removeprefix("p_up_")] = name
+    return aliases
+
+
+def _normalize_component_frame(
+    df: pd.DataFrame,
+    component_columns: Sequence[str],
+) -> tuple[pd.DataFrame, List[str]]:
+    out = df.copy()
+    retained_columns: List[str] = []
+    for column in component_columns:
+        numeric = pd.to_numeric(out[column], errors="coerce")
+        if not numeric.notna().any():
+            continue
+        out[column] = numeric
+        retained_columns.append(str(column))
+
+    if not retained_columns:
+        raise ValueError("Component frame does not contain any non-empty p_up_* columns.")
+
+    row_mean = out[retained_columns].mean(axis=1, skipna=True)
+    for column in retained_columns:
+        out[column] = out[column].where(out[column].notna(), row_mean)
+
+    out = out.dropna(subset=retained_columns).reset_index(drop=True)
+    if out.empty:
+        raise ValueError("Component frame has no rows after normalizing sparse component columns.")
+
+    return out[["ts", "ret_1h", *retained_columns]].copy(), retained_columns
+
+
+def load_component_frame(path: Path, requested_columns: Sequence[str] | None = None) -> tuple[pd.DataFrame, List[str]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Required component-frame CSV not found: {path}")
+    df = pd.read_csv(path)
+    required = {"ts", "ret_1h"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"CSV {path} missing required columns: {sorted(missing)}")
+
+    available_columns = [
+        str(column)
+        for column in df.columns
+        if str(column).startswith("p_up_") and str(column) not in {"p_up_meta", "p_up_gate"}
+    ]
+    if not available_columns:
+        raise ValueError(f"CSV {path} does not contain any p_up_* component columns.")
+
+    aliases = _component_aliases(available_columns)
+    if requested_columns:
+        selected_columns: List[str] = []
+        for raw_name in requested_columns:
+            key = str(raw_name).strip().lower()
+            if not key:
+                continue
+            resolved = aliases.get(key)
+            if resolved is None:
+                raise ValueError(f"Unknown component column '{raw_name}' for {path}.")
+            if resolved not in selected_columns:
+                selected_columns.append(resolved)
+    else:
+        selected_columns = sorted(available_columns)
+
+    selected = df[["ts", "ret_1h", *selected_columns]].copy()
+    normalized, retained_columns = _normalize_component_frame(selected, selected_columns)
+    return normalized, retained_columns
 
 
 def validate_alignment(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
@@ -186,11 +295,11 @@ def fit_logistic_regression(X_train: pd.DataFrame, y_train: pd.Series) -> Logist
 def build_meta_features(
     master: pd.DataFrame,
     *,
+    base_cols: Sequence[str],
     add_regime_features: bool,
     component_weights: Dict[str, float],
 ) -> Tuple[pd.DataFrame, List[str]]:
     master = master.copy()
-    base_cols = ["p_up_transformer", "p_up_lstm", "p_up_xgb"]
     feature_cols = list(base_cols)
 
     if add_regime_features:
@@ -304,6 +413,7 @@ def save_meta_config(
     oof_metrics: Dict[str, float],
     trainval_metrics: Dict[str, float],
     oof_splits: int,
+    component_columns: Sequence[str],
     component_weights: Dict[str, float],
 ) -> None:
     payload = {
@@ -312,6 +422,7 @@ def save_meta_config(
         "coefficients": [float(coef) for coef in coefficients],
         "threshold": float(threshold),
         "oof_splits": int(oof_splits),
+        "component_columns": list(component_columns),
         "schedules": [
             {
                 "fee_bps": float(schedule["fee_bps"]),
@@ -333,19 +444,32 @@ def save_meta_config(
 
 def main() -> None:
     args = parse_args()
-    component_weights = parse_component_weight_spec(args.component_weight_spec)
+    if args.component_frame_csv is not None:
+        master, component_columns = load_component_frame(args.component_frame_csv, args.component_column)
+        ordered_component_names = [str(column).removeprefix("p_up_") for column in component_columns]
+    else:
+        component_sources = resolve_component_sources(args)
+        component_frames: Dict[str, pd.DataFrame] = {}
+        for name, path in component_sources.items():
+            component_frames[name] = load_model_frame(path, _component_column(name))
 
-    transformer_df = load_model_frame(args.transformer_csv, "p_up_transformer")
-    lstm_df = load_model_frame(args.lstm_csv, "p_up_lstm")
-    xgb_df = load_model_frame(args.xgb_csv, "p_up_xgb")
+        ordered_component_names = [name for name in component_sources.keys() if name in component_frames]
+        if not ordered_component_names:
+            raise ValueError("At least one component CSV is required for meta-ensemble training.")
 
-    master = validate_alignment([transformer_df, lstm_df, xgb_df])
-    master["p_up_lstm"] = lstm_df["p_up_lstm"].values
-    master["p_up_xgb"] = xgb_df["p_up_xgb"].values
+        component_columns = [_component_column(name) for name in ordered_component_names]
+        aligned_frames = [component_frames[name] for name in ordered_component_names]
+        master = validate_alignment(aligned_frames)
+        for name in ordered_component_names[1:]:
+            column = _component_column(name)
+            master[column] = component_frames[name][column].values
+
+    component_weights = parse_component_weight_spec(args.component_weight_spec, component_columns)
 
     master["target"] = (master["ret_1h"] > 0.0).astype(int)
     master, feature_cols = build_meta_features(
         master,
+        base_cols=component_columns,
         add_regime_features=not args.disable_regime_features,
         component_weights=component_weights,
     )
@@ -396,7 +520,7 @@ def main() -> None:
     # Gate signal uses a stable average of base probabilities to reduce over-compressed meta scores.
     full_backtest["p_up_gate"] = weighted_probability_average(
         full_backtest,
-        ["p_up_transformer", "p_up_lstm", "p_up_xgb"],
+        component_columns,
         component_weights,
     )
     full_backtest["signal_meta"] = (full_backtest["p_up_gate"] >= args.weight_threshold).astype(int)
@@ -484,16 +608,23 @@ def main() -> None:
         oof_metrics,
         trainval_metrics,
         args.oof_splits,
+        component_columns,
         component_weights,
     )
 
     base_fee = 2.0
     base_slip = 1.0
-    xgb_test = xgb_df.iloc[n_test_start:].copy()
-    baseline_trades = int(xgb_test["signal_ensemble"].sum())
-    baseline_net_base = float(xgb_test["ret_ensemble_net"].sum())
+    if "xgb" in ordered_component_names:
+        baseline_prob = master[_component_column("xgb")].to_numpy(dtype=float)
+    else:
+        baseline_prob = master[component_columns[0]].to_numpy(dtype=float)
+    baseline_test = master.iloc[n_test_start:].copy()
+    baseline_test["signal_ensemble"] = (baseline_prob[n_test_start:] >= args.weight_threshold).astype(int)
+    baseline_test["ret_ensemble_net"] = baseline_test["ret_1h"] * baseline_test["signal_ensemble"] - ((base_fee + base_slip) / 10_000.0) * baseline_test["signal_ensemble"]
+    baseline_trades = int(baseline_test["signal_ensemble"].sum())
+    baseline_net_base = float(baseline_test["ret_ensemble_net"].sum())
 
-    print("\nPure XGB baseline net returns (adjusted for costs):")
+    print("\nBaseline component net returns (adjusted for costs):")
     for fee_bps, slippage_bps, label in schedules:
         adjusted = adjust_baseline_net(
             baseline_net_base,

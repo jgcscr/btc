@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 from src.scripts.run_reliability_workflow import (
     _build_directional_objectives_command,
     _build_regime_max_p_up_shadow,
@@ -31,6 +33,8 @@ from src.scripts.run_reliability_workflow import (
     _shadow_variant_uses_reference_feature_ablation_model,
     _summarize_trade_decision_stage_distribution,
     _derive_trade_decision_regime_midband_candidate,
+    _write_calibrated_quality_input,
+    _write_meta_component_frame,
     _write_trade_decision_midband_candidate_config,
     _write_upstream_direction_candidate_config,
     _write_direction_output_shadow_config,
@@ -51,6 +55,7 @@ class ChampionGateAlignmentCheckTests(unittest.TestCase):
                 "threshold": 0.5,
                 "min_rows": 200,
                 "group_min_rows": 50,
+                "min_rows_by_regime": {"chop": 40},
                 "max_brier": 0.24,
                 "max_ece": 0.08,
                 "min_f1": 0.42,
@@ -62,6 +67,8 @@ class ChampionGateAlignmentCheckTests(unittest.TestCase):
         self.assertIn("src.scripts.evaluate_directional_objectives", rendered)
         self.assertIn("--min-f1-by-horizon", rendered)
         self.assertIn("1h:0.45", rendered)
+        self.assertIn("--min-rows-by-regime", rendered)
+        self.assertIn("chop:40.0", rendered)
 
     def test_resolve_effective_champion_gate_uses_selected_shadow_companion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -215,6 +222,68 @@ class ChampionGateAlignmentCheckTests(unittest.TestCase):
 
 
 class SelectionCalibrationGuardReuseTests(unittest.TestCase):
+    def test_write_calibrated_quality_input_applies_platt_coefficients(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source_path = tmp_path / "labeled_backtest.csv"
+            calibration_path = tmp_path / "platt.json"
+            output_path = tmp_path / "labeled_backtest.calibrated.csv"
+            source_path.write_text(
+                "ts,horizon,regime_state,p_up,y_true,ret_pred,close,projected_price\n"
+                "2026-01-01T00:00:00Z,1h,unknown,0.60,1,0.001,100,101\n"
+                "2026-01-01T01:00:00Z,1h,chop,0.60,0,-0.001,100,99\n",
+                encoding="utf-8",
+            )
+            calibration_path.write_text(
+                json.dumps(
+                    {
+                        "1h": {"method": "platt", "a": 1.0, "b": 0.5},
+                        "1h@chop": {"method": "platt", "a": 1.0, "b": -0.5},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = _write_calibrated_quality_input(
+                source_path=source_path,
+                calibration_path=calibration_path,
+                output_path=output_path,
+                regime_col="regime_state",
+            )
+
+            self.assertTrue(payload["written"])
+            calibrated = pd.read_csv(output_path)
+            self.assertIn("raw_p_up", calibrated.columns)
+            self.assertIn("probability_calibration_used_regime_key", calibrated.columns)
+            self.assertAlmostEqual(float(calibrated.loc[0, "raw_p_up"]), 0.60)
+            self.assertGreater(float(calibrated.loc[0, "p_up"]), 0.60)
+            self.assertLess(float(calibrated.loc[1, "p_up"]), 0.60)
+            self.assertEqual(float(calibrated.loc[0, "probability_calibration_used_regime_key"]), 0.0)
+            self.assertEqual(float(calibrated.loc[1, "probability_calibration_used_regime_key"]), 1.0)
+
+    def test_write_meta_component_frame_derives_component_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source_path = tmp_path / "labeled_backtest.csv"
+            output_path = tmp_path / "meta_component_frame.csv"
+            source_path.write_text(
+                "ts,ret_1h,p_up_transformer,p_up_lstm,p_up_xgb,p_up_meta\n"
+                "2026-01-01T00:00:00Z,0.01,0.6,0.55,0.58,0.57\n",
+                encoding="utf-8",
+            )
+
+            payload = _write_meta_component_frame(
+                source_path=source_path,
+                output_path=output_path,
+            )
+
+            self.assertTrue(payload["written"])
+            self.assertEqual(payload["component_columns"], ["p_up_lstm", "p_up_transformer", "p_up_xgb"])
+            self.assertTrue(output_path.exists())
+            written = output_path.read_text(encoding="utf-8")
+            self.assertIn("ret_1h", written)
+            self.assertNotIn("p_up_meta", written)
+
     def test_resolve_direction_output_shadow_horizons_filters_invalid_values(self) -> None:
         self.assertEqual(
             _resolve_direction_output_shadow_horizons({"horizons": [1, "4", 0, "bad", -2, 1]}),

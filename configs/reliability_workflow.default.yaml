@@ -19,6 +19,9 @@ search:
   max_drawdown: -0.08
   min_trades: 10
   meta_weight_threshold: 0.5
+  meta_component_frame_csv: artifacts/monitoring/meta_component_frame_1h.csv
+  meta_component_frame_source: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+  meta_component_columns: [xgb, transformer, lstm]
   paper_live_config: configs/run_refresh_and_predict.default.yaml
   direction_output_shadow:
     enabled: true
@@ -273,6 +276,9 @@ quality:
   calibration_robustness:
     enabled: true
     method: platt
+    use_calibrated_input: true
+    fit_base_horizons_from_labeled_input: true
+    skip_model_fit_when_labeled_input: true
     baseline_window: 240
     recent_window: 288
     max_ece_drift: 0.02
@@ -288,6 +294,7 @@ quality:
     min_regime_rows: 20
   directional_objectives:
     enabled: true
+    use_calibrated_input: true
     prob_col: p_up
     label_col: y
     regime_col: regime_state
@@ -297,6 +304,10 @@ quality:
     max_brier: 0.25
     max_ece: 0.08
     min_f1: 0.45
+    min_rows_by_regime:
+      chop: 40
+    max_brier_by_regime:
+      chop: 0.255
     min_f1_by_horizon:
       1h: 0.45
       4h: 0.45
@@ -306,6 +317,8 @@ quality:
       chop: 0.10
       neutral: 0.09
       trend_ignition: 0.08
+    min_f1_by_regime:
+      chop: 0.44
   leakage_audit:
     enabled: true
     y_key: y

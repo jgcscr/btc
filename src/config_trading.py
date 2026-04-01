@@ -30,6 +30,9 @@ DEFAULT_LSTM_MODEL_DIR_1H: str | None = (
 DEFAULT_BILSTM_MODEL_DIR_1H: str | None = None
 DEFAULT_GRU_MODEL_DIR_1H: str | None = None
 DEFAULT_CNN_LSTM_MODEL_DIR_1H: str | None = None
+DEFAULT_CNN_BILSTM_MODEL_DIR_1H: str | None = None
+DEFAULT_GARCH_LSTM_MODEL_DIR_1H: str | None = None
+DEFAULT_LGBM_MODEL_PATH_1H: str | None = "artifacts/models/lgbm_dir1h_v1/lgbm_dir1h_model.joblib"
 DEFAULT_TRANSFORMER_MODEL_DIR_1H: str | None = (
 	"models:/transformer_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/transformer_dir1h_v1"
 )
@@ -58,6 +61,13 @@ DEFAULT_DIR_MODEL_PATH_1H: str = DEFAULT_DIR_MODEL_DIR_1H
 # Fields: ``type`` (loader key), ``path`` (directory or model file), and
 # ``weight`` (relative vote). ``name`` defaults to ``type`` when omitted.
 DEFAULT_DIR_MODELS_1H: list[dict[str, object]] = [
+	{
+		"name": "lgbm",
+		"type": "lgbm",
+		"path": DEFAULT_LGBM_MODEL_PATH_1H,
+		"weight": 1.0,
+		"optional": True,
+	},
 	{
 		"name": "transformer",
 		"type": "transformer",

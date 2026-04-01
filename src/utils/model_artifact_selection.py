@@ -5,6 +5,8 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from src.utils.model_summary import metrics_by_split
+
 
 def _safe_float(value: Any) -> float:
     try:
@@ -41,6 +43,13 @@ def _summary_score(summary_path: Path) -> tuple[float, ...]:
     metrics = payload.get("metrics", {})
     if not isinstance(metrics, Mapping):
         metrics = {}
+    if not metrics and any(key in payload for key in ("train_metrics", "val_metrics", "test_metrics")):
+        metrics = metrics_by_split(
+            {
+                split: payload.get(f"{split}_metrics", {})
+                for split in ("train", "val", "test")
+            }
+        )
 
     test_auc = _metric_value(metrics, "test", "auc")
     val_auc = _metric_value(metrics, "val", "auc")

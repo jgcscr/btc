@@ -6,6 +6,8 @@ from typing import Dict, Any, Optional
 import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+from src.utils.model_summary import build_model_summary, write_model_summary
+
 try:
     from xgboost import XGBRegressor  # type: ignore
     XGBOOST_AVAILABLE = True
@@ -169,17 +171,17 @@ def train_and_evaluate(
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-    summary = {
-        "model_type": model_type,
-        "target": "ret_1h",
-        "dataset_path": dataset_path,
-        "params": params_used,
-        "metrics": metrics_by_split,
-        "model_path": model_path,
-    }
+    summary = build_model_summary(
+        model_type=model_type,
+        target="ret_1h",
+        dataset_path=dataset_path,
+        model_path=model_path,
+        metrics=metrics_by_split,
+        feature_names=feature_names,
+        params=params_used,
+    )
     summary_path = os.path.join(output_dir, "summary.json")
-    with open(summary_path, "w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2)
+    write_model_summary(summary_path, summary)
 
     print("Saved model to:", model_path)
     print("Saved metadata to:", meta_path)

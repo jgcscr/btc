@@ -181,6 +181,54 @@ direction_output_policy:
       trend_ignition: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
       neutral: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
       chop: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
+direction_ensemble_policy:
+  enabled: true
+  horizons: [1, 4, 8, 12]
+  lookback_bars: 96
+  min_history_points: 24
+  max_correlation: 0.985
+  min_mean_abs_probability_gap: 0.02
+  model_groups:
+    tree: [xgb, lgbm]
+    recurrent: [lstm, bilstm, gru, cnn_lstm, cnn_bilstm]
+    attention: [transformer, transformer_large]
+    volatility: [garch_lstm]
+  max_active_by_horizon:
+    "1": 3
+    "4": 5
+    "8": 5
+    "12": 5
+  max_models_per_group_by_horizon:
+    "1":
+      tree: 1
+      recurrent: 1
+      attention: 1
+      volatility: 1
+    "4":
+      tree: 2
+      recurrent: 2
+      attention: 1
+      volatility: 1
+    "8":
+      tree: 2
+      recurrent: 2
+      attention: 1
+      volatility: 1
+    "12":
+      tree: 2
+      recurrent: 2
+      attention: 1
+      volatility: 1
+  priority_by_horizon:
+    "1": [xgb, transformer, lstm, lgbm, garch_lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
+    "4": [xgb, lgbm, lstm, transformer, garch_lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
+    "8": [xgb, lgbm, transformer, lstm, garch_lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
+    "12": [xgb, lgbm, transformer, lstm, garch_lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
+  preferred_groups_by_horizon:
+    "1": [tree, attention, recurrent]
+    "4": [tree, attention]
+    "8": [tree, attention]
+    "12": [tree, attention]
 confluence_policy:
   enabled: true
   short_horizons: [1]
@@ -380,7 +428,7 @@ spot_provider: binanceus
 write_artifacts: false
 disable_monitoring_latest: false
 # Promoted live policy aligned with the validated runtime profile.
-dir_model_weights: transformer:0.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.0
+dir_model_weights: transformer:1.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,lgbm:0.0,xgb:1.5
 trend_ignition:
   enabled: false
   model_path: artifacts/models/trend_ignition/xgb_trend_ignition.joblib
@@ -407,20 +455,20 @@ adaptive_thresholds:
 regime_model_weights:
   enabled: true
   trend_ignition:
-    "1": "transformer:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5"
-    "4": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
-    "8": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
-    "12": "transformer:0.5,lstm:1.5,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "1": "transformer:1.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,lgbm:0.0,xgb:1.5"
+    "4": "transformer:1.0,lstm:1.25,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:1.0,xgb:1.5"
+    "8": "transformer:1.25,lstm:1.0,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:1.0,xgb:1.5"
+    "12": "transformer:1.25,lstm:1.0,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:1.0,xgb:1.5"
   neutral:
-    "1": "transformer:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5"
-    "4": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
-    "8": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
-    "12": "transformer:0.5,lstm:1.0,bilstm:1.0,gru:1.0,cnn_lstm:0.5,cnn_bilstm:0.5,garch_lstm:0.5,xgb:1.5"
+    "1": "transformer:1.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,lgbm:0.0,xgb:1.5"
+    "4": "transformer:1.0,lstm:1.0,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:0.75,xgb:1.5"
+    "8": "transformer:1.25,lstm:1.0,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:0.75,xgb:1.5"
+    "12": "transformer:1.25,lstm:1.0,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:0.75,xgb:1.5"
   chop:
-    "1": "transformer:0.0,lstm:1.5,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:1.5"
-    "4": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5"
-    "8": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5"
-    "12": "transformer:0.0,lstm:1.5,bilstm:1.5,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,xgb:1.5"
+    "1": "transformer:1.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,lgbm:0.0,xgb:1.5"
+    "4": "transformer:0.5,lstm:1.25,bilstm:0.5,gru:1.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,lgbm:0.75,xgb:1.5"
+    "8": "transformer:0.5,lstm:1.25,bilstm:0.5,gru:1.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,lgbm:0.75,xgb:1.5"
+    "12": "transformer:0.5,lstm:1.25,bilstm:0.5,gru:1.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,lgbm:0.75,xgb:1.5"
 regime_model_dirs:
   enabled: true
   trend_ignition:
