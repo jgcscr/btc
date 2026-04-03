@@ -12,6 +12,7 @@ def apply_post_prediction_policies(
     execution_contexts: ExecutionContexts,
     *,
     forecast_coherence_policy: Mapping[str, Any],
+    trust_hardening_policy: Mapping[str, Any],
     confluence_policy: Mapping[str, Any],
     trade_decision_policy: Mapping[str, Any],
     confidence_min: float,
@@ -19,6 +20,7 @@ def apply_post_prediction_policies(
     uncertainty_policy: Mapping[str, Any],
     execution_policy: Mapping[str, Any],
     apply_forecast_coherence_policy: Callable[[SummaryPayload, Mapping[str, Any]], SummaryPayload],
+    apply_trust_hardening_stage: Callable[[SummaryPayload, Mapping[str, Any]], SummaryPayload],
     apply_confluence_policy: Callable[[SummaryPayload, Mapping[str, Any]], SummaryPayload],
     apply_trade_decision_stage: Callable[[SummaryPayload, ExecutionContexts, Mapping[str, Any]], SummaryPayload],
     apply_post_trade_gates: Callable[[SummaryPayload, float, Mapping[str, Any], Mapping[str, Any]], SummaryPayload],
@@ -26,6 +28,9 @@ def apply_post_prediction_policies(
 ) -> SummaryPayload:
     if forecast_coherence_policy.get("enabled"):
         summary = apply_forecast_coherence_policy(summary, forecast_coherence_policy)
+
+    if trust_hardening_policy.get("enabled"):
+        summary = apply_trust_hardening_stage(summary, trust_hardening_policy)
 
     if confluence_policy.get("enabled"):
         summary = apply_confluence_policy(summary, confluence_policy)

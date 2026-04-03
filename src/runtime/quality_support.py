@@ -10,6 +10,13 @@ def resolve_feature_coverage_policy(config: Mapping[str, Any] | None) -> Dict[st
     max_imputed_zero_columns = cfg.get("max_imputed_zero_columns")
     max_imputed_zero_ratio = cfg.get("max_imputed_zero_ratio")
     max_source_lag_hours = cfg.get("max_source_lag_hours")
+    ignored_sources = sorted(
+        {
+            str(source).strip().lower()
+            for source in (cfg.get("ignored_sources") or [])
+            if str(source).strip()
+        }
+    )
     return {
         "enabled": bool(cfg.get("enabled", False)),
         "max_imputed_zero_columns": max(float(1e9 if max_imputed_zero_columns is None else max_imputed_zero_columns), 0.0),
@@ -17,6 +24,7 @@ def resolve_feature_coverage_policy(config: Mapping[str, Any] | None) -> Dict[st
         "max_source_lag_hours": max(float(1e9 if max_source_lag_hours is None else max_source_lag_hours), 0.0),
         "block_on_violation": bool(cfg.get("block_on_violation", True)),
         "ignored_columns": sorted({str(column).strip() for column in (cfg.get("ignored_columns") or []) if str(column).strip()}),
+        "ignored_sources": ignored_sources,
     }
 
 
@@ -36,9 +44,17 @@ def evaluate_feature_coverage(metadata: Mapping[str, Any], policy: Mapping[str, 
     imputed_zero_ratio = (imputed_zero_count / effective_required_columns) if effective_required_columns > 0 else 0.0
     max_lag_hours = 0.0
     stale_sources: list[str] = []
+    ignored_sources = {
+        str(source).strip().lower()
+        for source in (policy.get("ignored_sources", []) if isinstance(policy, Mapping) else [])
+        if str(source).strip()
+    }
     if isinstance(source_freshness, Mapping):
         for source_name, payload in source_freshness.items():
             if not isinstance(payload, Mapping):
+                continue
+            normalized_source_name = str(source_name).strip().lower()
+            if normalized_source_name in ignored_sources:
                 continue
             lag_hours = float(payload.get("lag_hours") or 0.0)
             max_lag_hours = max(max_lag_hours, lag_hours)
@@ -60,6 +76,7 @@ def evaluate_feature_coverage(metadata: Mapping[str, Any], policy: Mapping[str, 
         "imputed_zero_ratio": float(imputed_zero_ratio),
         "effective_required_columns": int(effective_required_columns),
         "ignored_columns": sorted(ignored_columns),
+        "ignored_sources": sorted(ignored_sources),
         "ignored_imputed_zero_columns": ignored_imputed_zero_columns,
         "effective_imputed_zero_columns": effective_imputed_zero_columns,
         "max_source_lag_hours_observed": float(max_lag_hours),

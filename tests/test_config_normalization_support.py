@@ -54,10 +54,12 @@ def _normalize(name, value):
             "write_artifacts",
             "hours",
             "p_up_min",
+            "feature_coverage_policy",
             "confluence_policy",
             "direction_output_policy",
             "direction_ensemble_policy",
             "execution_policy",
+            "trust_hardening_policy",
             "position_size_cap_by_horizon",
             "confidence_min_by_horizon_regime",
             "trade_decision_policy",
@@ -194,3 +196,41 @@ def test_normalize_direction_ensemble_policy_parses_horizons_and_group_mappings(
     assert normalized["horizons"] == [1.0, 4.0]
     assert normalized["model_groups"] == {"tree": ["xgb"]}
     assert normalized["priority_by_horizon"] == {"1": ["xgb", "gru"]}
+
+
+def test_normalize_feature_coverage_policy_parses_ignored_sources() -> None:
+    normalized = _normalize(
+        "feature_coverage_policy",
+        {
+            "enabled": True,
+            "max_imputed_zero_ratio": 0.2,
+            "ignored_sources": ["macro", "onchain"],
+        },
+    )
+
+    assert normalized["enabled"] is True
+    assert normalized["max_imputed_zero_ratio"] == 0.2
+    assert normalized["ignored_sources"] == ["macro", "onchain"]
+
+
+def test_normalize_trust_hardening_policy_parses_horizon_lists_and_mappings() -> None:
+    normalized = _normalize(
+        "trust_hardening_policy",
+        {
+            "enabled": True,
+            "horizons": "4,8",
+            "high_impact_horizons": [4, 8],
+            "default_action": "exclude",
+            "action_by_horizon": {"4": "exclude", "8": "deweight"},
+            "deweight_factor_by_horizon": {"8": 0.3},
+            "metadata_checks": {"enabled": True, "require_metadata": True},
+        },
+    )
+
+    assert normalized["enabled"] is True
+    assert normalized["horizons"] == [4.0, 8.0]
+    assert normalized["high_impact_horizons"] == [4.0, 8.0]
+    assert normalized["default_action"] == "exclude"
+    assert normalized["action_by_horizon"] == {"4": "exclude", "8": "deweight"}
+    assert normalized["deweight_factor_by_horizon"] == {"8": 0.3}
+    assert normalized["metadata_checks"] == {"enabled": True, "require_metadata": True}

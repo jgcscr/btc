@@ -62,7 +62,7 @@ Recommended live-style command:
 The live wrapper constrains the CLI surface intentionally:
 
 - default config: `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`
-- default targets: `0.25,1,4,8,12`
+- default targets: `0.25,1,4,12`
 - supported provider: `binanceus`
 - writes trade-ready artifacts unless `--no-write-artifacts` is supplied
 
@@ -205,7 +205,6 @@ Current live-style sizing caps from `configs/run_refresh_and_predict.live_conser
 - `15m = 0.0`
 - `1h = 0.15`
 - `4h = 0.35`
-- `8h = 0.20`
 - `12h = 0.35`
 
 ## Cadence Operations
@@ -217,6 +216,17 @@ bash ./scripts/run_cadence.sh daily
 bash ./scripts/run_cadence.sh weekly
 bash ./scripts/run_cadence.sh monthly
 bash ./scripts/run_cadence.sh shadow
+```
+
+Automated smoke-check enforcement:
+
+- `validation-guards` workflow runs unit tests for the wrapper smoke-check validator (`tests/test_run_live_wrapper_smoke_check.py`).
+- `cadence` workflow runs `python -m src.scripts.run_live_wrapper_smoke_check` as a deployment gate before cadence execution.
+
+Manual command (same gate logic):
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_live_wrapper_smoke_check
 ```
 
 Current shell behavior from `scripts/run_cadence.sh`:

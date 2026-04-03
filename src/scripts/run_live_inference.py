@@ -8,7 +8,7 @@ from src.runtime.refresh_pipeline import execute_refresh_pipeline
 from src.scripts import run_refresh_and_predict as legacy
 
 DEFAULT_LIVE_CONFIG = "configs/run_refresh_and_predict.live_conservative_binance_only.yaml"
-DEFAULT_TARGETS = "0.25,1,4,8,12"
+DEFAULT_TARGETS = "0.25,1,4,12"
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

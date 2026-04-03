@@ -142,6 +142,7 @@ def _run_prediction_stage(
         forecast_coherence_policy=getattr(args, "forecast_coherence_policy", None),
         direction_output_policy=prediction_inputs.direction_output_cfg,
         direction_ensemble_policy=getattr(args, "direction_ensemble_policy", None),
+        trust_hardening_policy=getattr(args, "trust_hardening_policy", None),
         latest_close=latest_close,
         confidence_min=float(getattr(args, "confidence_min", legacy.CONFIDENCE_MIN_DEFAULT)),
         confidence_min_by_horizon_regime=getattr(args, "confidence_min_by_horizon_regime", None),

@@ -47,6 +47,7 @@ class PredictionPipelineConfig:
     forecast_coherence_policy: Mapping[str, Any] | None
     direction_output_policy: Mapping[str, Any] | None
     direction_ensemble_policy: Mapping[str, Any] | None
+    trust_hardening_policy: Mapping[str, Any] | None
     latest_close: float | None
     confidence_min: float
     confidence_min_by_horizon_regime: Mapping[float | int | str, Mapping[str, float]] | None
@@ -80,6 +81,7 @@ class PredictionPipelineDependencies:
     resolve_forecast_coherence_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
     resolve_direction_output_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
     resolve_direction_ensemble_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
+    resolve_trust_hardening_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
     compute_breakout_scores: Callable[[Mapping[str, PreparedBundle], Mapping[str, Mapping[str, Any]]], Dict[str, float]]
     load_target_range_models: Callable[[Mapping[str, Any], Sequence[float]], Dict[float, Dict[str, Any]]]
     format_horizon_label: Callable[[float], str]
@@ -113,6 +115,7 @@ class PredictionPipelineDependencies:
     write_direction_fallback_state: Callable[[str], None]
     apply_post_prediction_policies: Callable[..., SummaryPayload]
     apply_forecast_coherence_policy: Callable[..., SummaryPayload]
+    apply_trust_hardening_stage: Callable[..., SummaryPayload]
     apply_confluence_policy: Callable[..., SummaryPayload]
     apply_trade_decision_stage: Callable[..., SummaryPayload]
     apply_post_trade_gates: Callable[..., SummaryPayload]
@@ -141,6 +144,7 @@ class PredictionPreparationState:
     forecast_coherence_policy_resolved: Mapping[str, Any]
     direction_output_policy_resolved: Mapping[str, Any]
     direction_ensemble_policy_resolved: Mapping[str, Any]
+    trust_hardening_policy_resolved: Mapping[str, Any]
     confidence_min: float
     confidence_min_by_horizon_regime_resolved: Mapping[float, Dict[str, float]]
     position_size_floor: float
@@ -179,12 +183,14 @@ def execute_prediction_pipeline(
         execution_contexts,
         forecast_coherence_policy=state.forecast_coherence_policy_resolved,
         confluence_policy=state.confluence_policy_resolved,
+        trust_hardening_policy=state.trust_hardening_policy_resolved,
         trade_decision_policy=state.trade_decision_policy_resolved,
         confidence_min=state.confidence_min,
         abstention_policy=state.abstention_policy_resolved,
         uncertainty_policy=state.uncertainty_policy_resolved,
         execution_policy=state.execution_policy_resolved,
         apply_forecast_coherence_policy=deps.apply_forecast_coherence_policy,
+        apply_trust_hardening_stage=deps.apply_trust_hardening_stage,
         apply_confluence_policy=deps.apply_confluence_policy,
         apply_trade_decision_stage=deps.apply_trade_decision_stage,
         apply_post_trade_gates=lambda payload, threshold, abstention_cfg, uncertainty_cfg: deps.apply_post_trade_gates(
@@ -236,6 +242,7 @@ def _prepare_prediction_state(
             forecast_coherence_policy_resolved={},
             direction_output_policy_resolved={},
             direction_ensemble_policy_resolved={},
+            trust_hardening_policy_resolved={},
             confidence_min=0.0,
             confidence_min_by_horizon_regime_resolved={},
             position_size_floor=0.0,
@@ -269,6 +276,7 @@ def _prepare_prediction_state(
     forecast_coherence_policy_resolved = deps.resolve_forecast_coherence_policy(config.forecast_coherence_policy)
     direction_output_policy_resolved = deps.resolve_direction_output_policy(config.direction_output_policy)
     direction_ensemble_policy_resolved = deps.resolve_direction_ensemble_policy(config.direction_ensemble_policy)
+    trust_hardening_policy_resolved = deps.resolve_trust_hardening_policy(config.trust_hardening_policy)
     confidence_min = max(0.0, min(1.0, float(config.confidence_min)))
     confidence_min_by_horizon_regime_resolved = deps.normalize_horizon_regime_float_map(
         config.confidence_min_by_horizon_regime,
@@ -350,6 +358,7 @@ def _prepare_prediction_state(
         forecast_coherence_policy_resolved=forecast_coherence_policy_resolved,
         direction_output_policy_resolved=direction_output_policy_resolved,
         direction_ensemble_policy_resolved=direction_ensemble_policy_resolved,
+        trust_hardening_policy_resolved=trust_hardening_policy_resolved,
         confidence_min=confidence_min,
         confidence_min_by_horizon_regime_resolved=confidence_min_by_horizon_regime_resolved,
         position_size_floor=position_size_floor,

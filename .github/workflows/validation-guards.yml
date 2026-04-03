@@ -17,6 +17,7 @@ permissions:
       - 'src/scripts/check_featurelift_report_references.py'
       - 'src/scripts/generate_featurelift_comparison_report.py'
       - 'src/scripts/run_refresh_and_predict.py'
+      - 'src/scripts/run_live_wrapper_smoke_check.py'
       - 'src/trading/intrabar_features.py'
       - 'tests/test_direction_feature_reliability_filters.py'
       - 'tests/test_feature_leakage_guards.py'
@@ -25,6 +26,7 @@ permissions:
       - 'tests/test_macro_loader_and_integration.py'
       - 'tests/test_onchain_loader_and_integration.py'
       - 'tests/test_runtime_feature_parity_and_validation.py'
+      - 'tests/test_run_live_wrapper_smoke_check.py'
       - 'artifacts/analysis/featurelift_20260331/comparison_report.json'
       - 'artifacts/analysis/featurelift_20260331_rerun/comparison_report.json'
       - 'artifacts/analysis/featurelift_20260331_rerun/comparison_report.md'
@@ -42,6 +44,7 @@ permissions:
       - 'src/scripts/check_featurelift_report_references.py'
       - 'src/scripts/generate_featurelift_comparison_report.py'
       - 'src/scripts/run_refresh_and_predict.py'
+      - 'src/scripts/run_live_wrapper_smoke_check.py'
       - 'src/trading/intrabar_features.py'
       - 'tests/test_direction_feature_reliability_filters.py'
       - 'tests/test_feature_leakage_guards.py'
@@ -50,6 +53,7 @@ permissions:
       - 'tests/test_macro_loader_and_integration.py'
       - 'tests/test_onchain_loader_and_integration.py'
       - 'tests/test_runtime_feature_parity_and_validation.py'
+      - 'tests/test_run_live_wrapper_smoke_check.py'
       - 'artifacts/analysis/featurelift_20260331/comparison_report.json'
       - 'artifacts/analysis/featurelift_20260331_rerun/comparison_report.json'
       - 'artifacts/analysis/featurelift_20260331_rerun/comparison_report.md'
@@ -83,7 +87,8 @@ jobs:
             tests/test_onchain_loader_and_integration.py \
             tests/test_direction_feature_reliability_filters.py \
             tests/test_feature_leakage_guards.py \
-            tests/test_featurelift_report_reference_check.py
+            tests/test_featurelift_report_reference_check.py \
+            tests/test_run_live_wrapper_smoke_check.py
 
       - name: Regenerate featurelift comparison reports
         run: python -m src.scripts.generate_featurelift_comparison_report

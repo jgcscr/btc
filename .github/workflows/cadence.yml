@@ -103,6 +103,10 @@ jobs:
           fi
           python -m src.scripts.bootstrap_cadence_artifacts "${args[@]}"
 
+      - name: Live wrapper smoke check (deployment gate)
+        run: |
+          python -m src.scripts.run_live_wrapper_smoke_check --timeout-seconds 300
+
       - name: Run cadence
         run: |
           chmod +x scripts/run_cadence.sh

@@ -36,6 +36,33 @@ def test_evaluate_feature_coverage_respects_ignored_columns() -> None:
     assert payload["failed_checks"] == ["imputed_zero_columns"]
 
 
+def test_evaluate_feature_coverage_respects_ignored_sources() -> None:
+    policy = resolve_feature_coverage_policy(
+        {
+            "enabled": True,
+            "max_source_lag_hours": 1.0,
+            "ignored_sources": ["macro"],
+        }
+    )
+    payload = evaluate_feature_coverage(
+        {
+            "feature_alignment": {
+                "imputed_zero_columns": [],
+                "required_columns": 2,
+            },
+            "source_freshness": {
+                "macro": {"lag_hours": 24.0},
+                "features": {"lag_hours": 0.0},
+            },
+        },
+        policy,
+    )
+
+    assert payload["ok"] is True
+    assert payload["stale_sources"] == []
+    assert payload["ignored_sources"] == ["macro"]
+
+
 def test_evaluate_data_quality_captures_validation_error() -> None:
     written = []
 

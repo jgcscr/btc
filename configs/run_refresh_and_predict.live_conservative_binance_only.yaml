@@ -3,7 +3,6 @@ targets:
   - 0.25
   - 1
   - 4
-  - 8
   - 12
 p_up_min: 0.45
 ret_min: 0.0
@@ -124,6 +123,7 @@ feature_coverage_policy:
   max_imputed_zero_ratio: 0.2
   max_source_lag_hours: 6.0
   block_on_violation: true
+  ignored_sources: [macro, onchain]
   ignored_columns:
     - funding_rate
     - fut_close
@@ -149,9 +149,25 @@ feature_coverage_policy:
     - macro_eurusd_zscore_30d
     - macro_eurusd_trend_5d
     - open_interest
+    - interaction_breakout_volume_8h
+    - interaction_imbalance_trend_6h
+    - interaction_momentum_volatility_4h
+    - price_distance_to_high_atr_24h
+    - price_distance_to_high_pct_rank_24h
+    - price_distance_to_low_atr_24h
+    - price_distance_to_low_pct_rank_24h
+    - range_compression_ratio_4h_24h
+    - range_compression_transition_8h
+    - trades_taker_imbalance_acceleration_3h
+    - trades_taker_imbalance_persistence_6h
+    - trend_directional_persistence_4h
+    - trend_directional_persistence_8h
+    - trend_path_efficiency_4h
+    - trend_path_efficiency_8h
+    - volume_regime_zscore_24h
 forecast_coherence_policy:
   enabled: true
-  horizons: [1, 4, 8, 12]
+  horizons: [1, 4, 12]
   block_on_direction_ret_mismatch: true
   block_on_direction_projected_price_mismatch: true
   block_on_p_up_ret_mismatch: true
@@ -163,6 +179,30 @@ forecast_coherence_policy:
   consensus_relief_max_p_up_edge: 0.12
   consensus_relief_exclude_from_voting: false
   exclude_blocked_horizons_from_voting: true
+trust_hardening_policy:
+  enabled: true
+  horizons: [4]
+  high_impact_horizons: [4]
+  fail_closed: true
+  default_action: exclude
+  action_by_horizon:
+    "4": deweight
+  deweight_factor: 0.35
+  deweight_factor_by_horizon:
+    "4": 0.5
+  divergence_abs_gap_min: 0.12
+  divergence_flip_required: true
+  probability_neutral_band: 0.0
+  metadata_checks:
+    enabled: true
+    require_metadata: true
+    leakage_signature_features: [ret_1h, ret_4h, ret_8h, ret_12h]
+    max_val_accuracy: 0.995
+    max_test_accuracy: 0.995
+    max_train_accuracy: 0.999
+    max_train_val_accuracy_gap: 0.03
+  model_summary_paths_by_horizon:
+    "4": artifacts/models/lgbm_dir4h_v1/summary.json
 direction_output_policy:
   enabled: true
   horizons: [0.25, 1]
@@ -196,11 +236,10 @@ direction_output_policy:
 confluence_policy:
   enabled: true
   short_horizons: [1]
-  mid_horizons: [4, 8, 12]
+  mid_horizons: [4, 12]
   min_support_ratio: 0.66
   min_support_ratio_by_horizon:
     "4": 0.8
-    "8": 0.8
   min_aligned_horizons: 2
   min_aligned_horizons_by_horizon:
     "4": 3
@@ -211,12 +250,11 @@ confluence_policy:
   dominant_ratio_floor: 0.67
 execution_policy:
   enabled: true
-  bias_horizons: [4, 8, 12]
-  execution_horizons: [4, 8, 12]
+  bias_horizons: [4, 12]
+  execution_horizons: [4, 12]
   horizon_bias_weights:
     "1": 0.7
     "4": 1.0
-    "8": 0.5
     "12": 1.2
   min_bias_alignment_ratio: 0.57
   coherence_weighting:
@@ -230,7 +268,6 @@ execution_policy:
     by_horizon:
       "1": 0.85
       "4": 1.0
-      "8": 0.9
       "12": 1.05
   short_term_strict_horizons: []
   short_term_min_mid_ratio: 0.8

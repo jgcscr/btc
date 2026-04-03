@@ -138,7 +138,16 @@ The workflow in `.github/workflows/cadence.yml` is narrower than the shell wrapp
 - scheduled/manual modes supported: `daily`, `weekly`, `monthly`
 - `shadow` is not scheduled or wired into workflow dispatch
 - workflow preflights and bootstraps cadence artifacts using `src.scripts.bootstrap_cadence_artifacts`
+- workflow runs a deployment-gating live wrapper smoke check using `src.scripts.run_live_wrapper_smoke_check` before cadence execution
 - workflow rejects remote artifact URIs and expects local filesystem paths visible to the self-hosted runner
+
+Smoke check blocking semantics in cadence workflow:
+
+1. wrapper process exits non-zero
+2. prediction stage does not complete
+3. `predictions.json` / `monitoring.json` missing
+4. required trust telemetry fields missing
+5. `4h` trust-action contract mismatch or unexpected `8h` live emission
 
 ## 4. Current Source Of Truth Artifacts
 
@@ -184,7 +193,6 @@ Current live-style size caps in the approved Binance-only profile:
 - `15m = 0.0`
 - `1h = 0.15`
 - `4h = 0.35`
-- `8h = 0.20`
 - `12h = 0.35`
 
 ## 6. Minimum Checks Before Trusting A Runtime Snapshot
@@ -214,6 +222,38 @@ Per-horizon fields worth checking first:
 - `confluence`
 - `abstention`
 - `uncertainty`
+
+### Trust Hardening Rollout Checks
+
+For profiles with trust hardening enabled, verify these fields in `artifacts/runtime_runs/<run-id>/predictions.json` or `artifacts/runtime_runs/<run-id>/monitoring.json` before promotion to live use.
+
+Current live-wrapper path:
+
+- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`
+- `configs/run_refresh_and_predict.live_conservative.yaml`
+
+Current research/default comparison profile:
+
+- `configs/run_refresh_and_predict.default.yaml`
+
+- `trust_status`
+- `trust_reasons`
+- `excluded_from_voting`
+- `voting_weight_after_trust`
+- `trust_hardening_action`
+- `trust_hardening_changed_outcome`
+
+Expected current policy behavior:
+
+- `4h` low trust is allowed to remain in voting but deweighted (`trust_hardening_action=deweight`, `voting_weight_after_trust=0.5`)
+- `8h` is removed from live decision logic and should not appear in current live-wrapper decision artifacts
+- fail-closed is enabled (`fail_closed=true`), so missing metadata should produce `missing_required_trust_metadata`
+
+Operational blocker interpretation:
+
+1. if any covered horizon reports `missing_required_trust_metadata`, treat the snapshot as unsafe for live promotion
+2. if `trust_hardening_changed_outcome=true`, require manual review of `blocked_trade_analytics` and `prompt_ready_summary` before action
+3. if trust fields are absent, treat trust hardening as not active for that profile
 
 ## 7. Reliability Review Order
 
@@ -307,6 +347,11 @@ Useful local support outputs:
 
 These are working-state files, not operator authorization artifacts.
 
+Current feature-coverage gate scope in the default live profile:
+
+- stale-source blocking applies to core live inputs (spot/features/technical)
+- macro and on-chain staleness are treated as best-effort support inputs and are excluded from stale-source blocking
+
 ## 11. Troubleshooting
 
 1. If `scripts/run_cadence.sh` cannot find a trustworthy run, restore cadence artifacts first. The shell wrapper depends on local `artifacts/reliability/*` state.
@@ -315,7 +360,27 @@ These are working-state files, not operator authorization artifacts.
 4. `--replay-offset-bars` is hourly-only and incompatible with `--use-local-features`.
 5. Keep scratch validation and replay work under `artifacts/tmp_validation/`.
 
-## 12. Minimal Safe Handoff Path
+## 12. Trust Hardening Rollback Criteria
+
+Use rollback only when trust metadata plumbing is unstable or causes repeated operator-unsafe ambiguity.
+
+Rollback triggers:
+
+1. repeated `missing_required_trust_metadata` in consecutive live-style runs
+2. trust fields missing unexpectedly from profile expected to be trust-enabled
+3. persistent increase in operator ambiguity from repeated `trust_hardening_changed_outcome=true` without stable blocker diagnostics
+
+Rollback levers (least to most aggressive):
+
+1. set `fail_closed: false` to fail-open while metadata pathing is repaired
+2. keep trust enabled but reduce strictness via `action_by_horizon` / `deweight_factor_by_horizon` for `4h`
+3. set `trust_hardening_policy.enabled: false` as emergency disable
+
+Post-rollback requirement:
+
+1. capture one clean run where expected trust telemetry appears and no metadata-missing reason is present before restoring fail-closed
+
+## 13. Minimal Safe Handoff Path
 
 Read in this order:
 

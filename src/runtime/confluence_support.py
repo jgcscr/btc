@@ -84,22 +84,34 @@ def apply_confluence_policy(
 
     short_horizons = set(policy.get("short_horizons", []))
     mid_horizons = set(policy.get("mid_horizons", []))
-    up_count = sum(1 for _label, entry, _h in labeled_entries if direction_vote(entry) == "up")
-    down_count = len(labeled_entries) - up_count
+    def _entry_weight(item_entry: Mapping[str, Any]) -> float:
+        try:
+            return max(float(item_entry.get("voting_weight_after_trust") or 1.0), 0.0)
+        except (TypeError, ValueError):
+            return 1.0
+
+    up_weight = sum(
+        _entry_weight(entry)
+        for _label, entry, _h in labeled_entries
+        if direction_vote(entry) == "up"
+    )
+    total_weight = sum(_entry_weight(entry) for _label, entry, _h in labeled_entries)
+    down_weight = max(total_weight - up_weight, 0.0)
     dominant_direction = "neutral"
     dominant_ratio = 0.5
-    if up_count > down_count:
+    if up_weight > down_weight:
         dominant_direction = "up"
-        dominant_ratio = up_count / len(labeled_entries)
-    elif down_count > up_count:
+        dominant_ratio = up_weight / total_weight if total_weight > 0.0 else 0.5
+    elif down_weight > up_weight:
         dominant_direction = "down"
-        dominant_ratio = down_count / len(labeled_entries)
+        dominant_ratio = down_weight / total_weight if total_weight > 0.0 else 0.5
 
     for _label, entry, horizon in labeled_entries:
         current_direction = direction_vote(entry)
         aligned = [item for item in labeled_entries if direction_vote(item[1]) == current_direction]
         aligned_count = len(aligned)
-        support_ratio = aligned_count / len(labeled_entries)
+        aligned_weight = sum(_entry_weight(item_entry) for _item_label, item_entry, _item_h in aligned)
+        support_ratio = aligned_weight / total_weight if total_weight > 0.0 else 0.0
         min_aligned_horizons = int(
             round(
                 lookup_horizon_value(
@@ -117,13 +129,31 @@ def apply_confluence_policy(
 
         short_entries = [item for item in labeled_entries if item[2] in short_horizons]
         mid_entries = [item for item in labeled_entries if item[2] in mid_horizons]
+        short_total_weight = sum(_entry_weight(other_entry) for _other_label, other_entry, _other_h in short_entries)
+        mid_total_weight = sum(_entry_weight(other_entry) for _other_label, other_entry, _other_h in mid_entries)
         short_ratio = (
-            sum(1 for _other_label, other_entry, _other_h in short_entries if direction_vote(other_entry) == current_direction) / len(short_entries)
-            if short_entries else None
+            (
+                sum(
+                    _entry_weight(other_entry)
+                    for _other_label, other_entry, _other_h in short_entries
+                    if direction_vote(other_entry) == current_direction
+                )
+                / short_total_weight
+            )
+            if short_entries and short_total_weight > 0.0
+            else None
         )
         mid_ratio = (
-            sum(1 for _other_label, other_entry, _other_h in mid_entries if direction_vote(other_entry) == current_direction) / len(mid_entries)
-            if mid_entries else None
+            (
+                sum(
+                    _entry_weight(other_entry)
+                    for _other_label, other_entry, _other_h in mid_entries
+                    if direction_vote(other_entry) == current_direction
+                )
+                / mid_total_weight
+            )
+            if mid_entries and mid_total_weight > 0.0
+            else None
         )
 
         confluence_triggered = False

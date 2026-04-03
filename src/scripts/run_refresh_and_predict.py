@@ -183,10 +183,15 @@ from src.runtime.config_normalization_support import (
     normalize_regime_model_weights_block as runtime_normalize_regime_model_weights_block,
     normalize_target_range_block as runtime_normalize_target_range_block,
     normalize_trade_decision_policy_block as runtime_normalize_trade_decision_policy_block,
+    normalize_trust_hardening_policy_block as runtime_normalize_trust_hardening_policy_block,
     normalize_trend_ignition_block as runtime_normalize_trend_ignition_block,
     normalize_uncertainty_policy_block as runtime_normalize_uncertainty_policy_block,
 )
 from src.runtime.post_prediction_pipeline import apply_post_prediction_policies as runtime_apply_post_prediction_policies
+from src.runtime.trust_hardening_support import (
+    apply_trust_hardening as runtime_apply_trust_hardening,
+    resolve_trust_hardening_policy as runtime_resolve_trust_hardening_policy,
+)
 from src.runtime.prediction_result_support import build_prediction_result as runtime_build_prediction_result
 from src.runtime.refresh_support import (
     base_horizon_for_target_column as runtime_base_horizon_for_target_column,
@@ -369,6 +374,7 @@ CONFIG_ALLOWED_KEYS = {
     "forecast_coherence_policy",
     "direction_output_policy",
     "direction_ensemble_policy",
+    "trust_hardening_policy",
     "degradation_monitoring",
     "disabled_horizons",
 }
@@ -543,6 +549,15 @@ def _normalize_direction_output_policy_block(value: Mapping[str, Any]) -> Dict[s
 
 def _normalize_direction_ensemble_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
     return runtime_normalize_direction_ensemble_policy_block(
+        value,
+        parse_targets=parse_targets,
+        normalize_horizon_value=_normalize_horizon_value,
+        stderr_write=sys.stderr.write,
+    )
+
+
+def _normalize_trust_hardening_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    return runtime_normalize_trust_hardening_policy_block(
         value,
         parse_targets=parse_targets,
         normalize_horizon_value=_normalize_horizon_value,
@@ -953,6 +968,14 @@ def _resolve_direction_output_policy(config: Mapping[str, Any] | None) -> Dict[s
     )
 
 
+def _resolve_trust_hardening_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    return runtime_resolve_trust_hardening_policy(
+        config,
+        normalize_horizon_value=_normalize_horizon_value,
+        coerce_numeric_horizon=_coerce_numeric_horizon,
+    )
+
+
 def _evaluate_feature_coverage(metadata: Mapping[str, Any], policy: Mapping[str, Any]) -> Dict[str, Any]:
     return runtime_evaluate_feature_coverage(metadata, policy)
 
@@ -1135,8 +1158,7 @@ def _parse_horizon_label(value: str) -> float:
 
 
 def _forecast_coherence_excluded(entry: Mapping[str, Any]) -> bool:
-    payload = entry.get("forecast_coherence")
-    return bool(isinstance(payload, Mapping) and payload.get("exclude_from_voting"))
+    return runtime_forecast_coherence_excluded(entry) or bool(entry.get("excluded_from_voting", False))
 
 
 def _coherence_weight_multiplier(
@@ -1202,6 +1224,20 @@ def _apply_confluence_policy(
     )
 
 
+def _apply_trust_hardening(
+    summary: Dict[str, Dict[str, Any]],
+    policy: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    return runtime_apply_trust_hardening(
+        summary,
+        policy,
+        coerce_result_horizon=_coerce_result_horizon,
+        direction_vote=_direction_vote,
+        direction_from_probability=_direction_from_probability,
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+
 def _lookup_horizon_value(mapping: Mapping[float, float], horizon: float, default: float) -> float:
     numeric_horizon = _normalize_horizon_value(horizon)
     if numeric_horizon in mapping:
@@ -1240,7 +1276,8 @@ def _compute_weighted_direction_scores(
         base_weight = max(_lookup_horizon_value(resolved_weights, horizon, 1.0), 0.0)
         confidence = max(float(entry.get("confidence_score") or 0.0), 0.0)
         coherence_multiplier = _coherence_weight_multiplier(entry, horizon=horizon, policy=policy or {})
-        weighted_vote = base_weight * coherence_multiplier * (0.5 + 0.5 * min(confidence, 1.0))
+        trust_weight = max(float(entry.get("voting_weight_after_trust") or 1.0), 0.0)
+        weighted_vote = base_weight * coherence_multiplier * trust_weight * (0.5 + 0.5 * min(confidence, 1.0))
         if direction == "up":
             up_score += weighted_vote
         else:
@@ -1253,6 +1290,7 @@ def _compute_weighted_direction_scores(
                 "base_weight": float(base_weight),
                 "confidence_score": float(confidence),
                 "coherence_multiplier": float(coherence_multiplier),
+                "trust_weight": float(trust_weight),
                 "weighted_vote": float(weighted_vote),
             }
         )
@@ -3205,6 +3243,7 @@ def run_predictions(
     forecast_coherence_policy: Mapping[str, Any] | None = None,
     direction_output_policy: Mapping[str, Any] | None = None,
     direction_ensemble_policy: Mapping[str, Any] | None = None,
+    trust_hardening_policy: Mapping[str, Any] | None = None,
     latest_close: float | None = None,
     confidence_min: float = CONFIDENCE_MIN_DEFAULT,
     confidence_min_by_horizon_regime: Mapping[float | int | str, Mapping[str, float]] | None = None,
@@ -3246,6 +3285,7 @@ def run_predictions(
         forecast_coherence_policy=forecast_coherence_policy,
         direction_output_policy=direction_output_policy,
         direction_ensemble_policy=direction_ensemble_policy,
+        trust_hardening_policy=trust_hardening_policy,
         latest_close=latest_close,
         confidence_min=confidence_min,
         confidence_min_by_horizon_regime=confidence_min_by_horizon_regime,
@@ -3277,6 +3317,7 @@ def run_predictions(
         resolve_forecast_coherence_policy=_resolve_forecast_coherence_policy,
         resolve_direction_output_policy=_resolve_direction_output_policy,
         resolve_direction_ensemble_policy=_resolve_direction_ensemble_policy,
+        resolve_trust_hardening_policy=_resolve_trust_hardening_policy,
         compute_breakout_scores=_compute_breakout_scores,
         load_target_range_models=_load_target_range_models,
         format_horizon_label=_format_horizon_label,
@@ -3310,6 +3351,7 @@ def run_predictions(
         write_direction_fallback_state=_write_direction_fallback_state,
         apply_post_prediction_policies=runtime_apply_post_prediction_policies,
         apply_forecast_coherence_policy=_apply_forecast_coherence_policy,
+        apply_trust_hardening_stage=_apply_trust_hardening,
         apply_confluence_policy=_apply_confluence_policy,
         apply_trade_decision_stage=_apply_trade_decision_stage,
         apply_post_trade_gates=_apply_post_trade_gates,

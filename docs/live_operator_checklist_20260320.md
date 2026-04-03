@@ -6,6 +6,12 @@ Approved profile:
 
 - `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`
 
+Trust-hardening scope note:
+
+- trust hardening is configured for 4h in `configs/run_refresh_and_predict.live_conservative_binance_only.yaml` and `configs/run_refresh_and_predict.live_conservative.yaml`; default profile may still include broader trust scope for research comparisons
+- for the default live wrapper path, expect trust telemetry in runtime artifacts
+- 8h is removed from live decision logic and live emitted target set
+
 Preferred command path:
 
 ```bash
@@ -59,9 +65,10 @@ Explicit profile form:
 
 Current wrapper behavior:
 
-- defaults `--targets` to `0.25,1,4,8,12`
+- defaults `--targets` to `0.25,1,4,12`
 - defaults `--hours` to `360`
 - writes trade-ready artifacts unless `--no-write-artifacts` is supplied
+- replay-offset validation is hourly-only by runtime contract, so replay sign-off uses `1h,4h,12h` even though wrapper output still includes `15m` telemetry
 
 ## 4. Post-Run Read Order
 
@@ -82,10 +89,16 @@ All of these should still hold before acting on the output:
    - `15m = 0.0`
    - `1h = 0.15`
    - `4h = 0.35`
-   - `8h = 0.20`
    - `12h = 0.35`
 4. the preferred horizon and recommended action from `prompt_ready_summary.operator_summary_compact` match the conclusion you intend to act on
 5. the chosen horizon is not blocked by `forecast_coherence`, `abstention`, or execution-plan rejection reasons that contradict the trade thesis
+
+Trust-specific gates (when trust policy is enabled in the selected profile):
+
+1. `4h` must expose `trust_status`, `trust_reasons`, `excluded_from_voting`, and `voting_weight_after_trust`
+2. `missing_required_trust_metadata` is a hard pause condition under fail-closed
+3. `4h` low trust should map to deweight (`excluded_from_voting=false`, `voting_weight_after_trust=0.5`)
+4. if `trust_hardening_changed_outcome=true`, require manual confirmation against `blocked_trade_analytics` before entry
 
 ## 6. Execution Decision Tree
 
@@ -103,8 +116,20 @@ Reduce risk or pause if any of these appears:
 2. repeated `forecast_coherence_gate` or similar mid-term blocking reasons across the preferred stack
 3. repeated preferred-horizon setups with deteriorating execution quality
 4. the next qualified reliability run fails promotion or model-shift guards
+5. trust telemetry is missing for a profile expected to be trust-enabled
+6. repeated `missing_required_trust_metadata` appears in consecutive live-style runs
 
-## 8. Session Logging Discipline
+## 8. Rollback Controls
+
+Use these controls in order:
+
+1. set `trust_hardening_policy.fail_closed: false` to prevent metadata outages from forcing low-trust exclusions
+2. relax per-horizon action (`exclude` to `deweight`) or increase `deweight_factor_by_horizon`
+3. set `trust_hardening_policy.enabled: false` only as emergency fallback
+
+After rollback, require at least one clean run with expected trust fields and no `missing_required_trust_metadata` before re-enabling fail-closed.
+
+## 9. Session Logging Discipline
 
 For each live session, log:
 
@@ -112,6 +137,7 @@ For each live session, log:
 2. chosen profile
 3. preferred horizon
 4. execution status and reason for `4h`, `8h`, and `12h`
+  - log `8h` as telemetry-only / not in live decision path when present in non-live profiles
 5. whether the operator waited, entered, reduced risk, or paused
 
 If a discretionary override is made, log the exact reason and why it overrode the default checklist.

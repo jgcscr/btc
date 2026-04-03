@@ -330,7 +330,7 @@ def normalize_feature_coverage_policy_block(value: Mapping[str, Any], *, stderr_
             normalized[key] = bool(raw_value)
         elif key in {"max_imputed_zero_columns", "max_imputed_zero_ratio", "max_source_lag_hours"}:
             normalized[key] = float(raw_value) if raw_value is not None else None
-        elif key == "ignored_columns":
+        elif key in {"ignored_columns", "ignored_sources"}:
             if raw_value is None:
                 normalized[key] = []
             elif isinstance(raw_value, str):
@@ -338,7 +338,7 @@ def normalize_feature_coverage_policy_block(value: Mapping[str, Any], *, stderr_
             elif isinstance(raw_value, Sequence):
                 normalized[key] = [str(item).strip() for item in raw_value if str(item).strip()]
             else:
-                raise ValueError("ignored_columns in feature_coverage_policy must be a list/sequence")
+                raise ValueError(f"{key} in feature_coverage_policy must be a list/sequence")
         else:
             stderr_write(f"Warning: Unknown feature_coverage_policy config key '{raw_key}' ignored.\n")
     return normalized
@@ -687,6 +687,47 @@ def normalize_direction_ensemble_policy_block(
     return normalized
 
 
+def normalize_trust_hardening_policy_block(
+    value: Mapping[str, Any],
+    *,
+    parse_targets: Callable[[str], List[float]],
+    normalize_horizon_value: Callable[[Any], float],
+    stderr_write: Callable[[str], None],
+) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("trust_hardening_policy config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key in {"enabled", "fail_closed", "divergence_flip_required"}:
+            normalized[key] = bool(raw_value)
+        elif key in {"default_action"}:
+            normalized[key] = str(raw_value).strip().lower() if raw_value is not None else None
+        elif key in {"deweight_factor", "divergence_abs_gap_min", "probability_neutral_band"}:
+            normalized[key] = float(raw_value) if raw_value is not None else None
+        elif key in {"horizons", "high_impact_horizons"}:
+            if raw_value is None:
+                normalized[key] = None
+            elif isinstance(raw_value, str):
+                normalized[key] = parse_targets(raw_value)
+            elif isinstance(raw_value, Sequence):
+                normalized[key] = [normalize_horizon_value(item) for item in raw_value]
+            else:
+                raise ValueError(f"{key} in trust_hardening_policy must be a list/sequence")
+        elif key in {"action_by_horizon", "deweight_factor_by_horizon", "model_summary_paths_by_horizon"}:
+            if not isinstance(raw_value, Mapping):
+                raise ValueError(f"{key} in trust_hardening_policy must be a mapping")
+            normalized[key] = dict(raw_value)
+        elif key == "metadata_checks":
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("metadata_checks in trust_hardening_policy must be a mapping")
+            normalized[key] = dict(raw_value)
+        else:
+            stderr_write(f"Warning: Unknown trust_hardening_policy config key '{raw_key}' ignored.\n")
+    return normalized
+
+
 def normalize_config_value(
     name: str,
     value: Any,
@@ -808,6 +849,13 @@ def normalize_config_value(
             )
         if name == "direction_ensemble_policy" and value is not None:
             return normalize_direction_ensemble_policy_block(
+                value,
+                parse_targets=parse_targets,
+                normalize_horizon_value=normalize_horizon_value,
+                stderr_write=stderr_write,
+            )
+        if name == "trust_hardening_policy" and value is not None:
+            return normalize_trust_hardening_policy_block(
                 value,
                 parse_targets=parse_targets,
                 normalize_horizon_value=normalize_horizon_value,

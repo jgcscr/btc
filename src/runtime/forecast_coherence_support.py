@@ -33,7 +33,10 @@ def resolve_forecast_coherence_policy(
 
 def forecast_coherence_excluded(entry: Mapping[str, Any]) -> bool:
     payload = entry.get("forecast_coherence")
-    return bool(isinstance(payload, Mapping) and payload.get("exclude_from_voting"))
+    return bool(
+        (isinstance(payload, Mapping) and payload.get("exclude_from_voting"))
+        or entry.get("excluded_from_voting")
+    )
 
 
 def coherence_weight_multiplier(

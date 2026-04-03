@@ -151,6 +151,32 @@ forecast_coherence_policy:
   consensus_relief_max_p_up_edge: 0.12
   consensus_relief_exclude_from_voting: false
   exclude_blocked_horizons_from_voting: true
+trust_hardening_policy:
+  enabled: true
+  horizons: [4, 8]
+  high_impact_horizons: [4, 8]
+  fail_closed: true
+  default_action: exclude
+  action_by_horizon:
+    "4": deweight
+    "8": exclude
+  deweight_factor: 0.35
+  deweight_factor_by_horizon:
+    "4": 0.5
+  divergence_abs_gap_min: 0.12
+  divergence_flip_required: true
+  probability_neutral_band: 0.0
+  metadata_checks:
+    enabled: true
+    require_metadata: true
+    leakage_signature_features: [ret_1h, ret_4h, ret_8h, ret_12h]
+    max_val_accuracy: 0.995
+    max_test_accuracy: 0.995
+    max_train_accuracy: 0.999
+    max_train_val_accuracy_gap: 0.03
+  model_summary_paths_by_horizon:
+    "4": artifacts/models/lgbm_dir4h_v1/summary.json
+    "8": artifacts/models/xgb_dir8h_v1/summary.json
 direction_output_policy:
   enabled: true
   horizons: [0.25, 1]
