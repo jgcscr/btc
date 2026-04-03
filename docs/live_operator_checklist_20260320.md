@@ -1,119 +1,112 @@
 # Live Operator Checklist
 
-This checklist is the shortest operator path for the approved conservative Binance-only live profile:
+This is the shortest operator path for the approved conservative live-style profile in the current workspace.
+
+Approved profile:
 
 - `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`
 
-Use it together with:
+Preferred command path:
 
-- `docs/live_trading_rollout_20260320.md`
-- `docs/trade_decision_8h_hardening_memo_20260320.md`
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_live_inference
+```
+
+Use this checklist only for direct live-style refreshes. Do not substitute cadence or shadow outputs for a live operator decision.
 
 ## 1. Scope Boundary
 
-This checklist applies only to direct conservative live-style refreshes.
+This checklist applies only to direct live-style refreshes.
 
-Do not use cadence outputs or shadow comparison outputs as a substitute for a direct live-style refresh when making a live decision.
-
-Shadow-only diagnostics are:
+Do not use these as live authorization inputs:
 
 - `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
 - `artifacts/predictions/comparisons/shadow_profile_comparison_summary.json`
 - `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
 - `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
 
-Those files are observational only. They are used to compare `shadow_direction_enhanced_relaxed_chop` against `shadow_chop_suppression`, not to authorize a live trade.
+Those files are observational only.
 
-## 2. Snapshot Discipline
+## 2. Pre-Run Checks
 
-After each fresh conservative run, read the current state directly from:
+Before each live-style refresh:
 
-- `artifacts/predictions/latest.json`
-- `artifacts/monitoring/latest.json`
-- `artifacts/monitoring/trade_ready_summary.json` only if that run path refreshed it
+1. Confirm the intended profile is `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`.
+2. Confirm no local edits have changed caps or threshold controls unexpectedly.
+3. Confirm you are not accidentally using cadence outputs in place of a direct run.
+4. Confirm spot data recency is acceptable for the decision window.
+5. Treat Binance spot as the hard live source unless the selected profile explicitly changes that contract.
 
-Minimum fields to confirm before acting:
+Current runtime note:
 
-- `generated_at` is recent enough for the decision window
-- `request.local_feature_overrides.feature_coverage.ok = true`
-- `request.local_feature_overrides.source_freshness` is acceptable
-- `prompt_ready_summary.operator_summary_compact` matches the interpretation you intend to use
-- per-horizon `trade_action`, `execution_plan.status`, `execution_plan.reason`, `position_size_cap`, `confidence_min_source`, and `abstention.reason` support the same interpretation
+- market preparation may attempt best-effort macro and on-chain local refreshes during a fresh rebuild
+- those support local feature assembly, but they are not the operator-facing source of truth for a live decision
 
-## 3. Pre-Run Checks
+## 3. Run Command
 
-Before each direct live-style refresh:
-
-1. Confirm the active profile is `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`.
-2. Confirm the latest trustworthy deployment is still the intended incumbent.
-3. Confirm no manual local edits have changed live sizing or threshold controls.
-4. Confirm data inputs are current enough for a live read.
-5. Treat Binance spot as the only hard live source unless the selected profile explicitly wires macro or other external context into the refresh path.
-
-Current local-runtime note:
-
-- the refresh path now attempts best-effort macro and on-chain local feature refreshes
-- those enrich the local feature bundle when present, but they are not a substitute for the approved hard live-source contract
-
-## 4. Run Command
+Default:
 
 ```bash
-/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_live_inference
+```
+
+Explicit profile form:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_live_inference \
   --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
 ```
 
-Compatibility note:
+Current wrapper behavior:
 
-- `configs/run_refresh_and_predict.live_conservative.yaml` remains available as a backward-compatible equivalent profile.
-- Use the Binance-only named profile for new operator runs so the live data contract is explicit.
+- defaults `--targets` to `0.25,1,4,8,12`
+- defaults `--hours` to `360`
+- writes trade-ready artifacts unless `--no-write-artifacts` is supplied
 
-## 5. Post-Run Hard Gates
+## 4. Post-Run Read Order
 
 Inspect these first:
 
 1. `artifacts/monitoring/latest.json`
 2. `artifacts/predictions/latest.json`
-3. `artifacts/monitoring/trade_ready_summary.json` only if the run path refreshed it
+3. `artifacts/monitoring/trade_ready_summary.json` when the run wrote trade-ready artifacts
+4. `artifacts/runtime_runs/<run-id>/summary.json` when you need exact runtime lineage or event context
 
-Live trading stays enabled only if all of these remain true:
+## 5. Hard Gates Before Acting
 
-1. feature coverage remains `ok = true`
-2. source freshness remains clean
-3. request-level caps still show:
+All of these should still hold before acting on the output:
+
+1. feature coverage remains acceptable when local overrides are used
+2. source freshness remains acceptable when local overrides are used
+3. the request-level caps still show:
    - `15m = 0.0`
    - `1h = 0.15`
    - `4h = 0.35`
    - `8h = 0.20`
    - `12h = 0.35`
-4. the preferred actionable horizon remains within the mid-term live stack
-5. no new cluster of `forecast_coherence_gate`, `bias_direction_conflict`, or similar mid-term execution blockers appears
-
-Operational note:
-
-- direct conservative refreshes should be read from `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json`
-- `artifacts/monitoring/trade_ready_summary.json` can lag if the selected path does not rewrite that summary
-- `data/processed/macro/` and `data/processed/onchain/` are local support bundles, not operator-facing decision artifacts
+4. the preferred horizon and recommended action from `prompt_ready_summary.operator_summary_compact` match the conclusion you intend to act on
+5. the chosen horizon is not blocked by `forecast_coherence`, `abstention`, or execution-plan rejection reasons that contradict the trade thesis
 
 ## 6. Execution Decision Tree
 
-1. If feature coverage fails, pause live trading.
-2. If the preferred horizon is `ready` and `recommended_operator_action = enter_now`, use that horizon's execution plan and keep size inside that horizon's cap.
-3. If lower horizons are rejected for execution-quality reasons, treat them as non-confirming rather than as automatic overrides of a ready mid-term setup.
-4. If a horizon is `bias_only_ready`, keep the bias but do not substitute it for a different horizon that is actually `ready`.
-5. If a later refresh changes the preferred horizon or execution state, re-evaluate from the fresh snapshot rather than carrying forward a stale decision.
+1. If feature coverage fails, pause live action.
+2. If the preferred horizon is `ready` and the recommended operator action is immediate entry, use that horizon's execution plan inside its cap.
+3. If the preferred horizon is `waiting_pullback`, wait rather than forcing the entry.
+4. If the preferred horizon is `bias_only_ready`, keep the directional read but do not treat it as an executable entry.
+5. If a later refresh changes the preferred horizon or execution state, re-evaluate from the fresh snapshot.
 
-## 7. Pause Or Escalate Conditions
+## 7. Escalate Or Pause Conditions
 
 Reduce risk or pause if any of these appears:
 
-1. repeated `8h`-preferred setups without meaningful confirmation from `4h` or `12h`
-2. repeated preferred-horizon setups with deteriorating execution quality across the confirming stack
-3. new feature freshness or coverage failure
+1. new feature freshness or coverage failure
+2. repeated `forecast_coherence_gate` or similar mid-term blocking reasons across the preferred stack
+3. repeated preferred-horizon setups with deteriorating execution quality
 4. the next qualified reliability run fails promotion or model-shift guards
 
-## 8. Logging Discipline
+## 8. Session Logging Discipline
 
-For every live session, record:
+For each live session, log:
 
 1. run timestamp
 2. chosen profile
@@ -121,4 +114,4 @@ For every live session, record:
 4. execution status and reason for `4h`, `8h`, and `12h`
 5. whether the operator waited, entered, reduced risk, or paused
 
-If a discretionary override is made, log the exact reason and why it was stronger than the default checklist.
+If a discretionary override is made, log the exact reason and why it overrode the default checklist.

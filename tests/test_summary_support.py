@@ -1,0 +1,440 @@
+import json
+
+from src.runtime.summary_support import (
+    build_stub_summary,
+    build_prompt_forecast_clause,
+    build_execution_prior_summary,
+    build_blocked_trade_analytics,
+    build_degradation_monitoring,
+    build_prompt_ready_summary,
+    build_runtime_degradation_monitoring,
+    build_runtime_prompt_ready_summary,
+    coerce_result_horizon,
+    confidence_level_from_score,
+    finite_float_or_none,
+    format_usd_value,
+    prompt_direction_label,
+    prompt_effective_direction,
+    resolve_degradation_monitoring_policy,
+    select_prompt_candidate_entries,
+    select_prompt_preferred_entry,
+    write_prediction_summary,
+)
+from src.runtime.horizon_support import horizon_sort_key
+
+
+def test_build_stub_summary_preserves_thresholds_and_dry_run_defaults():
+    summary = build_stub_summary(
+        [4.0, 1.0],
+        0.61,
+        0.02,
+        close=100000.0,
+        ts_iso="2026-04-02T00:00:00+00:00",
+        thresholds_by_horizon={4.0: {"p_up_min": 0.7, "ret_min": 0.03, "volatility_ceiling": 1.5}},
+        normalize_horizon_value=lambda value: float(value),
+        format_horizon_label=lambda value: f"{int(value)}h",
+        resolve_thresholds_for_horizon=lambda horizon, default_p_up, default_ret, overrides: dict(
+            (overrides or {}).get(horizon, {"p_up_min": default_p_up, "ret_min": default_ret})
+        ),
+        confidence_min_default=0.0,
+        regime_neutral="neutral",
+    )
+
+    assert list(summary.keys()) == ["1h", "4h"]
+    assert summary["1h"]["execution_plan"]["status"] == "dry_run"
+    assert summary["1h"]["thresholds"]["p_up_min_effective"] == 0.61
+    assert summary["1h"]["thresholds"]["ret_min_effective"] == 0.02
+    assert summary["4h"]["volatility"]["ceiling"] == 1.5
+    assert summary["4h"]["thresholds"]["adaptive_scale"] == 1.0
+    assert summary["4h"]["direction_only_fallback"]["reason"] == "dry_run"
+
+
+def _select_prompt_preferred_entry(summary):
+    return "4h", summary["4h"], {"conflict_present": True, "support_horizons": ["1h", "4h"]}
+
+
+def _horizon_sort_key(label):
+    return {"1h": 1, "4h": 4, "8h": 8}.get(label, 99)
+
+
+def _build_prompt_forecast_clause(label, entry):
+    return f"{label}:{entry['trade_action']}"
+
+
+def _prompt_effective_direction(entry):
+    direction_display = str(entry.get("direction_next_display") or "neutral").lower()
+    if entry.get("forecast_coherence", {}).get("triggered") and direction_display == "neutral":
+        return str(entry.get("direction_next") or "neutral").lower()
+    return direction_display
+
+
+def _prompt_direction_label(direction):
+    return {"up": "Long", "down": "Short"}.get(direction, "Neutral")
+
+
+def _confidence_level_from_score(score):
+    if float(score or 0.0) >= 0.7:
+        return "High"
+    return "Medium"
+
+
+def _finite_float_or_none(value):
+    return None if value is None else float(value)
+
+
+def _format_usd_value(value):
+    if value is None:
+        return None
+    return f"${float(value):,.2f}"
+
+
+def _resolve_degradation_monitoring_policy(policy):
+    resolved = {
+        "enabled": True,
+        "lookback_snapshots": 5,
+        "min_snapshots": 2,
+        "min_ready_ratio": 0.4,
+        "max_blocked_ratio": 0.8,
+        "min_confidence": 0.5,
+        "min_expected_net": 0.0,
+    }
+    if policy:
+        resolved.update(policy)
+    return resolved
+
+
+def test_build_prompt_ready_summary_returns_compact_operator_blockers():
+    summary = {
+        "1h": {
+            "trade_action": "up",
+            "direction_next_display": "up",
+            "confidence_score": 0.62,
+            "execution_plan": {
+                "status": "waiting_pullback",
+                "reason": "await_pullback_entry_zone",
+                "pending_trade_action": "buy",
+            },
+            "forecast_coherence": {"triggered": False},
+        },
+        "4h": {
+            "trade_action": "up",
+            "direction_next_display": "up",
+            "confidence_score": 0.81,
+            "entry_price": 100000,
+            "stop_loss": 99000,
+            "take_profit": 102500,
+            "risk_reward_ratio": 2.5,
+            "execution_plan": {
+                "status": "ready",
+                "reason": "pass",
+                "pending_trade_action": "buy",
+                "disagreement_severity": {"score": 0.12, "triggered": False},
+            },
+            "forecast_coherence": {"triggered": False},
+        },
+    }
+
+    result = build_prompt_ready_summary(
+        summary,
+        select_prompt_preferred_entry=_select_prompt_preferred_entry,
+        horizon_sort_key=_horizon_sort_key,
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+    assert result["market_outlook_strategy"]["selected_direction"] == "Long"
+    assert result["market_outlook_strategy"]["preferred_horizon"] == "4h"
+    assert result["operator_summary_compact"]["recommended_operator_action"] == "enter_now"
+    assert result["trade_execution_plan_usd"]["entry_point"] == 100000.0
+    assert "wins side arbitration" in result["analysis_summary"]["rationale"]
+
+
+def test_extracted_prompt_formatting_helpers_preserve_legacy_behavior():
+    entry = {
+        "direction_next_display": "neutral",
+        "direction_next": "up",
+        "projected_high": 101250,
+        "projected_low": 99500,
+        "forecast_coherence": {"triggered": True},
+        "execution_plan": {"status": "rejected", "reason": "forecast_coherence_gate"},
+    }
+
+    assert confidence_level_from_score(0.7, finite_float_or_none=_finite_float_or_none) == "High"
+    assert prompt_direction_label("down") == "Short"
+    assert format_usd_value(100000, finite_float_or_none=_finite_float_or_none) == "$100,000.00"
+    assert prompt_effective_direction(entry) == "up"
+    assert build_prompt_forecast_clause("4h", entry, finite_float_or_none=_finite_float_or_none) == (
+        "4h: up, projected range $99,500.00 to $101,250.00 (coherence blocked)"
+    )
+
+
+def test_runtime_summary_wrappers_use_builtin_helpers() -> None:
+    summary = {
+        "1h": {
+            "horizon_hours": 1.0,
+            "trade_action": "up",
+            "direction_next_display": "up",
+            "confidence_score": 0.61,
+            "execution_plan": {
+                "status": "ready",
+                "reason": "pass",
+                "pending_trade_action": "buy",
+                "confluence_tier": "high",
+                "execution_alignment_ratio": 0.8,
+                "bias_alignment_ratio": 0.75,
+                "execution_score": 0.8,
+                "bias_score": 0.7,
+            },
+            "forecast_coherence": {"triggered": False},
+        },
+        "4h": {
+            "horizon_hours": 4.0,
+            "trade_action": "hold",
+            "direction_next_display": "neutral",
+            "confidence_score": 0.4,
+            "execution_plan": {
+                "status": "rejected",
+                "reason": "forecast_coherence_gate",
+                "confluence_tier": "low",
+                "execution_alignment_ratio": 0.2,
+                "bias_alignment_ratio": 0.2,
+                "execution_score": 0.2,
+                "bias_score": 0.2,
+            },
+            "forecast_coherence": {"triggered": True, "reasons": ["forecast_coherence_gate"]},
+            "trade_decision": {"expected_net": -1.0},
+        },
+    }
+
+    prompt_payload = build_runtime_prompt_ready_summary(summary, horizon_sort_key=horizon_sort_key)
+    degradation_payload = build_runtime_degradation_monitoring(
+        [{"predictions": summary}],
+        {"enabled": True, "min_snapshots": 1},
+        horizon_sort_key=horizon_sort_key,
+    )
+
+    assert prompt_payload["market_outlook_strategy"]["preferred_horizon"] == "1h"
+    assert degradation_payload["enabled"] is True
+    assert degradation_payload["by_horizon"]["1h"]["samples"] == 1
+
+
+def test_runtime_scalar_helpers_reject_non_finite_values() -> None:
+    assert finite_float_or_none("1.25") == 1.25
+    assert finite_float_or_none("nan") is None
+    assert coerce_result_horizon(4) == 4.0
+    assert coerce_result_horizon(0) is None
+    assert resolve_degradation_monitoring_policy({"lookback_snapshots": 1, "min_confidence": 2.0}) == {
+        "enabled": False,
+        "lookback_snapshots": 3,
+        "min_snapshots": 10,
+        "min_ready_ratio": 0.1,
+        "max_blocked_ratio": 0.85,
+        "min_expected_net": 0.0,
+        "min_confidence": 1.0,
+    }
+
+
+def test_build_blocked_trade_analytics_counts_rejections_and_gates():
+    summary = {
+        "1h": {
+            "trade_action": "hold",
+            "execution_plan": {"status": "rejected", "reason": "forecast_coherence_gate"},
+            "gate_trace": [
+                {"stage": "forecast_coherence", "reason": "forecast_coherence_gate", "triggered": True},
+                {"stage": "entry", "reason": "await_pullback_entry_zone", "triggered": False},
+            ],
+        },
+        "4h": {
+            "trade_action": "up",
+            "execution_plan": {"status": "ready", "reason": "pass"},
+            "gate_trace": [],
+        },
+    }
+
+    result = build_blocked_trade_analytics(summary)
+
+    assert result["blocked_total"] == 1
+    assert result["ready_total"] == 1
+    assert result["gate_stage_counts"]["forecast_coherence"] == 1
+    assert result["reason_counts"]["forecast_coherence_gate"] == 1
+
+
+def test_build_execution_prior_summary_counts_provenance_sources():
+    summary = {
+        "1h": {
+            "execution_prior_provenance": {
+                "analytics_source": "backtest_proxy",
+                "stop_source": "atr_structure",
+                "target_source": "analytics_mfe",
+            }
+        },
+        "4h": {
+            "execution_prior_provenance": {
+                "analytics_source": "backtest_proxy",
+                "stop_source": "atr_structure",
+                "target_source": "existing_or_projection",
+            }
+        },
+    }
+
+    result = build_execution_prior_summary(summary)
+
+    assert result["analytics_source_counts"] == {"backtest_proxy": 2}
+    assert result["stop_source_counts"] == {"atr_structure": 2}
+    assert result["target_source_counts"] == {"analytics_mfe": 1, "existing_or_projection": 1}
+
+
+def test_select_prompt_candidate_entries_filters_subhour_directional_when_hourly_exists():
+    summary = {
+        "15m": {
+            "horizon_hours": 0.25,
+            "trade_action": "up",
+            "direction_next_display": "up",
+            "confidence_score": 0.9,
+            "execution_plan": {"status": "ready", "reason": "pass", "confluence_tier": "high"},
+        },
+        "1h": {
+            "horizon_hours": 1.0,
+            "trade_action": "up",
+            "direction_next_display": "up",
+            "confidence_score": 0.6,
+            "execution_plan": {"status": "waiting_pullback", "reason": "await_pullback_entry_zone", "confluence_tier": "medium"},
+        },
+        "4h": {
+            "horizon_hours": 4.0,
+            "trade_action": "hold",
+            "direction_next_display": "neutral",
+            "confidence_score": 0.5,
+            "execution_plan": {"status": "rejected", "reason": "forecast_coherence_gate", "confluence_tier": "low"},
+        },
+    }
+
+    result = select_prompt_candidate_entries(
+        summary,
+        coerce_result_horizon=lambda value: None if value is None else float(value),
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+    labels = [label for _rank, label, _entry in result]
+    assert "15m" not in labels
+    assert labels == ["1h", "4h"]
+
+
+def test_select_prompt_preferred_entry_prefers_side_with_more_ready_support():
+    summary = {
+        "1h": {
+            "horizon_hours": 1.0,
+            "trade_action": "up",
+            "direction_next_display": "up",
+            "confidence_score": 0.61,
+            "execution_plan": {
+                "status": "ready",
+                "reason": "pass",
+                "confluence_tier": "high",
+                "execution_alignment_ratio": 0.8,
+                "bias_alignment_ratio": 0.75,
+                "execution_score": 0.8,
+                "bias_score": 0.7,
+            },
+        },
+        "4h": {
+            "horizon_hours": 4.0,
+            "trade_action": "up",
+            "direction_next_display": "up",
+            "confidence_score": 0.72,
+            "execution_plan": {
+                "status": "waiting_pullback",
+                "reason": "await_pullback_entry_zone",
+                "confluence_tier": "medium",
+                "execution_alignment_ratio": 0.7,
+                "bias_alignment_ratio": 0.8,
+                "execution_score": 0.72,
+                "bias_score": 0.82,
+            },
+        },
+        "8h": {
+            "horizon_hours": 8.0,
+            "trade_action": "down",
+            "direction_next_display": "down",
+            "confidence_score": 0.8,
+            "execution_plan": {
+                "status": "ready",
+                "reason": "pass",
+                "confluence_tier": "high",
+                "execution_alignment_ratio": 0.78,
+                "bias_alignment_ratio": 0.7,
+                "execution_score": 0.78,
+                "bias_score": 0.71,
+            },
+        },
+    }
+
+    label, entry, side_profile = select_prompt_preferred_entry(
+        summary,
+        coerce_result_horizon=lambda value: None if value is None else float(value),
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+    assert label == "1h"
+    assert entry is summary["1h"]
+    assert side_profile["side"] == "up"
+    assert side_profile["conflict_present"] is True
+    assert side_profile["support_count"] == 2
+
+
+def test_write_prediction_summary_appends_history_and_degradation(tmp_path):
+    latest_path = tmp_path / "latest.json"
+    history_path = tmp_path / "history.json"
+    summary = {
+        "4h": {
+            "trade_action": "up",
+            "direction_next_display": "up",
+            "confidence_score": 0.8,
+            "entry_price": 100000,
+            "stop_loss": 99000,
+            "take_profit": 102500,
+            "risk_reward_ratio": 2.5,
+            "trade_decision": {"expected_net": 15.0},
+            "execution_plan": {
+                "status": "ready",
+                "reason": "pass",
+                "pending_trade_action": "buy",
+                "disagreement_severity": {"score": 0.0, "triggered": False},
+            },
+            "forecast_coherence": {"triggered": False},
+            "gate_trace": [],
+        }
+    }
+
+    printed = []
+    payload = write_prediction_summary(
+        summary,
+        degradation_policy={"enabled": True, "min_snapshots": 1},
+        latest_prediction_path=latest_path,
+        history_prediction_path=history_path,
+        build_prompt_ready_summary_fn=lambda data: build_prompt_ready_summary(
+            data,
+            select_prompt_preferred_entry=_select_prompt_preferred_entry,
+            horizon_sort_key=_horizon_sort_key,
+            finite_float_or_none=_finite_float_or_none,
+        ),
+        build_blocked_trade_analytics_fn=build_blocked_trade_analytics,
+        build_degradation_monitoring_fn=lambda history, policy: build_degradation_monitoring(
+            history,
+            policy=policy,
+            resolve_degradation_monitoring_policy=_resolve_degradation_monitoring_policy,
+            horizon_sort_key=_horizon_sort_key,
+            finite_float_or_none=_finite_float_or_none,
+        ),
+        print_fn=printed.append,
+    )
+
+    assert latest_path.exists()
+    assert history_path.exists()
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    latest = json.loads(latest_path.read_text(encoding="utf-8"))
+
+    assert len(history) == 1
+    assert payload["degradation_monitoring"]["enabled"] is True
+    assert latest["execution_prior_summary"]["analytics_source_counts"] == {}
+    assert latest["prompt_ready_summary"]["market_outlook_strategy"]["selected_direction"] == "Long"
+    assert printed

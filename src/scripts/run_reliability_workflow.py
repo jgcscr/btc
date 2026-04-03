@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -30,6 +30,17 @@ class StepResult:
 
 REFERENCE_FEATURE_ABLATION_VARIANT = "reference_feature_ablation"
 REFERENCE_FEATURE_ABLATION_THRESHOLD_VARIANT_PREFIX = f"{REFERENCE_FEATURE_ABLATION_VARIANT}_threshold_"
+_STEP_EVENT_SINK: Callable[[str, str, Mapping[str, Any] | None], None] | None = None
+
+
+def _set_step_event_sink(sink: Callable[[str, str, Mapping[str, Any] | None], None] | None) -> None:
+    global _STEP_EVENT_SINK
+    _STEP_EVENT_SINK = sink
+
+
+def _emit_step_event(name: str, status: str, details: Mapping[str, Any] | None = None) -> None:
+    if _STEP_EVENT_SINK is not None:
+        _STEP_EVENT_SINK(name, status, details)
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -560,9 +571,15 @@ def _run_step(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     rendered = " ".join(shlex.quote(part) for part in cmd)
     allowed = set(int(code) for code in (allowed_returncodes or [0]))
+    _emit_step_event(
+        name,
+        "started",
+        {"command": list(cmd), "log_path": str(log_path), "dry_run": bool(dry_run)},
+    )
     if dry_run:
         log_path.write_text(f"[dry-run] {rendered}\n", encoding="utf-8")
         print(f"[dry-run] {name}: {rendered}")
+        _emit_step_event(name, "completed", {"returncode": 0, "dry_run": True, "log_path": str(log_path)})
         return StepResult(name=name, command=cmd, returncode=0, log_path=log_path)
 
     print(f"\n>>> {name}")
@@ -570,12 +587,14 @@ def _run_step(
     with log_path.open("w", encoding="utf-8") as handle:
         process = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, text=True)
     if process.returncode not in allowed:
+        _emit_step_event(name, "failed", {"returncode": process.returncode, "log_path": str(log_path)})
         raise RuntimeError(f"Step '{name}' failed (exit={process.returncode}). See {log_path}")
     if process.returncode != 0:
         print(
             f"Warning: step '{name}' returned non-zero exit {process.returncode} but is configured as allowed.",
             file=sys.stderr,
         )
+    _emit_step_event(name, "completed", {"returncode": process.returncode, "log_path": str(log_path)})
     return StepResult(name=name, command=cmd, returncode=process.returncode, log_path=log_path)
 
 
@@ -3658,7 +3677,7 @@ def _find_latest_trusted_baseline_pack(
     return None
 
 
-def main() -> None:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the full reliability workflow: CV+Optuna, calibration, thresholds, ensemble, monitoring, paper-live.",
     )
@@ -3698,7 +3717,10 @@ def main() -> None:
         ),
     )
     parser.add_argument("--skip-paper-live", action="store_true", help="Skip paper-live refresh run (step 7).")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def execute_reliability_workflow(args: argparse.Namespace) -> Dict[str, Any]:
 
     config = _load_yaml(args.config)
     cv_cfg = config.get("cv", {})
@@ -11091,6 +11113,12 @@ def main() -> None:
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     print(f"\nReliability workflow finished. Manifest: {manifest_path}")
+    return manifest
+
+
+def main(argv: Sequence[str] | None = None) -> Dict[str, Any]:
+    args = parse_args(argv)
+    return execute_reliability_workflow(args)
 
 
 if __name__ == "__main__":

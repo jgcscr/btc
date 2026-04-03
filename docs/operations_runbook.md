@@ -1,24 +1,80 @@
 # Operations Runbook
 
-This document is the operating reference for running the repository safely from the current workspace state.
+This is the current operator reference for this workspace.
 
-It is written to answer four questions clearly:
+Use it to answer four practical questions:
 
-1. Which command path should be used for each operating mode?
-2. Which artifacts are the source of truth after each run?
-3. Which checks block promotion, deployment, or trade action?
-4. How should an operator or agent respond when cadence or runtime behavior drifts?
+1. Which command path should be used for each job?
+2. Which artifacts are authoritative after the run?
+3. Which shell cadence behavior is local-only versus automated in GitHub Actions?
+4. Which current runtime checks should block promotion, deployment, or trade action?
 
-## 1. Operating Modes
+## 1. Pick The Right Path First
 
-The repository currently supports four cadence modes:
+There are five distinct operating contexts in the current codebase:
 
-- `daily`: refresh live-style predictions from the latest trustworthy reliability run
-- `weekly`: run the runtime reliability workflow, then refresh predictions
-- `monthly`: run the full default reliability workflow, then refresh predictions
-- `shadow`: run the shadow profile comparison workflow and archive comparison artifacts
+1. direct research refresh
+2. direct live inference
+3. reliability workflow execution
+4. shell cadence execution
+5. in-process service execution
 
-Supported wrapper commands:
+Do not mix them.
+
+Recommended command paths:
+
+- research refresh: `python -m src.scripts.run_research_refresh`
+- live inference: `python -m src.scripts.run_live_inference`
+- reliability workflow: `python -m src.scripts.run_reliability_pipeline`
+- shell cadence: `bash ./scripts/run_cadence.sh <daily|weekly|monthly|shadow>`
+- service/API: `src/service/main.py`
+
+Legacy full-surface note:
+
+- `src.scripts.run_refresh_and_predict` is still the full CLI and prediction executor, but it is no longer the simplest operator entrypoint for normal use.
+
+## 2. Exact Commands By Mode
+
+### Research Refresh
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_research_refresh \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --targets 0.25,1,4,8,12
+```
+
+### Live Inference
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_live_inference
+```
+
+Optional explicit live config:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_live_inference \
+  --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
+```
+
+### Reliability Workflow
+
+Runtime profile:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_pipeline \
+  --config configs/reliability_workflow.runtime.yaml \
+  --continue-on-promotion-fail
+```
+
+Default profile:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_pipeline \
+  --config configs/reliability_workflow.default.yaml \
+  --continue-on-promotion-fail
+```
+
+### Shell Cadence
 
 ```bash
 bash ./scripts/run_cadence.sh daily
@@ -27,74 +83,103 @@ bash ./scripts/run_cadence.sh monthly
 bash ./scripts/run_cadence.sh shadow
 ```
 
-## 2. Golden Rules
+### Replay Validation
 
-1. Use runtime artifacts, not static documentation, as the source of truth for the current market state.
-2. Do not treat `default`, `live_conservative`, `shadow_simplified`, and shadow-comparison profiles as interchangeable.
-3. Do not force entries when `execution_plan.status` is `waiting_pullback`, `bias_only_ready`, or `rejected`.
-4. Do not deploy artifacts from a reliability run that fails promotion or alignment checks.
-5. Treat feature coverage, source freshness, and trustworthy-run resolution as preconditions, not optional diagnostics.
-6. For the current Binance-only live runtime, do not treat macro context as a blocking live-data prerequisite unless the runtime profile explicitly wires it in on every refresh.
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --dry-run \
+  --targets 1,4,8,12 \
+  --replay-offset-bars 24
+```
 
-## 3. Current Source Of Truth Artifacts
+## 3. What Each Path Actually Does
 
-Read these first after any refresh, cadence run, or reliability workflow:
+### Research And Live Wrappers
+
+Both wrappers parse through the legacy CLI surface and then execute:
+
+- `src.runtime.refresh_pipeline.execute_refresh_pipeline(...)`
+
+That runtime pipeline currently owns:
+
+- runtime telemetry under `artifacts/runtime_runs/<run-id>/`
+- market preparation
+- prediction input resolution
+- summary writing
+- monitoring artifact writing
+
+The remaining dense prediction executor still lives in:
+
+- `src/scripts/run_refresh_and_predict.py`
+
+### Reliability Wrapper
+
+The reliability wrapper executes:
+
+- `src.runtime.reliability_pipeline.execute_reliability_pipeline(...)`
+
+That runtime layer writes runtime telemetry, but the actual workflow steps still come from:
+
+- `src.scripts.run_reliability_workflow`
+
+### Shell Cadence
+
+The shell wrapper in `scripts/run_cadence.sh` currently:
+
+- resolves the latest trustworthy reliability run by scanning local `artifacts/reliability/*`
+- uses `configs/run_refresh_and_predict.shadow_simplified.yaml` for the daily refresh path
+- runs `shadow` comparison locally through `src.scripts.run_shadow_profile_comparison`
+
+### GitHub Actions Cadence
+
+The workflow in `.github/workflows/cadence.yml` is narrower than the shell wrapper:
+
+- scheduled/manual modes supported: `daily`, `weekly`, `monthly`
+- `shadow` is not scheduled or wired into workflow dispatch
+- workflow preflights and bootstraps cadence artifacts using `src.scripts.bootstrap_cadence_artifacts`
+- workflow rejects remote artifact URIs and expects local filesystem paths visible to the self-hosted runner
+
+## 4. Current Source Of Truth Artifacts
+
+Read these first after a direct refresh, live inference run, or cadence refresh:
 
 - `artifacts/predictions/latest.json`
+- `artifacts/predictions/history.json`
 - `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json`
-- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+- `artifacts/monitoring/data_quality_latest.json`
+- `artifacts/runtime_runs/<run-id>/request.json`
+- `artifacts/runtime_runs/<run-id>/events.jsonl`
+- `artifacts/runtime_runs/<run-id>/summary.json`
+- `artifacts/runtime_runs/<run-id>/predictions.json`
+- `artifacts/runtime_runs/<run-id>/monitoring.json`
+- `artifacts/runtime_runs/<run-id>/trade_ready.json`
 
-For reliability review, also read:
+Read these first after a reliability run:
 
-- `artifacts/reliability/<run-id>/summary/edge_trustworthiness.json`
+- `artifacts/reliability/<run-id>/summary/workflow_manifest.json`
 - `artifacts/reliability/<run-id>/summary/promotion_gate.json`
 - `artifacts/reliability/<run-id>/summary/champion_gate_alignment_check.json`
 - `artifacts/reliability/<run-id>/summary/trade_decision_model_shift_guard.json`
+- `artifacts/reliability/<run-id>/summary/edge_trustworthiness.json`
 - `artifacts/reliability/<run-id>/summary/directional_objectives.json`
 - `artifacts/reliability/<run-id>/summary/walkforward_labeled_reconciliation.json`
+- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
 
-Minimum runtime checks before trusting a fresh prediction snapshot:
+## 5. Runtime Profiles And Their Roles
 
-- `generated_at` is current
-- `request.local_feature_overrides.feature_coverage.ok = true`
-- `request.local_feature_overrides.source_freshness` is acceptable
-- `prompt_ready_summary.operator_summary_compact` matches the interpretation being used
-- per-horizon `trade_action`, `execution_plan.status`, `execution_plan.reason`, `confidence_min_source`, and `abstention.reason` support the same conclusion
+Use the profile that matches the task.
 
-Minimum documentation checks before trusting a performance claim:
+- `configs/run_refresh_and_predict.default.yaml`: trusted research/comparison baseline
+- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved live-style profile
+- `configs/run_refresh_and_predict.live_conservative.yaml`: backward-compatible alias
+- `configs/run_refresh_and_predict.shadow_simplified.yaml`: cadence daily profile
+- `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: shadow comparison left-hand profile
+- `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: shadow comparison right-hand profile
+- `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`: shadow-only stricter abstention profile
 
-- use `artifacts/analysis/featurelift_20260331_rerun/comparison_report.json` or `.md` as the March 31 source of truth
-- treat the older pre-rerun March 31 comparison summary as superseded only
-
-## 4. Runtime Profiles And Their Roles
-
-Use the profile that matches the task. The intended roles are:
-
-- `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline
-- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved conservative live profile for current operations
-- `configs/run_refresh_and_predict.shadow_simplified.yaml`: artifact-writing cadence refresh profile used by `daily`
-- `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: active left-hand shadow comparison profile used by `shadow`
-- `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: active right-hand shadow comparison profile used by `shadow`
-
-Backward compatibility note:
-
-- `configs/run_refresh_and_predict.live_conservative.yaml` remains available as a legacy-equivalent alias.
-
-Current live-source assumption:
-
-- Binance spot is the only hard live data source for approved runtime refreshes.
-- Macro context is currently research-contextual and runtime-optional unless a profile explicitly merges a maintained macro parquet or equivalent source on every run.
-- If macro is promoted back to required live coverage later, update all approved runtime profiles and restore the stricter feature-coverage expectation before relying on that policy.
-
-Current local rebuild-source assumption:
-
-- `run_refresh_and_predict` now attempts best-effort local macro and on-chain refreshes before feature-bundle assembly
-- on-chain refresh writes `data/processed/onchain/hourly_features.parquet` and `data/processed/onchain/source_manifest.json`
-- on-chain refresh can fall back to public Blockchain chart series when a configured API is unavailable
-- failures in those best-effort refreshes are warnings unless a profile later makes them blocking dependencies
-
-Current live-conservative size caps from config:
+Current live-style size caps in the approved Binance-only profile:
 
 - `15m = 0.0`
 - `1h = 0.15`
@@ -102,180 +187,24 @@ Current live-conservative size caps from config:
 - `8h = 0.20`
 - `12h = 0.35`
 
-## 5. Exact Cadence Behavior
+## 6. Minimum Checks Before Trusting A Runtime Snapshot
 
-The current wrapper behavior in `scripts/run_cadence.sh` is:
+Confirm all of these before acting on a fresh run:
 
-### Daily
+1. `generated_at` is current enough for the decision window
+2. `request.local_feature_overrides.feature_coverage.ok` is true when local overrides are used
+3. source freshness in `request.local_feature_overrides.source_freshness` is acceptable when local overrides are used
+4. `prompt_ready_summary.operator_summary_compact` matches the interpretation you are about to use
+5. per-horizon `trade_action`, `execution_plan.status`, `execution_plan.reason`, `confidence_min_source`, and `abstention.reason` support the same conclusion
 
-1. Resolve the latest trustworthy reliability run.
-2. Run `src.scripts.run_refresh_and_predict` with `configs/run_refresh_and_predict.shadow_simplified.yaml`.
-3. Write the latest prediction and monitoring artifacts.
-
-Equivalent command path:
-
-```bash
-RUN_ID=$(
-  /workspaces/btc/.venv/bin/python - <<'PY'
-import json
-from pathlib import Path
-
-run_root = Path('artifacts/reliability')
-for run_dir in sorted((p for p in run_root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True):
-    edge_path = run_dir / 'summary' / 'edge_trustworthiness.json'
-    thresholds_path = run_dir / 'summary' / 'calibrated_thresholds.json'
-    platt_path = run_dir / 'summary' / 'platt_calibration.json'
-    if not edge_path.exists() or not thresholds_path.exists() or not platt_path.exists():
-        continue
-    payload = json.loads(edge_path.read_text(encoding='utf-8'))
-    if bool(payload.get('edge_trustworthy', False)):
-        print(run_dir.name)
-        break
-PY
-)
-
-/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
-  --config configs/run_refresh_and_predict.shadow_simplified.yaml \
-  --targets 0.25,1,4,8,12 \
-  --thresholds-json artifacts/reliability/${RUN_ID}/summary/calibrated_thresholds.json \
-  --platt-calibration artifacts/reliability/${RUN_ID}/summary/platt_calibration.json \
-  --write-artifacts
-```
-
-### Weekly
-
-1. Run `configs/reliability_workflow.runtime.yaml`.
-2. Re-resolve the latest trustworthy run.
-3. Run the daily refresh path.
-
-```bash
-/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
-  --config configs/reliability_workflow.runtime.yaml \
-  --continue-on-promotion-fail
-
-bash ./scripts/run_cadence.sh daily
-```
-
-### Monthly
-
-1. Run `configs/reliability_workflow.default.yaml`.
-2. Re-resolve the latest trustworthy run.
-3. Run the daily refresh path.
-
-```bash
-/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
-  --config configs/reliability_workflow.default.yaml \
-  --continue-on-promotion-fail
-
-bash ./scripts/run_cadence.sh daily
-```
-
-### Shadow
-
-1. Resolve the latest trustworthy reliability run.
-2. Run `src.scripts.run_shadow_profile_comparison`.
-3. Compare:
-   - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`
-   - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`
-4. Restore the latest artifact to the right-hand profile snapshot after comparison.
-
-```bash
-bash ./scripts/run_cadence.sh shadow
-```
-
-## 6. Reliability Workflow Expectations
-
-The reliability workflow is responsible for generating and validating the artifacts used by runtime refreshes.
-
-Runtime profile:
-
-```bash
-/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
-  --config configs/reliability_workflow.runtime.yaml \
-  --continue-on-promotion-fail
-```
-
-Default profile:
-
-```bash
-/workspaces/btc/.venv/bin/python -m src.scripts.run_reliability_workflow \
-  --config configs/reliability_workflow.default.yaml \
-  --continue-on-promotion-fail
-```
-
-Runtime reliability currently includes directional-objective gating through `src.scripts.evaluate_directional_objectives`.
-
-Current runtime directional-objective thresholds:
-
-- `group_min_rows: 40`
-- `min_rows_by_regime.chop: 40`
-- `max_brier: 0.255`
-- `max_brier_by_regime.chop: 0.255`
-- `min_f1_by_regime.chop: 0.40`
-- `max_ece_by_regime.chop: 0.18`
-
-Current runtime calibration-evaluation behavior:
-
-- calibration robustness evaluates the calibrated labeled snapshot, not raw `p_up`
-- directional objectives also evaluate the calibrated labeled snapshot
-
-Current chop-coverage reality:
-
-- `artifacts/monitoring/labeled_backtest_1h.csv` currently has `8761` rows but only `47` labeled `chop` rows
-- the broader repo backtest source `artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv` currently extends to `9193` rows only, so the repo does not yet contain enough extra older labeled coverage to justify tightening chop gates materially
-
-Tightening rule for chop:
-
-- do not tighten chop-specific row, Brier, or F1 overrides until the labeled 1h monitoring set contains at least `80` chop rows with calibrated directional metrics still passing for two consecutive reliability runs
-- when that threshold is reached, remove `min_rows_by_regime.chop` first, then retest before tightening `max_brier_by_regime.chop` or `min_f1_by_regime.chop`
-
-Evaluator behavior that matters operationally:
-
-- label resolution accepts `y`, `y_true`, `target_up`, `label`, or `direction_target`
-- missing or invalid regime labels are normalized to `unknown`
-
-Treat any non-empty `failed_checks` in `summary/directional_objectives.json` as a reliability gate failure.
-
-For March 31, 2026 feature work, also treat these as mandatory safety checks before believing a lift result:
-
-- `tests/test_feature_leakage_guards.py`
-- `tests/test_intrabar_feature_parity.py`
-- `tests/test_onchain_loader_and_integration.py`
-- `src/scripts.generate_featurelift_comparison_report`
-- `src/scripts.check_featurelift_report_references`
-
-## 7. Review Order After A Reliability Run
-
-Read these in order:
-
-1. `summary/champion_gate_alignment_check.json`
-2. `summary/promotion_gate.json`
-3. `summary/directional_objectives.json`
-4. `summary/trade_decision_model_shift_guard.json`
-5. `summary/edge_trustworthiness.json`
-6. `summary/walkforward_labeled_reconciliation.json`
-7. `summary/overlap_feature_drift_guard.json` when present
-8. `summary/overlap_triggered_trade_diagnostics.json` when present
-9. `summary/calibration_robustness.json`
-10. `summary/rolling_ab_report.json`
-
-Interpretation rules:
-
-- if alignment fails, treat the run as workflow-invalid regardless of model metrics
-- if promotion is blocked, treat the run as diagnostic only
-- if trade-decision model shift guard fails, do not deploy from that run
-- if edge trustworthiness is false, do not use that run as the cadence source bundle
-
-## 8. Reading Runtime Execution State
-
-Use these runtime fields first:
+Operator-facing fields worth checking first:
 
 - `prompt_ready_summary.market_outlook_strategy`
 - `prompt_ready_summary.operator_summary_compact`
 - `blocked_trade_analytics`
 - `degradation_monitoring`
 
-Per-horizon, read:
+Per-horizon fields worth checking first:
 
 - `trade_action`
 - `execution_plan.status`
@@ -286,178 +215,115 @@ Per-horizon, read:
 - `abstention`
 - `uncertainty`
 
-Execution state meaning:
+## 7. Reliability Review Order
 
-- `ready`: setup is actionable within the configured profile
-- `waiting_pullback`: bias is acceptable, but entry quality is not yet acceptable at the current price
-- `bias_only_ready`: execution structure is acceptable, but the predictive model still abstained
-- `rejected`: a hard execution or policy guard blocked the setup
+Read these in order:
 
-Current runtime diagnostics worth checking explicitly:
+1. `summary/champion_gate_alignment_check.json`
+2. `summary/promotion_gate.json`
+3. `summary/directional_objectives.json`
+4. `summary/trade_decision_model_shift_guard.json`
+5. `summary/edge_trustworthiness.json`
+6. `summary/walkforward_labeled_reconciliation.json`
+7. `summary/calibration_robustness.json` when present
+8. `summary/rolling_ab_report.json` when present
 
-- `execution_plan.stop_management.stop_scaling`
-- `execution_plan.target_management.dynamic_rr_floor_applied`
-- `execution_plan.target_management.dynamic_realized_rr_ratio`
-- `direction_output.probability_shrinkage`
-- `trade_decision.threshold_source`
-- `confidence_min_source`
-- `abstention.reason`
-- `uncertainty.effective_policy`
+Operational interpretation rules:
 
-Common blocking reasons that require operator discipline rather than manual override:
+1. if alignment fails, treat the run as workflow-invalid
+2. if promotion is blocked, treat the run as diagnostic only
+3. if trade-decision model shift guard fails, do not deploy from that run
+4. if edge trustworthiness is false, do not use that run as the cadence source bundle
 
-- `short_term_disagreement`
-- `forecast_coherence_gate`
-- `pullback_quality_insufficient`
-- `stop_too_tight_near_invalidation`
-- `stop_too_wide`
-- `risk_reward_below_floor`
-- `low_execution_confluence`
-- `upstream_model_hold`
+## 8. Current Shell Cadence Behavior
 
-## 9. Shadow Comparison Review
+### Daily
 
-After `bash ./scripts/run_cadence.sh shadow`, inspect:
+1. resolve latest trustworthy reliability run
+2. run `run_refresh_and_predict` with `configs/run_refresh_and_predict.shadow_simplified.yaml`
+3. write prediction and monitoring artifacts
 
-1. `artifacts/predictions/comparisons/shadow_profile_comparison_summary.md`
-2. `artifacts/predictions/comparisons/shadow_profile_comparison_summary.json`
-3. `artifacts/predictions/comparisons/shadow_profile_comparison_runs.csv`
-4. `artifacts/predictions/comparisons/shadow_profile_comparison_longitudinal.json`
+### Weekly
 
-Operational guidance:
+1. run reliability workflow with `configs/reliability_workflow.runtime.yaml`
+2. re-resolve latest trustworthy run
+3. execute the daily refresh path
 
-- use the Markdown summary for the fastest operator review
-- use the CSV to compare runs over time
-- use the longitudinal JSON as the automation source of truth
-- keep `source_reliability_run_id` separate from the shadow comparison run id when reasoning about lineage
+### Monthly
 
-## 10. Promotion And Deployment Discipline
+1. run reliability workflow with `configs/reliability_workflow.default.yaml`
+2. re-resolve latest trustworthy run
+3. execute the daily refresh path
 
-Promotion and deploy behavior is controlled by the reliability workflow and the `quality.promotion_deploy` targets defined in config.
+### Shadow
 
-Use these rules:
+1. resolve latest trustworthy reliability run
+2. run `src.scripts.run_shadow_profile_comparison`
+3. compare `shadow_direction_enhanced_relaxed_chop` vs `shadow_chop_suppression`
 
-1. Deploy only from runs that pass promotion and alignment checks.
-2. If promotion is blocked, keep the existing deployed artifacts in place.
-3. Treat `summary/trade_decision_model_shift_guard.json` as a hard blocker.
-4. Treat `artifacts/monitoring/reliability_promotion_deploy_manifest.json` as the current deployed-state record.
+## 9. Service API Surface
 
-Shared deployment targets currently include:
+FastAPI service lives in `src/service/main.py`.
 
-- thresholds
-- Platt calibration
-- trade-decision model
-- promoted and incumbent labeled profiles
-- promotion and calibration summaries
-- the deployment manifest
+Current endpoints:
 
-## 10A. Model-Improvement Discipline
+- `GET /health`
+- `GET /jobs`
+- `POST /jobs/{job_name}`
+- `POST /run-signal`
+- `POST /run-dataset-refresh`
+- `POST /run-reliability-workflow`
+- `POST /run-walkforward`
 
-The March 31 feature-lift rerun changed how agents should evaluate modeling changes.
+Current registered job names:
 
-Use these rules:
+- `live-inference`
+- `research-refresh`
+- `reliability-workflow`
+- `walkforward-validation`
 
-1. Do not cite the older pre-rerun March 31 comparison summary as a current performance report.
-2. Use `artifacts/analysis/featurelift_20260331_rerun/comparison_report.json` and `.md` for the corrected view.
-3. Treat strong multi-horizon metrics as suspect until leakage guards and walk-forward checks have passed.
-4. If a dataset rebuild changes 15m or 1h feature selection, rerun the validation-guards subset before trusting the result.
-5. Regenerate the comparison report after retraining so the checked-in summary matches the current saved artifacts.
+Current non-feature:
 
-Local command sequence:
+- `POST /run-papertrade` returns `501`
 
-```bash
-/workspaces/btc/.venv/bin/python -m pytest \
-  tests/test_runtime_feature_parity_and_validation.py \
-  tests/test_intrabar_feature_parity.py \
-  tests/test_macro_loader_and_integration.py \
-  tests/test_onchain_loader_and_integration.py \
-  tests/test_direction_feature_reliability_filters.py \
-  tests/test_feature_leakage_guards.py \
-  tests/test_featurelift_report_reference_check.py
+## 10. Local Data And Feature Refresh Notes
 
-/workspaces/btc/.venv/bin/python -m src.scripts.generate_featurelift_comparison_report
-/workspaces/btc/.venv/bin/python -m src.scripts.check_featurelift_report_references
-```
+Fresh local rebuild paths currently attempt:
 
-## 11. Rollback Guidance
+- spot ingestion
+- intrabar aggregation when enabled
+- best-effort macro refresh
+- best-effort on-chain refresh
+- local feature-bundle preparation for inference override
 
-Rollback source of truth:
+Useful local support outputs:
 
-- `artifacts/reliability/<run-id>/summary/promotion_deploy_manifest.json`
+- `data/processed/macro/daily_features.parquet`
+- `data/processed/macro/source_manifest.json`
+- `data/processed/onchain/hourly_features.parquet`
+- `data/processed/onchain/source_manifest.json`
+- `artifacts/monitoring/meta_baseline.json`
+- `artifacts/monitoring/meta_baseline.parquet`
 
-Current deployment record:
+These are working-state files, not operator authorization artifacts.
 
-- `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
+## 11. Troubleshooting
 
-Use rollback when:
+1. If `scripts/run_cadence.sh` cannot find a trustworthy run, restore cadence artifacts first. The shell wrapper depends on local `artifacts/reliability/*` state.
+2. If `.venv` is unavailable, set `PYTHON_BIN=python` when invoking the cadence shell wrapper.
+3. Treat fail-fast config validation errors as correctness failures, not warnings.
+4. `--replay-offset-bars` is hourly-only and incompatible with `--use-local-features`.
+5. Keep scratch validation and replay work under `artifacts/tmp_validation/`.
 
-- a newly selected run fails alignment checks
-- a newly selected run fails model-shift guard checks
-- the active variant loses trustworthy-run status on the next qualified review
-- live refresh behavior degrades for policy reasons rather than normal market-state variation
+## 12. Minimal Safe Handoff Path
 
-Restore from a prior known-good deployment manifest instead of copying files manually from memory or old notes.
-
-## 12. GitHub Actions And Runner Model
-
-The cadence workflow in `.github/workflows/cadence.yml` currently:
-
-- runs on `self-hosted`
-- supports manual dispatch for `daily`, `weekly`, and `monthly`
-- schedules daily, weekly, and monthly cadences in UTC
-- validates the artifact root before running cadence
-- rejects remote artifact URIs
-- runs `python -m src.scripts.bootstrap_cadence_artifacts` before `scripts/run_cadence.sh`
-
-This workflow expects a local filesystem artifact root visible to the runner.
-
-For durable unattended operation:
-
-- use a non-ephemeral self-hosted machine
-- do not rely on a Codespaces shell session started with `./run.sh`
-- use `scripts/setup_self_hosted_runner.sh` to install and configure the Linux x64 runner when needed
-
-## 13. Manual Live-Style Refresh
-
-Use this path when you need an immediate direct runtime read outside cadence.
-
-Trusted default refresh:
-
-```bash
-/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
-  --config configs/run_refresh_and_predict.default.yaml
-```
-
-Approved conservative live refresh:
-
-```bash
-/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
-  --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
-```
-
-After either command, inspect:
-
-1. `artifacts/monitoring/latest.json`
-2. `artifacts/predictions/latest.json`
-3. `artifacts/monitoring/trade_ready_summary.json` if that path refreshed it
-
-## 14. Troubleshooting
-
-- If `scripts/run_cadence.sh` cannot locate a trustworthy run, restore the artifact bundle first; cadence depends on prebuilt reliability artifacts that are not tracked in git.
-- If `.venv` is unavailable, set `PYTHON_BIN=python` when calling cadence.
-- Treat fail-fast runtime config validation errors as correctness issues, not warnings.
-- Use `src.scripts.audit_feature_parity` before trusting local-feature override changes.
-- Keep scratch replay and validation outputs under `artifacts/tmp_validation/`.
-
-## 15. Minimal Safe Handoff Path
-
-For a new agent or operator taking over the workspace, use this read order:
+Read in this order:
 
 1. `README.md`
 2. `docs/operations_runbook.md`
 3. `docs/agent_system_handoff_20260320.md`
-4. `artifacts/monitoring/reliability_promotion_deploy_manifest.json`
-5. `artifacts/predictions/latest.json`
-6. `artifacts/monitoring/latest.json`
+4. `artifacts/monitoring/reliability_promotion_deploy_manifest.json` when present
+5. `artifacts/predictions/latest.json` when present
+6. `artifacts/monitoring/latest.json` when present
 
-That sequence gives the operating map first, then the current deployment state, then the latest runtime state.
+That gives the operating map first, then the current deployed state, then the latest runtime state.
