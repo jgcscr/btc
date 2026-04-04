@@ -1,5 +1,9 @@
 # Trade Decision Post-Fix Trust Basis
 
+Status: Historical trust-basis memo with still-useful rationale.
+
+Do not use this as the sole operator reference. For current commands and runtime behavior, use `README.md`, `docs/operations_runbook.md`, `docs/live_operator_checklist_20260320.md`, and `docs/agent_system_handoff_20260320.md` first.
+
 This document explains why `configs/run_refresh_and_predict.default.yaml` remains the trusted operating default.
 
 For the current deployed bundle and current live-style runtime state, read:

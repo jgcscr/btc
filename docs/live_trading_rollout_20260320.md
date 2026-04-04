@@ -1,5 +1,9 @@
 # Live Trading Rollout Policy
 
+Status: Current live policy context, but not the primary operator runbook.
+
+For exact commands and day-to-day decision flow, use `docs/live_operator_checklist_20260320.md`, `docs/operations_runbook.md`, and `README.md` first.
+
 This document defines the current live trading posture for the repository.
 
 It is intentionally narrower than the README and runbook. Its purpose is to explain which runtime profile is approved for live-style operation, why it is conservative, and how an operator should interpret the live risk controls.
@@ -33,8 +37,9 @@ Covered aggregate used for the live rollout decision:
 Operational interpretation:
 
 - the system is trusted for live-style use with conservative discipline
-- `4h` and `12h` are the strongest live-carry horizons
-- `8h` remains enabled, but should carry less capital until additional covered evidence improves confidence
+- `4h` and `12h` are the strongest direct live-carry horizons
+- the current live wrapper emits `15m`, `1h`, `4h`, and `12h`; it does not emit `8h`
+- legacy `8h` controls still exist in the live conservative config, but they are not part of the direct wrapper target set
 
 Supporting operator references:
 
@@ -49,19 +54,21 @@ The checked-in live conservative Binance-only profile enforces:
 
 - `confidence_min = 0.33`
 - global `position_size_cap = 0.35`
-- per-horizon caps:
+- wrapper-emitted per-horizon caps:
   - `15m = 0.00`
   - `1h = 0.15`
   - `4h = 0.35`
-  - `8h = 0.20`
   - `12h = 0.35`
 
 Interpretation:
 
 - `15m` remains informational only
 - `1h` can contribute context but should not dominate live size
-- `8h` remains enabled but underweighted relative to `4h` and `12h`
 - `4h` and `12h` remain the main live-carry horizons
+
+Current config note:
+
+- the config file still contains an `8h = 0.20` cap and some `8h`-specific overrides, but those are dormant under the direct live wrapper because its default targets are `0.25,1,4,12`
 
 ## 4. Active Live Conservative Overrides
 
@@ -78,10 +85,14 @@ The checked-in live conservative Binance-only profile currently includes these n
 
 These are intended to harden live operation without introducing a blanket routing or horizon-suppression rule.
 
+Current wrapper interpretation:
+
+- the `8h` entries above remain checked-in config state, but they are inactive for the direct live wrapper path unless an operator explicitly changes the target set outside the wrapper defaults
+
 ## 5. Direct Live Command
 
 ```bash
-/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+/workspaces/btc/.venv/bin/python -m src.scripts.run_live_inference \
   --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
 ```
 
@@ -90,7 +101,7 @@ This is the direct live-style refresh path. Do not substitute cadence or shadow 
 Live data contract:
 
 - Binance spot is the only hard live source assumed by the approved direct live profile.
-- Macro context remains research-contextual and runtime-optional until a future live profile explicitly wires it in on every refresh.
+- `funding`, `macro`, and `onchain` are runtime-optional support inputs for this profile and are excluded from stale-source blocking.
 
 ## 6. Required Monitoring Artifacts
 
@@ -132,42 +143,20 @@ Do not rely on a hardcoded snapshot summary in this policy document.
 Keep live trading enabled only while these conditions remain true:
 
 - feature coverage remains `ok = true`
-- the preferred actionable horizon remains within `{4h, 8h, 12h}`
-- `8h` does not become the dominant source of repeated live-ready setups with weak follow-through
+- the preferred actionable horizon remains within `{4h, 12h}` for the direct wrapper path, with `1h` treated as context-sized when emitted
 - no new cluster of `forecast_coherence_gate` or `bias_direction_conflict` failures appears across the mid-term stack
 
 Reduce risk or pause live trading if any of these occurs:
 
-- `8h` becomes the preferred horizon repeatedly while `4h` and `12h` weaken materially
 - live-ready states repeat but execution reasons deteriorate into coherence or execution-quality failures on the same side
 - feature freshness or coverage fails
 - the next qualified reliability run fails promotion or model-shift guards
 
-## 9. 8h Operating Stance
+## 9. Dormant 8h Config State
 
-The repository does not currently use a blanket `8h` suppression rule.
-
-What was learned from prior hardening attempts:
-
-- direct `8h` suppression can remove weak `8h` trades
-- but it can also reroute flow into weaker replacements and degrade the covered aggregate
-
-What is active now:
-
-- keep `8h` enabled
-- underweight it through profile-level risk controls
-- use scoped horizon and regime overrides rather than blanket routing changes
-- continue collecting covered evidence before making another structural `8h` policy change
-
-Supporting covered operator-caution slice:
-
-- `11` trades
-- average signed return proxy `-0.004160029236862267`
-- `8h` longs: `7` trades, average `-0.005096512073318341`
-- `8h` shorts: `4` trades, average `-0.0025211842730641365`
+The checked-in live conservative config still carries some `8h` sizing and regime overrides, but the default direct live wrapper does not emit `8h` because its default target set is `0.25,1,4,12`.
 
 Operational consequence:
 
-- keep `8h` enabled but underweighted
-- respect the `0.20` `8h` cap even when `8h` is the current ready horizon
-- do not manually upsize or replace a blocked `12h` setup just because `8h` is active
+- do not treat `8h` as part of the approved direct live wrapper decision surface unless you intentionally bypass the wrapper defaults
+- if a separate research or comparison path emits `8h`, treat that as outside the narrow live checklist unless a new rollout decision explicitly re-approves it

@@ -1,5 +1,9 @@
 # Live Operator Checklist
 
+Status: Current operator checklist for direct live-style refreshes.
+
+Use this with `README.md` and `docs/operations_runbook.md` for the current operating surface.
+
 This is the shortest operator path for the approved conservative live-style profile in the current workspace.
 
 Approved profile:
@@ -45,7 +49,8 @@ Before each live-style refresh:
 
 Current runtime note:
 
-- market preparation may attempt best-effort macro and on-chain local refreshes during a fresh rebuild
+- market preparation may attempt best-effort derivatives, macro, and on-chain local refreshes during a fresh rebuild
+- the approved live profile ignores stale `funding`, `macro`, and `onchain` sources in its feature-coverage gate, so auxiliary lag alone should not block the live wrapper path
 - those support local feature assembly, but they are not the operator-facing source of truth for a live decision
 
 ## 3. Run Command
@@ -67,6 +72,7 @@ Current wrapper behavior:
 
 - defaults `--targets` to `0.25,1,4,12`
 - defaults `--hours` to `360`
+- automatically forwards `--intrabar-enabled` when `0.25` is present in the target set
 - writes trade-ready artifacts unless `--no-write-artifacts` is supplied
 - replay-offset validation is hourly-only by runtime contract, so replay sign-off uses `1h,4h,12h` even though wrapper output still includes `15m` telemetry
 
@@ -90,6 +96,7 @@ All of these should still hold before acting on the output:
    - `1h = 0.15`
    - `4h = 0.35`
    - `12h = 0.35`
+  - ignore dormant `8h` cap settings in the config when the direct live wrapper path is used, because `8h` is not emitted by that wrapper
 4. the preferred horizon and recommended action from `prompt_ready_summary.operator_summary_compact` match the conclusion you intend to act on
 5. the chosen horizon is not blocked by `forecast_coherence`, `abstention`, or execution-plan rejection reasons that contradict the trade thesis
 
@@ -136,8 +143,9 @@ For each live session, log:
 1. run timestamp
 2. chosen profile
 3. preferred horizon
-4. execution status and reason for `4h`, `8h`, and `12h`
-  - log `8h` as telemetry-only / not in live decision path when present in non-live profiles
+4. execution status and reason for `15m`, `1h`, `4h`, and `12h`
+  - log `15m` as informational-only and `1h` as context-sized unless one of them becomes the active operator focus in the emitted snapshot
+  - log `8h` only when reviewing non-wrapper research or comparison profiles
 5. whether the operator waited, entered, reduced risk, or paused
 
 If a discretionary override is made, log the exact reason and why it overrode the default checklist.

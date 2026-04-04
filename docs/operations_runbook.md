@@ -56,6 +56,10 @@ Optional explicit live config:
   --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
 ```
 
+Current wrapper note:
+
+- when `0.25` is in the target set, `src.scripts.run_live_inference` automatically forwards `--intrabar-enabled`
+
 ### Reliability Workflow
 
 Runtime profile:
@@ -183,17 +187,22 @@ Use the profile that matches the task.
 - `configs/run_refresh_and_predict.default.yaml`: trusted research/comparison baseline
 - `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved live-style profile
 - `configs/run_refresh_and_predict.live_conservative.yaml`: backward-compatible alias
+- `configs/run_refresh_and_predict.research_safe.yaml`: research fallback that keeps the default stack but downgrades feature-coverage violations from hard-fail to warning
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: cadence daily profile
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: shadow comparison left-hand profile
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: shadow comparison right-hand profile
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`: shadow-only stricter abstention profile
 
-Current live-style size caps in the approved Binance-only profile:
+Current wrapper-emitted live-style size caps in the approved Binance-only profile:
 
 - `15m = 0.0`
 - `1h = 0.15`
 - `4h = 0.35`
 - `12h = 0.35`
+
+Current config note:
+
+- the live conservative config still contains some dormant `8h` controls, but the direct live wrapper does not emit `8h` because its default targets are `0.25,1,4,12`
 
 ## 6. Minimum Checks Before Trusting A Runtime Snapshot
 
@@ -332,12 +341,15 @@ Fresh local rebuild paths currently attempt:
 
 - spot ingestion
 - intrabar aggregation when enabled
+- best-effort derivatives refresh
 - best-effort macro refresh
 - best-effort on-chain refresh
 - local feature-bundle preparation for inference override
 
 Useful local support outputs:
 
+- `data/processed/funding/hourly_features.parquet`
+- `data/processed/funding/source_manifest.json`
 - `data/processed/macro/daily_features.parquet`
 - `data/processed/macro/source_manifest.json`
 - `data/processed/onchain/hourly_features.parquet`
@@ -347,12 +359,28 @@ Useful local support outputs:
 
 These are working-state files, not operator authorization artifacts.
 
-Current feature-coverage gate scope in the default live profile:
+Current feature-coverage gate scope in the approved live profile:
 
 - stale-source blocking applies to core live inputs (spot/features/technical)
-- macro and on-chain staleness are treated as best-effort support inputs and are excluded from stale-source blocking
+- `funding`, `macro`, and `onchain` are treated as best-effort support inputs and are excluded from stale-source blocking
 
-## 11. Troubleshooting
+## 11. Agent Audit Workflow
+
+When an agent needs to inspect the system the way an operator would, use this sequence before inventing new entry points:
+
+1. `python -m src.scripts.run_research_refresh --config configs/run_refresh_and_predict.default.yaml` for the standard research path
+2. `python -m src.scripts.run_research_refresh --config configs/run_refresh_and_predict.research_safe.yaml` only when remaining feature-coverage violations should warn instead of aborting
+3. `python -m src.scripts.run_live_inference` for the constrained live path
+4. `python -m src.scripts.audit_train_live_feature_parity` to compare checked training metadata with live-enforced feature families
+5. `python -m src.scripts.simulate_macro_shadow_enforcement` and `python -m src.scripts.simulate_state_orderflow_shadow_enforcement` for shadow-policy sweeps
+6. `python -m src.scripts.confirm_state_orderflow_outcomes`, `python -m src.scripts.confirm_orderflow_two_window_stability`, `python -m src.scripts.confirm_orderflow_rolling_stability`, and `python -m src.scripts.confirm_state_engineering_narrow_scope` for follow-up confirmation
+7. `python -m src.scripts.run_state_engineering_guarded_shadow` and `python -m src.scripts.summarize_signal_program_status` for guarded-shadow and program-status summaries
+
+Current discipline:
+
+- treat those audit and confirmation scripts as analysis-only unless a separate promotion decision changes a runtime config or wrapper
+
+## 12. Troubleshooting
 
 1. If `scripts/run_cadence.sh` cannot find a trustworthy run, restore cadence artifacts first. The shell wrapper depends on local `artifacts/reliability/*` state.
 2. If `.venv` is unavailable, set `PYTHON_BIN=python` when invoking the cadence shell wrapper.
@@ -360,7 +388,7 @@ Current feature-coverage gate scope in the default live profile:
 4. `--replay-offset-bars` is hourly-only and incompatible with `--use-local-features`.
 5. Keep scratch validation and replay work under `artifacts/tmp_validation/`.
 
-## 12. Trust Hardening Rollback Criteria
+## 13. Trust Hardening Rollback Criteria
 
 Use rollback only when trust metadata plumbing is unstable or causes repeated operator-unsafe ambiguity.
 
@@ -380,7 +408,7 @@ Post-rollback requirement:
 
 1. capture one clean run where expected trust telemetry appears and no metadata-missing reason is present before restoring fail-closed
 
-## 13. Minimal Safe Handoff Path
+## 14. Minimal Safe Handoff Path
 
 Read in this order:
 

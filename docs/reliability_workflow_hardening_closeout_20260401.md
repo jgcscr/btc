@@ -1,5 +1,9 @@
 # Reliability Workflow Hardening Closeout 2026-04-01
 
+Status: Historical closeout note.
+
+Do not use this as the primary operating reference. For current commands and runtime behavior, use `README.md`, `docs/operations_runbook.md`, `docs/live_operator_checklist_20260320.md`, and `docs/agent_system_handoff_20260320.md`.
+
 This note captures the repo changes that closed the April 1 reliability-workflow blockers and aligned runtime behavior with the validated 1h policy.
 
 ## Summary

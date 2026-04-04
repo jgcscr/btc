@@ -1,5 +1,9 @@
 # Macro Context Rollout 2026-03-29
 
+Status: Historical rollout memo.
+
+Do not use this as the primary operating reference. For current commands and runtime behavior, use `README.md`, `docs/operations_runbook.md`, `docs/live_operator_checklist_20260320.md`, and `docs/agent_system_handoff_20260320.md`.
+
 This note closes out the free macro-context rollout for dollar strength, US10Y, and EUR/USD.
 
 ## 1. Source Recommendation

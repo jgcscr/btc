@@ -1,5 +1,9 @@
 # Trust Hardening Rollout Closeout (2026-04-03)
 
+Status: Historical closeout note with still-useful validation context.
+
+Use this for rollout rationale and audit background only. For current commands and live operating behavior, use `README.md`, `docs/operations_runbook.md`, `docs/live_operator_checklist_20260320.md`, and `docs/agent_system_handoff_20260320.md` first.
+
 ## 1. Final Decision
 
 - Decision: GO for default live wrapper path.

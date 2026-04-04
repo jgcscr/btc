@@ -63,6 +63,7 @@ The live wrapper constrains the CLI surface intentionally:
 
 - default config: `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`
 - default targets: `0.25,1,4,12`
+- automatically forwards `--intrabar-enabled` when `0.25` is present in the target set
 - supported provider: `binanceus`
 - writes trade-ready artifacts unless `--no-write-artifacts` is supplied
 
@@ -201,12 +202,16 @@ The important runtime configs are:
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: shadow comparison right-hand profile
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`: additional shadow-only diagnostic profile
 
-Current live-style sizing caps from `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`:
+Current wrapper-emitted live-style sizing caps from `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`:
 
 - `15m = 0.0`
 - `1h = 0.15`
 - `4h = 0.35`
 - `12h = 0.35`
+
+Current config note:
+
+- the live conservative config still contains some legacy `8h` sizing and regime overrides, but the direct live wrapper does not emit `8h` because its default target set is `0.25,1,4,12`
 
 ## Cadence Operations
 
@@ -317,21 +322,23 @@ Current replay rules enforced in code:
   --continue-on-promotion-fail
 ```
 
-### Refresh Macro And On-Chain Bundles
+### Refresh Derivatives, Macro, And On-Chain Bundles
 
 ```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.refresh_derivatives_features
 /workspaces/btc/.venv/bin/python -m src.scripts.refresh_macro_features --full-refresh
 /workspaces/btc/.venv/bin/python -m src.scripts.refresh_onchain_features --full-refresh
 ```
 
 Those write local support bundles under:
 
+- `data/processed/funding/`
 - `data/processed/macro/`
 - `data/processed/onchain/`
 
 Current runtime note:
 
-- fresh local rebuild paths attempt best-effort macro and on-chain refreshes during market preparation
+- fresh local rebuild paths attempt best-effort derivatives, macro, and on-chain refreshes during market preparation
 - those enrich local feature bundles but are not the operator-facing source of truth for trade decisions
 
 ## Training, Validation, And Analysis Surface
@@ -345,6 +352,24 @@ Useful categories:
 - search/tuning: `search_*`, `tune_joint_signal_thresholds.py`
 - reliability evaluators: `evaluate_*`, `compare_walkforward_models.py`
 - audits and diagnostics: `audit_*`, `analyze_*`, `compare_*`, `summarize_*`
+
+Current analysis-only audit and shadow-validation helpers for agents:
+
+- `src.scripts.audit_train_live_feature_parity`: train/live feature-family parity audit for the approved live profile
+- `src.scripts.simulate_macro_shadow_enforcement`: macro shadow policy replay sweep
+- `src.scripts.simulate_state_orderflow_shadow_enforcement`: state-engineering and order-flow shadow policy replay sweep
+- `src.scripts.confirm_state_orderflow_outcomes`: realized-outcome confirmation for top state/order-flow variants
+- `src.scripts.confirm_orderflow_two_window_stability`: non-overlapping two-window readiness check for order-flow variants
+- `src.scripts.confirm_orderflow_rolling_stability`: rolling-window stability diagnosis for order-flow variants
+- `src.scripts.confirm_state_engineering_narrow_scope`: narrow-scope follow-up for state-engineering variants
+- `src.scripts.run_state_engineering_guarded_shadow`: guarded `4h`-only state-engineering shadow validation
+- `src.scripts.summarize_signal_program_status`: current macro/order-flow/state-engineering disposition summary plus derivatives audit
+- `src.scripts.prepare_derivatives_shadow_validation`: derivatives-family readiness and scaffold generation
+- `src.scripts.refresh_derivatives_features`: local Binance Futures-derived feature refresh
+
+Agent note:
+
+- these scripts are audit and shadow-analysis helpers; they do not change the live execution path unless a separate config or wrapper is intentionally promoted
 
 For the model-building surface, also read:
 
