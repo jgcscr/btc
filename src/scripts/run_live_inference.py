@@ -11,6 +11,19 @@ DEFAULT_LIVE_CONFIG = "configs/run_refresh_and_predict.live_conservative_binance
 DEFAULT_TARGETS = "0.25,1,4,12"
 
 
+def _targets_include_intrabar(targets: str) -> bool:
+    for raw_target in str(targets).split(","):
+        value = raw_target.strip()
+        if not value:
+            continue
+        try:
+            if abs(float(value) - 0.25) < 1e-9:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the production-facing live inference path with a constrained option surface.",
@@ -61,6 +74,8 @@ def _forwarded_argv(args: argparse.Namespace) -> list[str]:
         "--spot-provider",
         str(args.spot_provider),
     ]
+    if _targets_include_intrabar(args.targets):
+        forwarded.append("--intrabar-enabled")
     if args.disable_monitoring_latest:
         forwarded.append("--disable-monitoring-latest")
     if not args.no_write_artifacts:

@@ -192,9 +192,10 @@ Read these first after a reliability run:
 
 The important runtime configs are:
 
-- `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline
-- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved constrained live-style profile
+- `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline; now ignores stale `funding`, `macro`, and `onchain` sources plus approved derived zero-impute columns in the feature coverage gate so fresh spot-driven research refreshes do not fail on auxiliary lag alone
+- `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved constrained live-style profile; its feature coverage gate ignores stale `funding`, `macro`, and `onchain` sources so it can continue when those auxiliary bundles lag behind fresh spot data
 - `configs/run_refresh_and_predict.live_conservative.yaml`: backward-compatible legacy-equivalent alias
+- `configs/run_refresh_and_predict.research_safe.yaml`: research fallback profile that keeps the same baseline modeling stack as `default` but downgrades feature coverage violations from hard-fail to warning
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: cadence daily refresh profile
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: shadow comparison left-hand profile
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: shadow comparison right-hand profile
@@ -254,12 +255,32 @@ Current GitHub Actions behavior from `.github/workflows/cadence.yml`:
   --targets 0.25,1,4,8,12
 ```
 
+Current operator note:
+
+- this profile still fails closed on remaining feature coverage violations, but stale auxiliary `funding`, `macro`, and `onchain` lag alone no longer blocks the refresh
+
+### Research-Safe Refresh
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_research_refresh \
+  --config configs/run_refresh_and_predict.research_safe.yaml \
+  --targets 0.25,1,4,8,12
+```
+
+Current operator note:
+
+- this profile keeps the default research stack but sets `feature_coverage_policy.block_on_violation: false`, so coverage failures are surfaced as warnings and the run falls back instead of aborting
+
 ### Conservative Live Refresh
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_live_inference \
   --config configs/run_refresh_and_predict.live_conservative_binance_only.yaml
 ```
+
+Current operator note:
+
+- this conservative profile ignores stale `funding`, `macro`, and `onchain` sources in `feature_coverage_policy`, so it is the safer fallback when you need trade-ready artifacts from fresh spot data during auxiliary bundle lag
 
 ### Refresh Against A Specific Reliability Run
 

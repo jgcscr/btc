@@ -111,7 +111,7 @@ feature_coverage_policy:
   max_imputed_zero_columns: 12
   max_imputed_zero_ratio: 0.2
   max_source_lag_hours: 6.0
-  block_on_violation: true
+  block_on_violation: false
   ignored_sources: [funding, macro, onchain]
   ignored_columns:
     - funding_rate

@@ -24,6 +24,15 @@ from data.processed.compute_technical_features import process_technical_features
 from src.scripts.build_training_dataset import main as build_1h_dataset
 from src.scripts.build_training_dataset_15m import main as build_15m_dataset
 from src.scripts.build_training_dataset_multi_horizon import build_multi_horizon_dataset
+from src.data.derivatives_loader import (
+    DEFAULT_DERIVATIVES_METADATA_PATH,
+    DEFAULT_DERIVATIVES_OUTPUT_PATH,
+    build_derivatives_feature_frame,
+    build_derivatives_source_manifest,
+    load_derivatives_features,
+    resolve_incremental_start_timestamp as resolve_derivatives_incremental_start_timestamp,
+    write_derivatives_source_manifest,
+)
 from src.scripts.build_signal_baseline import (
     DEFAULT_COLUMNS as BASELINE_DEFAULT_COLUMNS,
     _append_detected_meta_columns,
@@ -2891,6 +2900,27 @@ def run_feature_builders(price_source: Path | None = None) -> Dict[str, str]:
     print("Recomputing technical indicator features...")
     technical_path = process_technical_features(price_source=price_source, include_history=True)
     results["technical"] = str(technical_path)
+
+    try:
+        existing_derivatives = load_derivatives_features(DEFAULT_DERIVATIVES_OUTPUT_PATH) if DEFAULT_DERIVATIVES_OUTPUT_PATH.exists() else None
+        derivatives_start = resolve_derivatives_incremental_start_timestamp(existing_derivatives)
+        derivatives_frame = build_derivatives_feature_frame(
+            start_ts=derivatives_start,
+            existing=existing_derivatives,
+        )
+        if derivatives_frame.empty:
+            raise RuntimeError("Binance futures refresh returned no usable rows.")
+        DEFAULT_DERIVATIVES_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        derivatives_frame.to_parquet(DEFAULT_DERIVATIVES_OUTPUT_PATH, index=False)
+        derivatives_manifest = build_derivatives_source_manifest(
+            derivatives_frame,
+            start_ts=derivatives_start,
+        )
+        write_derivatives_source_manifest(DEFAULT_DERIVATIVES_METADATA_PATH, derivatives_manifest)
+        results["funding"] = str(DEFAULT_DERIVATIVES_OUTPUT_PATH)
+        print(f"Refreshed derivatives features at {DEFAULT_DERIVATIVES_OUTPUT_PATH}")
+    except Exception as exc:
+        print(f"Warning: derivatives feature refresh failed: {exc}", file=sys.stderr)
 
     try:
         existing_macro = load_macro_features(DEFAULT_MACRO_OUTPUT_PATH) if DEFAULT_MACRO_OUTPUT_PATH.exists() else None

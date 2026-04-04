@@ -197,6 +197,7 @@ def _run_refresh_stages(args: argparse.Namespace) -> float | None:
                     key: value
                     for key, value in {
                         "technical": technical_features_path,
+                        "funding": feature_build_results.get("funding"),
                         "macro": feature_build_results.get("macro"),
                         "onchain": feature_build_results.get("onchain"),
                         "intrabar": intrabar_features_path,
