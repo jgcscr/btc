@@ -200,6 +200,33 @@ def augment_hourly_price_features(
         result["interaction_momentum_volatility_4h"] = (result["momentum_slope_4h"] * result.get("range_compression_ratio_4h_24h", 0.0)).fillna(0.0)
         result["interaction_breakout_volume_8h"] = (result["range_expansion_1h"] * result.get("volume_regime_zscore_24h", 0.0)).fillna(0.0)
         result["interaction_imbalance_trend_6h"] = (result.get("cvd_ratio_6h", 0.0) * result["momentum_slope_4h"]).fillna(0.0)
+        result["trend_regime_strength_4h"] = (
+            result["trend_path_efficiency_4h"] * result["trend_directional_persistence_4h"]
+        ).fillna(0.0).clip(0.0, 1.0)
+        result["trend_regime_strength_8h"] = (
+            result["trend_path_efficiency_8h"] * result["trend_directional_persistence_8h"]
+        ).fillna(0.0).clip(0.0, 1.0)
+        compression_proxy = (1.0 / (1.0 + result["range_compression_ratio_4h_24h"].clip(lower=0.0))).fillna(0.0)
+        result["chop_regime_intensity_4h"] = (
+            (1.0 - result["trend_directional_persistence_4h"]) *
+            (1.0 - result["trend_path_efficiency_4h"]) *
+            compression_proxy
+        ).fillna(0.0).clip(0.0, 1.0)
+        result["regime_persistence_delta_8h_4h"] = (
+            result["trend_directional_persistence_8h"] - result["trend_directional_persistence_4h"]
+        ).fillna(0.0).clip(-1.0, 1.0)
+        result["interaction_regime_volatility_4h"] = (
+            result["trend_regime_strength_4h"] * result["range_expansion_1h"]
+        ).fillna(0.0).clip(0.0, 10.0)
+        result["interaction_regime_flow_6h"] = (
+            result["trend_directional_persistence_4h"] * result.get("cvd_ratio_6h", 0.0)
+        ).fillna(0.0).clip(-1.0, 1.0)
+        result["interaction_chop_volatility_4h"] = (
+            result["chop_regime_intensity_4h"] * result["range_expansion_1h"]
+        ).fillna(0.0).clip(0.0, 10.0)
+        result["interaction_regime_location_8h"] = (
+            result["trend_regime_strength_8h"] * result.get("vwap_deviation_8h", 0.0)
+        ).fillna(0.0).clip(-1.0, 1.0)
     elif strict_missing:
         missing = ", ".join(sorted(required_liquidity - set(result.columns)))
         raise ValueError(f"Cannot compute liquidity features; missing OHLC columns: {missing}.")
@@ -237,6 +264,14 @@ def augment_hourly_price_features(
             "interaction_momentum_volatility_4h",
             "interaction_breakout_volume_8h",
             "interaction_imbalance_trend_6h",
+            "trend_regime_strength_4h",
+            "trend_regime_strength_8h",
+            "chop_regime_intensity_4h",
+            "regime_persistence_delta_8h_4h",
+            "interaction_regime_volatility_4h",
+            "interaction_regime_flow_6h",
+            "interaction_chop_volatility_4h",
+            "interaction_regime_location_8h",
         ):
             if column not in result.columns:
                 result[column] = 0.0

@@ -168,6 +168,8 @@ from src.runtime.policy_support import (
     normalize_threshold_overrides as runtime_normalize_threshold_overrides,
     resolve_confidence_min_for_horizon as runtime_resolve_confidence_min_for_horizon,
     resolve_direction_ensemble_policy as runtime_resolve_direction_ensemble_policy,
+    resolve_regression_dir_path as runtime_resolve_regression_dir_path,
+    resolve_regression_model_dirs_policy as runtime_resolve_regression_model_dirs_policy,
     resolve_regime_model_dirs_policy as runtime_resolve_regime_model_dirs_policy,
     resolve_regime_model_weights_policy as runtime_resolve_regime_model_weights_policy,
     resolve_regime_specific_dir_path as runtime_resolve_regime_specific_dir_path,
@@ -188,6 +190,7 @@ from src.runtime.config_normalization_support import (
     normalize_feature_coverage_policy_block as runtime_normalize_feature_coverage_policy_block,
     normalize_forecast_coherence_policy_block as runtime_normalize_forecast_coherence_policy_block,
     normalize_intrabar_aggregation_block as runtime_normalize_intrabar_aggregation_block,
+    normalize_regression_model_dirs_block as runtime_normalize_regression_model_dirs_block,
     normalize_regime_model_dirs_block as runtime_normalize_regime_model_dirs_block,
     normalize_regime_model_weights_block as runtime_normalize_regime_model_weights_block,
     normalize_target_range_block as runtime_normalize_target_range_block,
@@ -376,6 +379,7 @@ CONFIG_ALLOWED_KEYS = {
     "trade_decision_policy",
     "regime_model_weights",
     "regime_model_dirs",
+    "regression_model_dirs",
     "intrabar_aggregation",
     "feature_coverage_policy",
     "confluence_policy",
@@ -505,6 +509,13 @@ def _normalize_regime_model_dirs_block(value: Mapping[str, Any]) -> Dict[str, An
     return runtime_normalize_regime_model_dirs_block(
         value,
         regimes=(REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP),
+        stderr_write=sys.stderr.write,
+    )
+
+
+def _normalize_regression_model_dirs_block(value: Mapping[str, Any]) -> Dict[str, Any]:
+    return runtime_normalize_regression_model_dirs_block(
+        value,
         stderr_write=sys.stderr.write,
     )
 
@@ -2642,6 +2653,10 @@ def _resolve_regime_model_dirs_policy(config: Mapping[str, Any] | None) -> Dict[
     )
 
 
+def _resolve_regression_model_dirs_policy(config: Mapping[str, Any] | None) -> Dict[str, Any]:
+    return runtime_resolve_regression_model_dirs_policy(config)
+
+
 def _resolve_regime_specific_dir_path(
     default_path: Path,
     *,
@@ -2655,6 +2670,23 @@ def _resolve_regime_specific_dir_path(
         horizon_label=horizon_label,
         policy=policy,
         expected_filename=f"xgb_dir{horizon_label}_model.json",
+        version_priority=MODEL_VERSION_PRIORITY,
+        resolve_best_versioned_model_file=resolve_best_versioned_model_file,
+        stderr_write=sys.stderr.write,
+    )
+
+
+def _resolve_regression_dir_path(
+    default_path: Path,
+    *,
+    horizon_label: str,
+    policy: Mapping[str, Any],
+) -> Path:
+    return runtime_resolve_regression_dir_path(
+        default_path,
+        horizon_label=horizon_label,
+        policy=policy,
+        expected_filename=f"xgb_ret{horizon_label}_model.json",
         version_priority=MODEL_VERSION_PRIORITY,
         resolve_best_versioned_model_file=resolve_best_versioned_model_file,
         stderr_write=sys.stderr.write,
@@ -3268,6 +3300,7 @@ def run_predictions(
     trade_decision_policy: Mapping[str, Any] | None = None,
     regime_model_weights: Mapping[str, Any] | None = None,
     regime_model_dirs: Mapping[str, Any] | None = None,
+    regression_model_dirs: Mapping[str, Any] | None = None,
     confluence_policy: Mapping[str, Any] | None = None,
     execution_policy: Mapping[str, Any] | None = None,
     forecast_coherence_policy: Mapping[str, Any] | None = None,
@@ -3310,6 +3343,7 @@ def run_predictions(
         trade_decision_policy=trade_decision_policy,
         regime_model_weights=regime_model_weights,
         regime_model_dirs=regime_model_dirs,
+        regression_model_dirs=regression_model_dirs,
         confluence_policy=confluence_policy,
         execution_policy=execution_policy,
         forecast_coherence_policy=forecast_coherence_policy,
@@ -3342,6 +3376,7 @@ def run_predictions(
         resolve_trade_decision_policy=_resolve_trade_decision_policy,
         resolve_regime_model_weights_policy=_resolve_regime_model_weights_policy,
         resolve_regime_model_dirs_policy=_resolve_regime_model_dirs_policy,
+        resolve_regression_model_dirs_policy=_resolve_regression_model_dirs_policy,
         resolve_confluence_policy=_resolve_confluence_policy,
         resolve_execution_policy=_resolve_execution_policy,
         resolve_forecast_coherence_policy=_resolve_forecast_coherence_policy,
@@ -3354,6 +3389,7 @@ def run_predictions(
         model_paths_for_horizon=_model_paths_for_horizon,
         classify_regime_from_score=_classify_regime_from_score,
         resolve_regime_specific_dir_path=_resolve_regime_specific_dir_path,
+        resolve_regression_dir_path=_resolve_regression_dir_path,
         direction_configs_for_horizon=_direction_configs_for_horizon,
         resolve_thresholds_for_horizon=_resolve_thresholds_for_horizon,
         apply_adaptive_thresholds=_apply_adaptive_thresholds,

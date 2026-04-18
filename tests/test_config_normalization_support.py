@@ -59,6 +59,7 @@ def _normalize(name, value):
             "direction_output_policy",
             "direction_ensemble_policy",
             "execution_policy",
+            "regression_model_dirs",
             "trust_hardening_policy",
             "position_size_cap_by_horizon",
             "confidence_min_by_horizon_regime",
@@ -178,6 +179,21 @@ def test_normalize_trade_decision_policy_preserves_nested_veto_blocks() -> None:
         "min_abs_ret_pred": None,
         "max_abs_ret_pred": None,
         "regime_states": ["chop", "neutral"],
+    }
+
+
+def test_normalize_regression_model_dirs_preserves_enabled_and_paths() -> None:
+    normalized = _normalize(
+        "regression_model_dirs",
+        {
+            "enabled": True,
+            "4h": "artifacts/models/featurelift_20260331_rerun/xgb_ret4h",
+        },
+    )
+
+    assert normalized == {
+        "enabled": True,
+        "4h": "artifacts/models/featurelift_20260331_rerun/xgb_ret4h",
     }
 
 

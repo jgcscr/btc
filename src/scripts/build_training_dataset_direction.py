@@ -27,6 +27,10 @@ from src.trading.volatility import (
 )
 from src.data.macro_loader import MACRO_FEATURE_COLUMNS
 from src.data.onchain_loader import ONCHAIN_FEATURE_COLUMNS
+from src.data.source_parity import (
+    drop_unready_source_family_features,
+    evaluate_source_family_readiness,
+)
 
 
 PROCESSED_PATHS = [
@@ -73,6 +77,16 @@ CORE_MODEL_FEATURES = [
     "vwap_deviation_8h",
     "momentum_slope_2h",
     "momentum_slope_4h",
+    "intrabar_realized_vol_15m",
+    "intrabar_return_dispersion_15m",
+    "intrabar_path_range",
+    "intrabar_path_efficiency_1h",
+    "intrabar_taker_imbalance_mean",
+    "intrabar_taker_imbalance_persistence",
+    "intrabar_directional_persistence_1h",
+    "intrabar_vol_term_structure_6h_24h",
+    "intrabar_volume_regime_zscore_24h",
+    "intrabar_flow_acceleration_3h",
     *MACRO_FEATURE_COLUMNS,
     *ONCHAIN_FEATURE_COLUMNS,
 ]
@@ -450,10 +464,17 @@ def prepare_direction_feature_frame(
         target_horizon=1.0,
     )
     allowed_features = [feature for feature in allowed_features if feature not in {col for col in allowed_features if col in df.columns and df[col].notna().sum() == 0}]
+    source_family_parity = evaluate_source_family_readiness(df)
+    allowed_features, dropped_source_family_features = drop_unready_source_family_features(
+        allowed_features,
+        source_family_parity,
+    )
 
     if allowed_features:
         df = _enforce_feature_coverage(df, allowed_features)
 
+    df.attrs["source_family_parity"] = source_family_parity
+    df.attrs["dropped_source_family_features"] = dropped_source_family_features
     return df, allowed_features, sorted(volatility_columns)
 
 
@@ -609,6 +630,8 @@ def build_direction_splits(
             "mean_key": "scaler_mean",
             "scale_key": "scaler_scale",
         },
+        "source_family_parity": df.attrs.get("source_family_parity", {}),
+        "dropped_source_family_features": df.attrs.get("dropped_source_family_features", {}),
         "ts_range": _describe(ts_values),
         "splits": {
             "train": _describe(ts_train),

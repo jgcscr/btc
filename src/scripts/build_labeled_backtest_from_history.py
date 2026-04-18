@@ -26,6 +26,113 @@ def _parse_horizon_hours(horizon: str) -> float:
     return float(value)
 
 
+def _direction_from_prediction(payload: Dict[str, object]) -> str:
+    for key in ("direction_next_display", "direction_next"):
+        value = str(payload.get(key, "")).strip().lower()
+        if value in {"up", "down", "neutral"}:
+            return value
+
+    p_up = pd.to_numeric(payload.get("p_up"), errors="coerce")
+    if pd.notna(p_up):
+        if float(p_up) >= 0.52:
+            return "up"
+        if float(p_up) <= 0.48:
+            return "down"
+
+    ret_pred = pd.to_numeric(payload.get("ret_pred"), errors="coerce")
+    if pd.notna(ret_pred):
+        if float(ret_pred) > 0.0:
+            return "up"
+        if float(ret_pred) < 0.0:
+            return "down"
+    return "neutral"
+
+
+def _cross_horizon_context(predictions: Dict[str, object], current_horizon: str) -> Dict[str, float]:
+    rows: List[Dict[str, float | str]] = []
+    for horizon, value in predictions.items():
+        if not isinstance(value, dict):
+            continue
+        try:
+            hours = _parse_horizon_hours(str(horizon))
+        except Exception:
+            continue
+        rows.append(
+            {
+                "horizon": _format_horizon_label(hours),
+                "hours": float(hours),
+                "p_up": float(pd.to_numeric(value.get("p_up"), errors="coerce")) if pd.notna(pd.to_numeric(value.get("p_up"), errors="coerce")) else float("nan"),
+                "ret_pred": float(pd.to_numeric(value.get("ret_pred"), errors="coerce")) if pd.notna(pd.to_numeric(value.get("ret_pred"), errors="coerce")) else float("nan"),
+                "direction": _direction_from_prediction(value),
+            }
+        )
+
+    if not rows:
+        return {
+            "horizon_consensus_support_ratio": 0.0,
+            "horizon_directional_agreement_ratio": 0.0,
+            "horizon_directional_disagreement_count": 0.0,
+            "horizon_short_term_alignment_ratio": 0.0,
+            "horizon_mid_term_alignment_ratio": 0.0,
+            "horizon_weighted_p_up": 0.0,
+            "horizon_weighted_ret_pred": 0.0,
+            "horizon_p_up_dispersion": 0.0,
+            "horizon_bias_conflict": 0.0,
+        }
+
+    current_label = _format_horizon_label(_parse_horizon_hours(current_horizon))
+    current_row = next((row for row in rows if row["horizon"] == current_label), None)
+    current_direction = str(current_row["direction"]) if current_row is not None else "neutral"
+    directional = [row for row in rows if row["direction"] in {"up", "down"}]
+    up_count = sum(1 for row in directional if row["direction"] == "up")
+    down_count = sum(1 for row in directional if row["direction"] == "down")
+    directional_count = len(directional)
+    agreement_count = sum(1 for row in directional if row["direction"] == current_direction) if current_direction in {"up", "down"} else 0
+
+    short_rows = [row for row in directional if float(row["hours"]) <= 1.0]
+    mid_rows = [row for row in directional if float(row["hours"]) >= 4.0]
+    short_agreement = sum(1 for row in short_rows if row["direction"] == current_direction) if short_rows and current_direction in {"up", "down"} else 0
+    mid_agreement = sum(1 for row in mid_rows if row["direction"] == current_direction) if mid_rows and current_direction in {"up", "down"} else 0
+
+    valid_p_up = [(float(row["hours"]), float(row["p_up"])) for row in rows if pd.notna(row["p_up"])]
+    valid_ret_pred = [(float(row["hours"]), float(row["ret_pred"])) for row in rows if pd.notna(row["ret_pred"])]
+    weighted_p_up = 0.0
+    if valid_p_up:
+        weight_sum = sum(weight for weight, _ in valid_p_up)
+        weighted_p_up = sum(weight * value for weight, value in valid_p_up) / weight_sum if weight_sum > 0.0 else 0.0
+    weighted_ret_pred = 0.0
+    if valid_ret_pred:
+        weight_sum = sum(weight for weight, _ in valid_ret_pred)
+        weighted_ret_pred = sum(weight * value for weight, value in valid_ret_pred) / weight_sum if weight_sum > 0.0 else 0.0
+    p_up_dispersion = 0.0
+    if valid_p_up:
+        p_values = [value for _, value in valid_p_up]
+        p_up_dispersion = max(p_values) - min(p_values)
+
+    short_direction = "neutral"
+    if short_rows:
+        short_up = sum(1 for row in short_rows if row["direction"] == "up")
+        short_down = sum(1 for row in short_rows if row["direction"] == "down")
+        short_direction = "up" if short_up > short_down else "down" if short_down > short_up else "neutral"
+    mid_direction = "neutral"
+    if mid_rows:
+        mid_up = sum(1 for row in mid_rows if row["direction"] == "up")
+        mid_down = sum(1 for row in mid_rows if row["direction"] == "down")
+        mid_direction = "up" if mid_up > mid_down else "down" if mid_down > mid_up else "neutral"
+
+    return {
+        "horizon_consensus_support_ratio": float(max(up_count, down_count) / directional_count) if directional_count else 0.0,
+        "horizon_directional_agreement_ratio": float(agreement_count / directional_count) if directional_count else 0.0,
+        "horizon_directional_disagreement_count": float(max(directional_count - agreement_count, 0)),
+        "horizon_short_term_alignment_ratio": float(short_agreement / len(short_rows)) if short_rows else 0.0,
+        "horizon_mid_term_alignment_ratio": float(mid_agreement / len(mid_rows)) if mid_rows else 0.0,
+        "horizon_weighted_p_up": float(weighted_p_up),
+        "horizon_weighted_ret_pred": float(weighted_ret_pred),
+        "horizon_p_up_dispersion": float(p_up_dispersion),
+        "horizon_bias_conflict": float(short_direction in {"up", "down"} and mid_direction in {"up", "down"} and short_direction != mid_direction),
+    }
+
+
 def _realized_column_names(horizon: str) -> Tuple[str, str]:
     label = _format_horizon_label(_parse_horizon_hours(horizon))
     return (f"close_next_{label}", f"ret_{label}_realized")
@@ -100,6 +207,7 @@ def _load_history_rows(
             "expected_value": horizon_pred.get("expected_value"),
             "regime_state": horizon_pred.get("regime_state"),
         }
+        row.update(_cross_horizon_context(predictions if isinstance(predictions, dict) else {}, horizon))
         volatility = horizon_pred.get("volatility", {})
         if isinstance(volatility, dict):
             snapshot = volatility.get("snapshot", {})
@@ -244,6 +352,15 @@ def _enrich_with_history_decision_features(
         "volatility_realized_24h",
         "volatility_ewm_24h",
         "volatility_garch_like",
+        "horizon_consensus_support_ratio",
+        "horizon_directional_agreement_ratio",
+        "horizon_directional_disagreement_count",
+        "horizon_short_term_alignment_ratio",
+        "horizon_mid_term_alignment_ratio",
+        "horizon_weighted_p_up",
+        "horizon_weighted_ret_pred",
+        "horizon_p_up_dispersion",
+        "horizon_bias_conflict",
     ]
     component_cols = [
         column

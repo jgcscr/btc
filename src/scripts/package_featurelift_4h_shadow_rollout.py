@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+BASE_CONFIG = Path("configs/run_refresh_and_predict.shadow_simplified.yaml")
+OUTPUT_CONFIG = Path("configs/run_refresh_and_predict.shadow_featurelift_4h_candidate.yaml")
+OUTPUT_JSON = Path("artifacts/analysis/featurelift_20260331_rerun/shadow_rollout_4h_package.json")
+OUTPUT_MD = Path("artifacts/analysis/featurelift_20260331_rerun/shadow_rollout_4h_package.md")
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _render_markdown(payload: dict[str, Any]) -> str:
+    validation = payload["validation"]
+    lines = [
+        "# 4h Shadow Rollout Package",
+        "",
+        f"Generated: {payload['generated_at']}",
+        "",
+        "## Recommendation",
+        "",
+        "Promote the 4h feature-lift candidate to shadow or paper evaluation only.",
+        "",
+        "## Package",
+        "",
+        f"- Config: {payload['config_path']}",
+        f"- Direction model dir: {payload['artifacts']['direction_model_dir']}",
+        f"- Regression model dir: {payload['artifacts']['regression_model_dir']}",
+        f"- Trade decision model: {payload['artifacts']['trade_decision_model']}",
+        "",
+        "## Validation",
+        "",
+        f"- Walkforward AUC: {validation['walkforward_auc_mean']:.6f}",
+        f"- Walkforward net return: {validation['walkforward_cum_ret_net_total']:.6f}",
+        f"- Walkforward trades: {validation['walkforward_trade_count_total']}",
+        f"- Direction test F1: {validation['direction_test_f1']:.6f}",
+        f"- Regression test RMSE: {validation['regression_test_rmse']:.6f}",
+        f"- Trade decision deploy-ready: {validation['trade_decision_deploy_ready']}",
+        "",
+        "## Notes",
+        "",
+    ]
+    lines.extend(f"- {note}" for note in payload.get("notes", []))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Write a reusable 4h shadow rollout package for the feature-lift candidate.")
+    parser.add_argument("--base-config", type=Path, default=BASE_CONFIG)
+    parser.add_argument("--output-config", type=Path, default=OUTPUT_CONFIG)
+    parser.add_argument("--output-json", type=Path, default=OUTPUT_JSON)
+    parser.add_argument("--output-markdown", type=Path, default=OUTPUT_MD)
+    parser.add_argument("--direction-dir", type=Path, default=Path("artifacts/models/featurelift_20260331_rerun/xgb_dir4h"))
+    parser.add_argument("--regression-dir", type=Path, default=Path("artifacts/models/featurelift_20260331_rerun/xgb_ret4h"))
+    parser.add_argument("--trade-decision-model", type=Path, default=Path("artifacts/models/featurelift_20260331_rerun/trade_decision_model_full_history.json"))
+    args = parser.parse_args()
+
+    config_payload = _load_yaml(args.base_config)
+    regression_model_dirs = config_payload.get("regression_model_dirs")
+    if not isinstance(regression_model_dirs, dict):
+        regression_model_dirs = {"enabled": True}
+    regression_model_dirs["enabled"] = True
+    regression_model_dirs["4h"] = str(args.regression_dir)
+    config_payload["regression_model_dirs"] = regression_model_dirs
+
+    regime_model_dirs = config_payload.get("regime_model_dirs")
+    if not isinstance(regime_model_dirs, dict):
+        regime_model_dirs = {"enabled": True}
+    for regime in ("trend_ignition", "neutral", "chop"):
+        raw_regime_dirs = regime_model_dirs.get(regime)
+        regime_dirs = dict(raw_regime_dirs) if isinstance(raw_regime_dirs, dict) else {}
+        regime_dirs["4h"] = str(args.direction_dir)
+        regime_model_dirs[regime] = regime_dirs
+    regime_model_dirs["enabled"] = True
+    config_payload["regime_model_dirs"] = regime_model_dirs
+
+    trade_decision_policy = config_payload.get("trade_decision_policy")
+    if not isinstance(trade_decision_policy, dict):
+        trade_decision_policy = {}
+    trade_decision_policy["model_path"] = str(args.trade_decision_model)
+    config_payload["trade_decision_policy"] = trade_decision_policy
+
+    args.output_config.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
+
+    dir_summary = _load_json(args.direction_dir / "summary.json")
+    ret_summary = _load_json(args.regression_dir / "summary.json")
+    walkforward = _load_json(Path("artifacts/analysis/featurelift_20260331_rerun/walkforward_4h_xgb.json"))
+    decision_payload = _load_json(args.trade_decision_model)
+
+    payload = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "config_path": str(args.output_config),
+        "artifacts": {
+            "direction_model_dir": str(args.direction_dir),
+            "regression_model_dir": str(args.regression_dir),
+            "trade_decision_model": str(args.trade_decision_model),
+        },
+        "validation": {
+            "direction_test_f1": float(dir_summary["metrics"]["test"]["f1"]),
+            "regression_test_rmse": float(ret_summary["metrics"]["test"]["rmse"]),
+            "walkforward_auc_mean": float(walkforward["auc_mean"]),
+            "walkforward_cum_ret_net_total": float(walkforward["cum_ret_net_total"]),
+            "walkforward_trade_count_total": int(walkforward["trade_count_total"]),
+            "trade_decision_deploy_ready": bool(decision_payload.get("deploy_ready", False)),
+        },
+        "notes": [
+            "This package leaves 1h, 8h, and 12h artifacts unchanged.",
+            "Use this config for shadow or paper evaluation only; do not treat it as a live-promotion config.",
+        ],
+    }
+    args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    args.output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    args.output_markdown.write_text(_render_markdown(payload), encoding="utf-8")
+    print(f"Wrote rollout config to {args.output_config}")
+    print(f"Wrote rollout package JSON to {args.output_json}")
+    print(f"Wrote rollout package markdown to {args.output_markdown}")
+
+
+if __name__ == "__main__":
+    main()

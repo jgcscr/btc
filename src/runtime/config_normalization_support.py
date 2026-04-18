@@ -301,6 +301,25 @@ def normalize_regime_model_dirs_block(
     return normalized
 
 
+def normalize_regression_model_dirs_block(
+    value: Mapping[str, Any],
+    *,
+    stderr_write: Callable[[str], None],
+) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("regression_model_dirs config must be a mapping.")
+
+    normalized: Dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).replace("-", "_")
+        if key == "enabled":
+            normalized[key] = bool(raw_value)
+            continue
+        if raw_value is not None:
+            normalized[str(raw_key)] = str(raw_value)
+    return normalized
+
+
 def normalize_intrabar_aggregation_block(value: Mapping[str, Any], *, stderr_write: Callable[[str], None]) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("intrabar_aggregation config must be a mapping.")
@@ -816,6 +835,8 @@ def normalize_config_value(
             return normalize_regime_model_weights_block(value, regimes=regimes, stderr_write=stderr_write)
         if name == "regime_model_dirs" and value is not None:
             return normalize_regime_model_dirs_block(value, regimes=regimes, stderr_write=stderr_write)
+        if name == "regression_model_dirs" and value is not None:
+            return normalize_regression_model_dirs_block(value, stderr_write=stderr_write)
         if name == "intrabar_aggregation" and value is not None:
             return normalize_intrabar_aggregation_block(value, stderr_write=stderr_write)
         if name == "feature_coverage_policy" and value is not None:

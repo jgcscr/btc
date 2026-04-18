@@ -33,7 +33,12 @@ from src.scripts.build_training_dataset import _load_local_features as _load_hou
 from src.trading.feature_engineering import augment_hourly_price_features as _shared_augment_hourly_price_features
 from src.data.macro_loader import MACRO_FEATURE_COLUMNS
 from src.data.onchain_loader import ONCHAIN_FEATURE_COLUMNS
+from src.data.source_parity import (
+    drop_unready_source_family_features,
+    evaluate_source_family_readiness,
+)
 from src.scripts.build_training_dataset import _drop_uncovered_allowed_features
+from src.scripts.build_training_dataset import merge_intrahour_15m_features
 
 
 DEFAULT_HORIZONS: List[int] = [1, 4, 8, 12]
@@ -80,6 +85,16 @@ CORE_MODEL_FEATURES = [
     "vwap_deviation_8h",
     "momentum_slope_2h",
     "momentum_slope_4h",
+    "intrabar_realized_vol_15m",
+    "intrabar_return_dispersion_15m",
+    "intrabar_path_range",
+    "intrabar_path_efficiency_1h",
+    "intrabar_taker_imbalance_mean",
+    "intrabar_taker_imbalance_persistence",
+    "intrabar_directional_persistence_1h",
+    "intrabar_vol_term_structure_6h_24h",
+    "intrabar_volume_regime_zscore_24h",
+    "intrabar_flow_acceleration_3h",
     *MACRO_FEATURE_COLUMNS,
     *ONCHAIN_FEATURE_COLUMNS,
 ]
@@ -141,6 +156,7 @@ TECHNICAL_PREFIXES = (
     "candle_",
     "close_lag_",
     "interaction_",
+    "intrabar_",
     "log_",
     "mom_",
     "pattern_",
@@ -379,6 +395,7 @@ def build_multi_horizon_dataset(
 
     df = df.sort_values("ts").reset_index(drop=True)
     df = _merge_processed_features(df, PROCESSED_PATHS)
+    df = merge_intrahour_15m_features(df)
     df = _apply_funding_rate_features(df)
     df = _drop_external_source_columns(df)
     df = _augment_price_features(df)
@@ -423,6 +440,11 @@ def build_multi_horizon_dataset(
     allowed_features = _append_futures_feature_columns(df_targets, allowed_features)
     allowed_features = _append_technical_feature_columns(df_targets, allowed_features)
     allowed_features = _drop_uncovered_allowed_features(df_targets, allowed_features)
+    source_family_parity = evaluate_source_family_readiness(df_targets)
+    allowed_features, dropped_source_family_features = drop_unready_source_family_features(
+        allowed_features,
+        source_family_parity,
+    )
     df_targets = _enforce_feature_coverage(df_targets, allowed_features)
     X, y_ret1h = make_features_and_target(
         df_targets,
@@ -541,6 +563,8 @@ def build_multi_horizon_dataset(
             "mean_key": "scaler_mean",
             "scale_key": "scaler_scale",
         },
+        "source_family_parity": source_family_parity,
+        "dropped_source_family_features": dropped_source_family_features,
     }
     META_PATH.parent.mkdir(parents=True, exist_ok=True)
     META_PATH.write_text(json.dumps(meta_payload, indent=2))

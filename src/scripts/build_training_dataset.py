@@ -28,6 +28,10 @@ from src.trading.feature_engineering import (
 )
 from src.data.macro_loader import MACRO_FEATURE_COLUMNS
 from src.data.onchain_loader import ONCHAIN_FEATURE_COLUMNS
+from src.data.source_parity import (
+    drop_unready_source_family_features,
+    evaluate_source_family_readiness,
+)
 from src.trading.intrabar_features import compute_hourly_intrabar_features
 
 
@@ -250,6 +254,16 @@ CORE_MODEL_FEATURES = [
     "vwap_deviation_8h",
     "momentum_slope_2h",
     "momentum_slope_4h",
+    "intrabar_realized_vol_15m",
+    "intrabar_return_dispersion_15m",
+    "intrabar_path_range",
+    "intrabar_path_efficiency_1h",
+    "intrabar_taker_imbalance_mean",
+    "intrabar_taker_imbalance_persistence",
+    "intrabar_directional_persistence_1h",
+    "intrabar_vol_term_structure_6h_24h",
+    "intrabar_volume_regime_zscore_24h",
+    "intrabar_flow_acceleration_3h",
     *MACRO_FEATURE_COLUMNS,
     *ONCHAIN_FEATURE_COLUMNS,
 ]
@@ -849,6 +863,11 @@ def main(
         target_horizon=1.0,
     )
     allowed_features = _drop_uncovered_allowed_features(df, allowed_features)
+    source_family_parity = evaluate_source_family_readiness(df)
+    allowed_features, dropped_source_family_features = drop_unready_source_family_features(
+        allowed_features,
+        source_family_parity,
+    )
     df = _enforce_feature_coverage(df, allowed_features)
     df = df.sort_values("ts").reset_index(drop=True)
     label_series = df[TREND_IGNITION_LABEL].astype(int)
@@ -955,6 +974,8 @@ def main(
             "horizon_hours": TREND_IGNITION_HORIZON,
             "positive_rate": float(label_series.mean()),
         },
+        "source_family_parity": source_family_parity,
+        "dropped_source_family_features": dropped_source_family_features,
     }
     META_PATH.parent.mkdir(parents=True, exist_ok=True)
     META_PATH.write_text(json.dumps(meta_payload, indent=2))

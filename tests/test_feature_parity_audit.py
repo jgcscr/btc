@@ -102,6 +102,9 @@ class FeatureParityAuditTests(unittest.TestCase):
         self.assertIn("derivatives", payload["ignored_families"])
         self.assertIn("onchain", payload["stale_tolerated_families"])
         self.assertIn("likely_untapped_candidates", payload)
+        self.assertIn("source_family_artifacts", payload)
+        self.assertIn("macro", payload["source_family_artifacts"])
+        self.assertIn("onchain", payload["source_family_artifacts"])
         self.assertTrue(payload["likely_untapped_candidates"])
 
 

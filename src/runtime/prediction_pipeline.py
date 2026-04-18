@@ -42,6 +42,7 @@ class PredictionPipelineConfig:
     trade_decision_policy: Mapping[str, Any] | None
     regime_model_weights: Mapping[str, Any] | None
     regime_model_dirs: Mapping[str, Any] | None
+    regression_model_dirs: Mapping[str, Any] | None
     confluence_policy: Mapping[str, Any] | None
     execution_policy: Mapping[str, Any] | None
     forecast_coherence_policy: Mapping[str, Any] | None
@@ -76,6 +77,7 @@ class PredictionPipelineDependencies:
     resolve_trade_decision_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
     resolve_regime_model_weights_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any] | None]
     resolve_regime_model_dirs_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
+    resolve_regression_model_dirs_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
     resolve_confluence_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
     resolve_execution_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
     resolve_forecast_coherence_policy: Callable[[Mapping[str, Any] | None], Dict[str, Any]]
@@ -88,6 +90,7 @@ class PredictionPipelineDependencies:
     model_paths_for_horizon: Callable[[float], tuple[Any, Any]]
     classify_regime_from_score: Callable[[float, Mapping[str, Any]], str]
     resolve_regime_specific_dir_path: Callable[..., Any]
+    resolve_regression_dir_path: Callable[..., Any]
     direction_configs_for_horizon: Callable[..., tuple[list[Any], Dict[str, float]]]
     resolve_thresholds_for_horizon: Callable[[float, float, float, Mapping[float, Dict[str, float]] | None], Dict[str, float]]
     apply_adaptive_thresholds: Callable[[Mapping[str, Any], float, float, str], tuple[float, float, float]]
@@ -139,6 +142,7 @@ class PredictionPreparationState:
     trade_decision_policy_resolved: Mapping[str, Any]
     regime_weight_policy: Mapping[str, Any] | None
     regime_model_dirs_policy: Mapping[str, Any]
+    regression_model_dirs_policy: Mapping[str, Any]
     confluence_policy_resolved: Mapping[str, Any]
     execution_policy_resolved: Mapping[str, Any]
     forecast_coherence_policy_resolved: Mapping[str, Any]
@@ -237,6 +241,7 @@ def _prepare_prediction_state(
             trade_decision_policy_resolved={},
             regime_weight_policy=None,
             regime_model_dirs_policy={},
+            regression_model_dirs_policy={},
             confluence_policy_resolved={},
             execution_policy_resolved={},
             forecast_coherence_policy_resolved={},
@@ -271,6 +276,7 @@ def _prepare_prediction_state(
     trade_decision_policy_resolved = deps.resolve_trade_decision_policy(config.trade_decision_policy)
     regime_weight_policy = deps.resolve_regime_model_weights_policy(config.regime_model_weights)
     regime_model_dirs_policy = deps.resolve_regime_model_dirs_policy(config.regime_model_dirs)
+    regression_model_dirs_policy = deps.resolve_regression_model_dirs_policy(config.regression_model_dirs)
     confluence_policy_resolved = deps.resolve_confluence_policy(config.confluence_policy)
     execution_policy_resolved = deps.resolve_execution_policy(config.execution_policy)
     forecast_coherence_policy_resolved = deps.resolve_forecast_coherence_policy(config.forecast_coherence_policy)
@@ -353,6 +359,7 @@ def _prepare_prediction_state(
         trade_decision_policy_resolved=trade_decision_policy_resolved,
         regime_weight_policy=regime_weight_policy,
         regime_model_dirs_policy=regime_model_dirs_policy,
+        regression_model_dirs_policy=regression_model_dirs_policy,
         confluence_policy_resolved=confluence_policy_resolved,
         execution_policy_resolved=execution_policy_resolved,
         forecast_coherence_policy_resolved=forecast_coherence_policy_resolved,
@@ -476,6 +483,11 @@ def _build_prediction_summary(
                 f"Warning: skipping {label} horizon because model files are missing\n"
             )
             continue
+        reg_path = deps.resolve_regression_dir_path(
+            reg_path,
+            horizon_label=label,
+            policy=state.regression_model_dirs_policy,
+        )
 
         regime_state = deps.regime_neutral
         regime_score = None

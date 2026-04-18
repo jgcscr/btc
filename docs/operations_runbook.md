@@ -78,6 +78,10 @@ Default profile:
   --continue-on-promotion-fail
 ```
 
+Current workflow note:
+
+- the checked-in runtime and default reliability profiles already use `quality.lookback_rows: 50000` and `quality.lookback_hours: 8760`, so the workflow path operates on the hardened long-window labeled slice rather than the older short 2000-row manual rebuild
+
 ### Shell Cadence
 
 ```bash
@@ -189,9 +193,15 @@ Use the profile that matches the task.
 - `configs/run_refresh_and_predict.live_conservative.yaml`: backward-compatible alias
 - `configs/run_refresh_and_predict.research_safe.yaml`: research fallback that keeps the default stack but downgrades feature-coverage violations from hard-fail to warning
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: cadence daily profile
+- `configs/run_refresh_and_predict.shadow_featurelift_4h_candidate.yaml`: feature-lift shadow or paper package that swaps only the 4h candidate direction and regression artifacts and the hardened full-history trade-decision model
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: shadow comparison left-hand profile
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: shadow comparison right-hand profile
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`: shadow-only stricter abstention profile
+
+Feature-lift packaging artifacts:
+
+- `artifacts/analysis/featurelift_20260331_rerun/shadow_rollout_4h_package.md`: operator-facing summary of the 4h shadow package
+- `artifacts/models/featurelift_20260331_rerun/trade_decision_model_full_history.json`: hardened decision-gate artifact rebuilt on the long-window labeled slice
 
 Current wrapper-emitted live-style size caps in the approved Binance-only profile:
 
@@ -231,6 +241,44 @@ Per-horizon fields worth checking first:
 - `confluence`
 - `abstention`
 - `uncertainty`
+
+## 7. Feature-Lift 4h Shadow Rollout
+
+Refresh the packaged 4h candidate profile and its operator summary:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_featurelift_4h_shadow_rollout
+```
+
+Validate the packaged config without emitting a live run:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.shadow_featurelift_4h_candidate.yaml \
+  --dry-run
+```
+
+Rebuild the hardened decision gate artifact if the package summary shows an outdated model path or deploy-readiness change:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.build_labeled_backtest_from_history \
+  --include-reliability-snapshots \
+  --lookback-rows 50000 \
+  --min-rows 300 \
+  --output artifacts/monitoring/labeled_backtest_1h_full_history.csv \
+  --meta-output artifacts/monitoring/labeled_backtest_1h_full_history_meta.json
+
+/workspaces/btc/.venv/bin/python -m src.scripts.enrich_backtest_with_decision_features \
+  --input artifacts/monitoring/labeled_backtest_1h_full_history.csv \
+  --output artifacts/monitoring/labeled_backtest_1h_full_history_enriched.csv \
+  --meta-output artifacts/monitoring/labeled_backtest_1h_full_history_enriched_meta.json \
+  --auto-discover-sources
+
+/workspaces/btc/.venv/bin/python -m src.scripts.train_trade_decision_model \
+  --input artifacts/monitoring/labeled_backtest_1h_full_history_enriched.csv \
+  --output artifacts/models/featurelift_20260331_rerun/trade_decision_model_full_history.json \
+  --candidate-only
+```
 
 ### Trust Hardening Rollout Checks
 

@@ -16,6 +16,47 @@ from src.scripts.build_labeled_backtest_from_history import (
 
 
 class BuildLabeledBacktestFromHistoryTests(unittest.TestCase):
+    def test_load_history_rows_derives_cross_horizon_consensus_features(self) -> None:
+        history_payload = [
+            {
+                "generated_at": "2026-01-01T00:05:00Z",
+                "predictions": {
+                    "1h": {
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "p_up": 0.64,
+                        "ret_pred": 0.01,
+                        "direction_next": "up",
+                    },
+                    "4h": {
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "p_up": 0.34,
+                        "ret_pred": -0.02,
+                        "direction_next": "down",
+                    },
+                    "12h": {
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "p_up": 0.30,
+                        "ret_pred": -0.03,
+                        "direction_next": "down",
+                    },
+                },
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            history_path = Path(tmp_dir) / "history.json"
+            history_path.write_text(json.dumps(history_payload), encoding="utf-8")
+            loaded = _load_history_rows(history_path, "1h")
+
+        self.assertEqual(len(loaded), 1)
+        row = loaded.iloc[0]
+        self.assertIn("horizon_consensus_support_ratio", loaded.columns)
+        self.assertIn("horizon_weighted_p_up", loaded.columns)
+        self.assertAlmostEqual(float(row["horizon_consensus_support_ratio"]), 2.0 / 3.0)
+        self.assertAlmostEqual(float(row["horizon_directional_agreement_ratio"]), 1.0 / 3.0)
+        self.assertEqual(float(row["horizon_directional_disagreement_count"]), 2.0)
+        self.assertEqual(float(row["horizon_bias_conflict"]), 1.0)
+
     def test_build_multi_horizon_history_labels_include_explicit_horizons(self) -> None:
         history_payload = [
             {

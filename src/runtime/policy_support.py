@@ -359,6 +359,21 @@ def resolve_regime_model_dirs_policy(
     return {"enabled": True, "paths": paths}
 
 
+def resolve_regression_model_dirs_policy(
+    config: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    if not config or not bool(config.get("enabled", False)):
+        return {"enabled": False, "paths": {}}
+    return {
+        "enabled": True,
+        "paths": {
+            str(key): str(value)
+            for key, value in config.items()
+            if str(key) != "enabled" and value is not None
+        },
+    }
+
+
 def resolve_regime_specific_dir_path(
     default_path: Path,
     *,
@@ -388,6 +403,38 @@ def resolve_regime_specific_dir_path(
     if not override_path.exists():
         stderr_write(
             f"Warning: regime model dir override not found for {horizon_label}@{regime_state}: {override_path}\n"
+        )
+        return default_path
+    return override_path
+
+
+def resolve_regression_dir_path(
+    default_path: Path,
+    *,
+    horizon_label: str,
+    policy: Mapping[str, Any],
+    expected_filename: str,
+    version_priority: Sequence[str],
+    resolve_best_versioned_model_file: Callable[..., Path],
+    stderr_write: Callable[[str], None],
+) -> Path:
+    if not policy or not bool(policy.get("enabled", False)):
+        return default_path
+    path_map = policy.get("paths", {})
+    if not isinstance(path_map, Mapping):
+        return default_path
+    override = path_map.get(horizon_label)
+    if not override:
+        return default_path
+    override_path = Path(str(override)).expanduser()
+    override_path = resolve_best_versioned_model_file(
+        override_path,
+        expected_filename=expected_filename,
+        version_priority=version_priority,
+    )
+    if not override_path.exists():
+        stderr_write(
+            f"Warning: regression model dir override not found for {horizon_label}: {override_path}\n"
         )
         return default_path
     return override_path

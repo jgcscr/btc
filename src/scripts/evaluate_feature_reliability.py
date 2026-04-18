@@ -16,7 +16,47 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
-def _feature_score(series: pd.Series, baseline_window: int, recent_window: int) -> Dict[str, float]:
+def _signal_strength(feature: pd.Series, target: pd.Series) -> float:
+    pair = pd.DataFrame({"feature": pd.to_numeric(feature, errors="coerce"), "target": pd.to_numeric(target, errors="coerce")}).dropna()
+    if len(pair) < 24 or pair["feature"].nunique() < 2 or pair["target"].nunique() < 2:
+        return 0.0
+    corr = pair["feature"].corr(pair["target"], method="spearman")
+    if corr is None or not np.isfinite(corr):
+        return 0.0
+    return float(abs(corr))
+
+
+def _resolve_target_series(df: pd.DataFrame) -> tuple[pd.Series | None, str | None]:
+    candidates = [
+        "y_true",
+        "y",
+        "ret_realized",
+        "ret_15m_realized",
+        "ret_1h_realized",
+        "ret_4h_realized",
+        "ret_8h_realized",
+        "ret_12h_realized",
+        "ret_1h",
+        "ret_4h",
+        "ret_8h",
+        "ret_12h",
+    ]
+    for column in candidates:
+        if column not in df.columns:
+            continue
+        series = pd.to_numeric(df[column], errors="coerce")
+        if series.notna().sum() >= 24 and series.nunique(dropna=True) >= 2:
+            return series, column
+    return None, None
+
+
+def _feature_score(
+    series: pd.Series,
+    baseline_window: int,
+    recent_window: int,
+    *,
+    target: pd.Series | None = None,
+) -> Dict[str, float]:
     s = pd.to_numeric(series, errors="coerce")
     n = len(s)
     if n < 4:
@@ -24,6 +64,9 @@ def _feature_score(series: pd.Series, baseline_window: int, recent_window: int) 
             "missing_ratio": float(s.isna().mean()),
             "drift": 999.0,
             "score": 0.0,
+            "predictive_strength_recent": 0.0,
+            "predictive_strength_baseline": 0.0,
+            "predictive_stability_gap": 1.0,
         }
 
     recent_n = min(int(recent_window), max(n // 2, 1))
@@ -45,12 +88,30 @@ def _feature_score(series: pd.Series, baseline_window: int, recent_window: int) 
 
     missing_ratio = float(s.isna().mean())
 
-    # Reliability score in [0,1], penalizing missingness and normalized drift.
-    score = max(0.0, 1.0 - min(1.0, 0.7 * missing_ratio + 0.3 * min(drift / 3.0, 1.0)))
+    base_reliability = max(0.0, 1.0 - min(1.0, 0.7 * missing_ratio + 0.3 * min(drift / 3.0, 1.0)))
+    predictive_strength_recent = 0.0
+    predictive_strength_baseline = 0.0
+    predictive_stability_gap = 1.0
+    if target is not None:
+        target_numeric = pd.to_numeric(target, errors="coerce")
+        baseline_target = target_numeric.reindex(baseline.index)
+        recent_target = target_numeric.reindex(recent.index)
+        predictive_strength_baseline = _signal_strength(baseline, baseline_target)
+        predictive_strength_recent = _signal_strength(recent, recent_target)
+        predictive_stability_gap = abs(predictive_strength_recent - predictive_strength_baseline)
+        edge_score = min(predictive_strength_recent / 0.10, 1.0)
+        stability_score = max(0.0, 1.0 - min(predictive_stability_gap / 0.10, 1.0))
+        predictive_score = 0.7 * edge_score + 0.3 * stability_score
+        score = float(max(0.0, min(1.0, 0.65 * base_reliability + 0.35 * predictive_score)))
+    else:
+        score = float(base_reliability)
     return {
         "missing_ratio": float(missing_ratio),
         "drift": float(drift),
         "score": float(score),
+        "predictive_strength_recent": float(predictive_strength_recent),
+        "predictive_strength_baseline": float(predictive_strength_baseline),
+        "predictive_stability_gap": float(predictive_stability_gap),
     }
 
 
@@ -98,11 +159,13 @@ def _compute_scores(
     baseline_window: int,
     recent_window: int,
 ) -> Dict[str, Dict[str, float]]:
+    target_series, _ = _resolve_target_series(df)
     return {
         col: _feature_score(
             df[col],
             baseline_window=baseline_window,
             recent_window=recent_window,
+            target=target_series,
         )
         for col in feature_cols
     }
@@ -176,6 +239,7 @@ def main() -> None:
         baseline_window=int(args.baseline_window),
         recent_window=int(args.recent_window),
     )
+    target_series, target_column = _resolve_target_series(df)
     accepted = _accepted_from_scores(
         scores,
         min_score=float(args.min_score),
@@ -254,6 +318,8 @@ def main() -> None:
             "min_score": float(args.min_score),
             "max_features": int(args.max_features),
             "min_slice_rows": int(args.min_slice_rows),
+            "target_column": target_column,
+            "target_aware_scoring": bool(target_series is not None and target_column is not None),
         },
         "accepted_features": accepted,
         "feature_scores": scores,

@@ -43,6 +43,15 @@ FEATURE_COLUMNS = [
     "confluence_short_term_ratio",
     "confluence_mid_term_ratio",
     "confluence_direction_matches_dominant",
+    "horizon_consensus_support_ratio",
+    "horizon_directional_agreement_ratio",
+    "horizon_directional_disagreement_count",
+    "horizon_short_term_alignment_ratio",
+    "horizon_mid_term_alignment_ratio",
+    "horizon_weighted_p_up",
+    "horizon_weighted_ret_pred",
+    "horizon_p_up_dispersion",
+    "horizon_bias_conflict",
     "incumbent_signal_reference",
     "candidate_only_reference",
     "candidate_incumbent_disagreement",
@@ -251,6 +260,15 @@ def _extract_features(df: pd.DataFrame) -> pd.DataFrame:
     out["confluence_short_term_ratio"] = _series("confluence_short_term_ratio", 0.0)
     out["confluence_mid_term_ratio"] = _series("confluence_mid_term_ratio", 0.0)
     out["confluence_direction_matches_dominant"] = _series("confluence_direction_matches_dominant", 0.0)
+    out["horizon_consensus_support_ratio"] = _series("horizon_consensus_support_ratio", 0.0)
+    out["horizon_directional_agreement_ratio"] = _series("horizon_directional_agreement_ratio", 0.0)
+    out["horizon_directional_disagreement_count"] = _series("horizon_directional_disagreement_count", 0.0)
+    out["horizon_short_term_alignment_ratio"] = _series("horizon_short_term_alignment_ratio", 0.0)
+    out["horizon_mid_term_alignment_ratio"] = _series("horizon_mid_term_alignment_ratio", 0.0)
+    out["horizon_weighted_p_up"] = _series("horizon_weighted_p_up", out["p_up"])
+    out["horizon_weighted_ret_pred"] = _series("horizon_weighted_ret_pred", out["ret_pred"])
+    out["horizon_p_up_dispersion"] = _series("horizon_p_up_dispersion", 0.0)
+    out["horizon_bias_conflict"] = _series("horizon_bias_conflict", 0.0)
     out["incumbent_signal_reference"] = _series("incumbent_signal_reference", 0.0)
     out["candidate_only_reference"] = _series("candidate_only_reference", 0.0)
     out["candidate_incumbent_disagreement"] = _series("candidate_incumbent_disagreement", 0.0)

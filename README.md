@@ -85,6 +85,10 @@ Recommended full default reliability command:
   --continue-on-promotion-fail
 ```
 
+Current reliability note:
+
+- both checked-in reliability workflow profiles already use `quality.lookback_rows: 50000` and `quality.lookback_hours: 8760`, which is the hardened long-window slice that produced a deploy-ready trade-decision gate during the feature-lift rerun
+
 This wrapper:
 
 - parses with `src.scripts.run_reliability_workflow.parse_args(...)`
@@ -313,6 +317,46 @@ Current replay rules enforced in code:
 - hourly horizons only
 - implies dry-run when offset is positive
 - incompatible with `--use-local-features`
+
+### 4h Feature-Lift Shadow Package
+
+Refresh the packaged 4h shadow candidate config and summary artifacts:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_featurelift_4h_shadow_rollout
+```
+
+Smoke-test the packaged profile through the refresh path:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.shadow_featurelift_4h_candidate.yaml \
+  --dry-run
+```
+
+### Full-History Trade-Decision Rebuild
+
+Rebuild the hardened trade-decision artifact used by the 4h shadow package:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.build_labeled_backtest_from_history \
+  --include-reliability-snapshots \
+  --lookback-rows 50000 \
+  --min-rows 300 \
+  --output artifacts/monitoring/labeled_backtest_1h_full_history.csv \
+  --meta-output artifacts/monitoring/labeled_backtest_1h_full_history_meta.json
+
+/workspaces/btc/.venv/bin/python -m src.scripts.enrich_backtest_with_decision_features \
+  --input artifacts/monitoring/labeled_backtest_1h_full_history.csv \
+  --output artifacts/monitoring/labeled_backtest_1h_full_history_enriched.csv \
+  --meta-output artifacts/monitoring/labeled_backtest_1h_full_history_enriched_meta.json \
+  --auto-discover-sources
+
+/workspaces/btc/.venv/bin/python -m src.scripts.train_trade_decision_model \
+  --input artifacts/monitoring/labeled_backtest_1h_full_history_enriched.csv \
+  --output artifacts/models/featurelift_20260331_rerun/trade_decision_model_full_history.json \
+  --candidate-only
+```
 
 ### Runtime Reliability
 

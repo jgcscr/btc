@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
+from src.data.source_parity import load_source_family_artifacts
+
 
 LEAKAGE_SAFE_REPORT_PATH = Path("artifacts/analysis/featurelift_20260331_rerun/comparison_report.md")
 RELIABILITY_PATH = Path("artifacts/analysis/feature_reliability_15m_1h_slice_20260331.json")
@@ -93,8 +95,6 @@ def _load_json(path: Path) -> Dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
-
-
 def _read_reliability_payload(path: Path) -> Dict[str, Any]:
     payload = _load_json(path) or {}
     accepted = payload.get("accepted_features")
@@ -360,6 +360,7 @@ def build_parity_audit(
             "accepted_feature_count": len(reliability_payload.get("accepted_features", [])),
             "accepted_family_counts": family_counts(reliability_payload.get("accepted_features", [])),
         },
+        "source_family_artifacts": load_source_family_artifacts(["macro", "onchain"]),
         "by_horizon": by_horizon,
         "likely_untapped_candidates": [
             {

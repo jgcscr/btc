@@ -10,6 +10,8 @@ from src.runtime.policy_support import (
     normalize_threshold_overrides,
     resolve_confidence_min_for_horizon,
     resolve_direction_ensemble_policy,
+    resolve_regression_dir_path,
+    resolve_regression_model_dirs_policy,
     resolve_regime_model_dirs_policy,
     resolve_regime_model_weights_policy,
     resolve_regime_specific_dir_path,
@@ -272,3 +274,31 @@ def test_resolve_regime_specific_dir_path_falls_back_when_override_missing(tmp_p
 
     assert resolved == default_path
     assert warnings
+
+
+def test_resolve_regression_dir_path_uses_existing_override(tmp_path: Path) -> None:
+    default_path = tmp_path / "default.json"
+    default_path.write_text("{}", encoding="utf-8")
+    override_dir = tmp_path / "regression"
+    override_dir.mkdir()
+    override_file = override_dir / "xgb_ret4h_model.json"
+    override_file.write_text("{}", encoding="utf-8")
+
+    policy = resolve_regression_model_dirs_policy(
+        {
+            "enabled": True,
+            "4h": str(override_dir),
+        }
+    )
+
+    resolved = resolve_regression_dir_path(
+        default_path,
+        horizon_label="4h",
+        policy=policy,
+        expected_filename="xgb_ret4h_model.json",
+        version_priority=("v2", "v1"),
+        resolve_best_versioned_model_file=lambda path, **_: path / "xgb_ret4h_model.json",
+        stderr_write=lambda _message: None,
+    )
+
+    assert resolved == override_file

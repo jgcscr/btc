@@ -302,6 +302,7 @@ def normalize_refresh_args(args: argparse.Namespace) -> None:
         "regime_model_dirs",
         "trade_decision_policy",
         "intrabar_aggregation",
+        "regression_model_dirs",
         "feature_coverage_policy",
         "confluence_policy",
         "execution_policy",
