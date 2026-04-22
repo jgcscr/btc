@@ -17,7 +17,7 @@ There are five distinct operating contexts in the current codebase:
 2. direct live inference
 3. reliability workflow execution
 4. shell cadence execution
-5. in-process service execution
+5. service/API execution through a subprocess worker boundary
 
 Do not mix them.
 
@@ -114,10 +114,11 @@ That runtime pipeline currently owns:
 - runtime telemetry under `artifacts/runtime_runs/<run-id>/`
 - market preparation
 - prediction input resolution
+- runtime-owned prediction dispatch via `src.runtime.prediction_execution`
 - summary writing
 - monitoring artifact writing
 
-The remaining dense prediction executor still lives in:
+The remaining broad CLI/config compatibility surface still lives in:
 
 - `src/scripts/run_refresh_and_predict.py`
 
@@ -135,8 +136,9 @@ That runtime layer writes runtime telemetry, but the actual workflow steps still
 
 The shell wrapper in `scripts/run_cadence.sh` currently:
 
-- resolves the latest trustworthy reliability run by scanning local `artifacts/reliability/*`
+- resolves the latest trustworthy reliability run through `src.scripts.resolve_latest_trustworthy_reliability_run`
 - uses `configs/run_refresh_and_predict.shadow_simplified.yaml` for the daily refresh path
+- runs reliability through `src.scripts.run_reliability_pipeline`
 - runs `shadow` comparison locally through `src.scripts.run_shadow_profile_comparison`
 
 ### GitHub Actions Cadence
@@ -166,6 +168,8 @@ Read these first after a direct refresh, live inference run, or cadence refresh:
 - `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json`
 - `artifacts/monitoring/data_quality_latest.json`
+- `artifacts/runtime_runs/latest.json`
+- `artifacts/runtime_runs/latest_by_mode/<mode>.json`
 - `artifacts/runtime_runs/<run-id>/request.json`
 - `artifacts/runtime_runs/<run-id>/events.jsonl`
 - `artifacts/runtime_runs/<run-id>/summary.json`
@@ -175,6 +179,8 @@ Read these first after a direct refresh, live inference run, or cadence refresh:
 
 Read these first after a reliability run:
 
+- `artifacts/reliability/registry/latest.json`
+- `artifacts/reliability/registry/latest_trustworthy.json`
 - `artifacts/reliability/<run-id>/summary/workflow_manifest.json`
 - `artifacts/reliability/<run-id>/summary/promotion_gate.json`
 - `artifacts/reliability/<run-id>/summary/champion_gate_alignment_check.json`

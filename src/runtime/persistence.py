@@ -8,11 +8,13 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from src.runtime.models import RuntimeMode, RuntimeRunPaths
+from src.runtime.run_registry import RuntimeRunRegistry
 
 
 class RuntimeStateStore:
     def __init__(self, root: Path | str = Path("artifacts/runtime_runs")) -> None:
         self.root = Path(root)
+        self.registry = RuntimeRunRegistry(self.root)
 
     def start_run(self, *, mode: RuntimeMode, request: Mapping[str, Any]) -> RuntimeRunPaths:
         timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -84,6 +86,12 @@ class RuntimeStateStore:
             "summary": self._to_jsonable(summary or {}),
         }
         self._write_json(paths.summary_path, payload)
+        self.registry.record_finalized_run(
+            paths,
+            mode=mode,
+            status=status,
+            summary=summary,
+        )
 
     def _write_json(self, path: Path, payload: Mapping[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

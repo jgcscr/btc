@@ -28,7 +28,7 @@ Preferred wrappers:
 
 Important current boundary:
 
-- `src/scripts/run_refresh_and_predict.py` still owns the remaining dense `run_predictions(...)` body and the full CLI parse surface.
+- `src/scripts/run_refresh_and_predict.py` remains the full CLI parse/config compatibility surface, but runtime prediction dispatch now routes through `src/runtime/prediction_execution.py`.
 
 Current wrapper behavior that matters in practice:
 
@@ -61,6 +61,7 @@ Main files to know:
 - `src/runtime/refresh_pipeline.py`: research/live runtime orchestration
 - `src/runtime/market_preparation.py`: ingestion, local features, replay, quality/coverage gating
 - `src/runtime/refresh_support.py`: config and model-input resolution
+- `src/runtime/prediction_execution.py`: runtime-owned prediction-dispatch adapter
 - `src/runtime/horizon_support.py`: horizon normalization/labels/sort keys
 - `src/runtime/summary_support.py`: prompt/degradation/summary payloads
 - `src/runtime/output_support.py`: monitoring artifacts and meta-baseline refresh
@@ -74,6 +75,8 @@ Current intentional legacy hook still outside the prediction executor:
 
 Read these artifacts before relying on any recent runtime state:
 
+- `artifacts/runtime_runs/latest.json`
+- `artifacts/runtime_runs/latest_by_mode/<mode>.json`
 - `artifacts/predictions/latest.json`
 - `artifacts/monitoring/latest.json`
 - `artifacts/monitoring/trade_ready_summary.json`
@@ -83,6 +86,8 @@ Read these artifacts before relying on any recent runtime state:
 
 Read these first for reliability state:
 
+- `artifacts/reliability/registry/latest.json`
+- `artifacts/reliability/registry/latest_trustworthy.json`
 - `artifacts/reliability/<run-id>/summary/promotion_gate.json`
 - `artifacts/reliability/<run-id>/summary/champion_gate_alignment_check.json`
 - `artifacts/reliability/<run-id>/summary/trade_decision_model_shift_guard.json`

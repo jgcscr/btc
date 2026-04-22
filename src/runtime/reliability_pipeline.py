@@ -5,6 +5,7 @@ from typing import Any
 
 from src.runtime.models import PipelineExecutionResult, RuntimeMode
 from src.runtime.persistence import RuntimeStateStore
+from src.runtime.reliability_registry import ReliabilityRunRegistry
 from src.scripts import run_reliability_workflow as legacy
 
 
@@ -35,6 +36,7 @@ def execute_reliability_pipeline(args: argparse.Namespace) -> PipelineExecutionR
         legacy._set_step_event_sink(None)
 
     store.write_predictions(run_paths, {"workflow_manifest": manifest})
+    registry_payload = ReliabilityRunRegistry().record_workflow_manifest(manifest if isinstance(manifest, dict) else {})
     profile = manifest.get("profile") if isinstance(manifest, dict) else {}
     run_dir = manifest.get("run_dir") if isinstance(manifest, dict) else None
     store.finalize(
@@ -44,6 +46,7 @@ def execute_reliability_pipeline(args: argparse.Namespace) -> PipelineExecutionR
         summary={
             "profile": profile,
             "run_dir": run_dir,
+            "reliability_registry": registry_payload,
             "step_count": len(manifest.get("steps", [])) if isinstance(manifest, dict) else None,
         },
     )

@@ -117,7 +117,7 @@ The main runtime flow is:
 2. `src.runtime.refresh_pipeline.execute_refresh_pipeline`
 3. `src.runtime.market_preparation.prepare_market_data`
 4. `src.runtime.refresh_support.resolve_prediction_inputs`
-5. `src.scripts.run_refresh_and_predict.run_predictions`
+5. `src.runtime.prediction_execution.run_predictions`
 6. `src.runtime.summary_support.write_prediction_summary`
 7. `src.runtime.output_support.write_monitoring_artifact`
 
@@ -126,6 +126,7 @@ Important runtime modules for agents:
 - `src/runtime/refresh_pipeline.py`: top-level research/live orchestration and runtime telemetry
 - `src/runtime/market_preparation.py`: ingestion, local feature bundle assembly, replay override, and quality/coverage gating
 - `src/runtime/refresh_support.py`: config loading, threshold/platt resolution, dataset selection, prepared-data loading
+- `src/runtime/prediction_execution.py`: runtime-owned prediction-dispatch adapter over the extracted prediction pipeline
 - `src/runtime/horizon_support.py`: horizon normalization, label formatting, and sort keys
 - `src/runtime/summary_support.py`: prompt summary, degradation monitoring, blocked-trade analytics, prediction payload writing
 - `src/runtime/output_support.py`: monitoring artifacts and meta-baseline refresh
@@ -133,7 +134,7 @@ Important runtime modules for agents:
 
 Current deliberate legacy boundaries:
 
-- `src/scripts/run_refresh_and_predict.py` still owns `parse_args(...)` and `run_predictions(...)`
+- `src/scripts/run_refresh_and_predict.py` still owns `parse_args(...)` and remains the broad CLI/config compatibility surface
 - `src/scripts/run_reliability_workflow.py` still owns reliability workflow execution
 - `src/runtime/reliability_pipeline.py` still uses the reliability workflow step-event sink from the legacy workflow module
 
@@ -164,7 +165,7 @@ Compatibility note:
 
 Service implementation note:
 
-- jobs are executed in process via imported modules, not by shelling out to missing external wrappers
+- jobs are executed through a subprocess worker boundary via `src.service.worker_runner`, not in the FastAPI process
 
 ## Source Of Truth Artifacts
 
@@ -181,6 +182,8 @@ Read these first after any runtime refresh or cadence run:
 - `artifacts/runtime_runs/<run-id>/predictions.json`
 - `artifacts/runtime_runs/<run-id>/monitoring.json`
 - `artifacts/runtime_runs/<run-id>/trade_ready.json`
+- `artifacts/runtime_runs/latest.json`
+- `artifacts/runtime_runs/latest_by_mode/<mode>.json`
 
 Read these first after a reliability run:
 
@@ -188,6 +191,8 @@ Read these first after a reliability run:
 - `artifacts/reliability/<run-id>/summary/promotion_gate.json`
 - `artifacts/reliability/<run-id>/summary/champion_gate_alignment_check.json`
 - `artifacts/reliability/<run-id>/summary/trade_decision_model_shift_guard.json`
+- `artifacts/reliability/registry/latest.json`
+- `artifacts/reliability/registry/latest_trustworthy.json`
 - `artifacts/reliability/<run-id>/summary/edge_trustworthiness.json`
 - `artifacts/reliability/<run-id>/summary/directional_objectives.json`
 - `artifacts/reliability/<run-id>/summary/walkforward_labeled_reconciliation.json`

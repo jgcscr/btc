@@ -32,30 +32,7 @@ EOF
 }
 
 find_latest_trustworthy_run() {
-  "$PYTHON_BIN" - <<'PY'
-import json
-from pathlib import Path
-
-run_root = Path("artifacts/reliability")
-if not run_root.exists():
-    raise SystemExit(1)
-
-for run_dir in sorted((p for p in run_root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True):
-    edge_path = run_dir / "summary" / "edge_trustworthiness.json"
-    thresholds_path = run_dir / "summary" / "calibrated_thresholds.json"
-    platt_path = run_dir / "summary" / "platt_calibration.json"
-    if not edge_path.exists() or not thresholds_path.exists() or not platt_path.exists():
-        continue
-    try:
-        payload = json.loads(edge_path.read_text(encoding="utf-8"))
-    except Exception:
-        continue
-    if bool(payload.get("edge_trustworthy", False)):
-        print(run_dir.name)
-        raise SystemExit(0)
-
-raise SystemExit(1)
-PY
+  "$PYTHON_BIN" -m src.scripts.resolve_latest_trustworthy_reliability_run
 }
 
 require_latest_trustworthy_run() {
@@ -117,7 +94,7 @@ run_shadow_comparison() {
 
 run_reliability() {
   local config_path="$1"
-  "$PYTHON_BIN" -m src.scripts.run_reliability_workflow \
+  "$PYTHON_BIN" -m src.scripts.run_reliability_pipeline \
     --config "$config_path" \
     --continue-on-promotion-fail
 }

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import importlib
 import io
+import json
+import os
+from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
@@ -65,6 +70,46 @@ def run_job(name: str, args: Iterable[str] | None = None) -> JobRunResult:
     if spec is None:
         raise KeyError(name)
     argv = list(args or [])
+    start = time.perf_counter()
+
+    with tempfile.TemporaryDirectory(prefix="btc-service-job-") as tmpdir:
+        metadata_path = Path(tmpdir) / "result.json"
+        command = [
+            sys.executable,
+            "-m",
+            "src.service.worker_runner",
+            "--job",
+            spec.name,
+            "--metadata-path",
+            str(metadata_path),
+            "--",
+            *argv,
+        ]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            env=_build_worker_env(),
+            check=False,
+        )
+        metadata = _load_worker_metadata(metadata_path)
+
+    duration = time.perf_counter() - start
+    return JobRunResult(
+        returncode=int(metadata.get("returncode", completed.returncode)),
+        duration_seconds=duration,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        job_name=str(metadata.get("job_name") or name),
+        run_id=_coerce_optional_string(metadata.get("run_id")),
+    )
+
+
+def execute_job_in_process(name: str, args: Iterable[str] | None = None) -> JobRunResult:
+    spec = JOB_SPECS.get(name)
+    if spec is None:
+        raise KeyError(name)
+    argv = list(args or [])
     module = importlib.import_module(spec.module_name)
     main_callable = getattr(module, "main", None)
     if not callable(main_callable):
@@ -100,6 +145,31 @@ def run_job(name: str, args: Iterable[str] | None = None) -> JobRunResult:
         job_name=name,
         run_id=run_id,
     )
+
+
+def _build_worker_env() -> dict[str, str]:
+    env = os.environ.copy()
+    pythonpath = env.get("PYTHONPATH")
+    if not pythonpath:
+        env["PYTHONPATH"] = os.getcwd()
+    return env
+
+
+def _load_worker_metadata(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _coerce_optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 @contextmanager

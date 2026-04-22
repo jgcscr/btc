@@ -8,6 +8,7 @@ from src.runtime.market_preparation import apply_replay_override, prepare_market
 from src.runtime.models import PipelineExecutionResult, RuntimeMode, RuntimeRunPaths
 from src.runtime.output_support import write_monitoring_artifact as runtime_write_monitoring_artifact, refresh_meta_baseline as runtime_refresh_meta_baseline
 from src.runtime.persistence import RuntimeStateStore
+from src.runtime.prediction_execution import run_predictions as runtime_run_predictions
 from src.runtime.refresh_support import (
     PredictionInputBundle,
     normalize_refresh_args,
@@ -109,7 +110,7 @@ def _run_prediction_stage(
             f", transformer={sequence_dirs.dir_transformer_path or 'None'}",
         )
 
-    summary = legacy.run_predictions(
+    summary = runtime_run_predictions(
         args.targets,
         args.p_up_min,
         args.ret_min,

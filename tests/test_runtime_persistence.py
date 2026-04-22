@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
+
 from src.runtime.models import RuntimeMode
 from src.runtime.persistence import RuntimeStateStore
 
@@ -23,3 +25,7 @@ def test_runtime_state_store_writes_structured_run(tmp_path: Path) -> None:
     assert paths.monitoring_path.exists()
     assert paths.trade_ready_path.exists()
     assert 'preferred_horizon' in paths.summary_path.read_text(encoding='utf-8')
+    latest_payload = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    mode_payload = json.loads((tmp_path / "latest_by_mode" / "live.json").read_text(encoding="utf-8"))
+    assert latest_payload["run_id"] == paths.run_id
+    assert mode_payload["mode"] == RuntimeMode.LIVE.value
