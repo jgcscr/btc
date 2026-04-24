@@ -8,10 +8,39 @@ import pandas as pd
 from src.scripts.train_trade_decision_model import (
     FEATURE_COLUMNS,
     _apply_reference_feature_controls,
+    _extract_features,
 )
 
 
 class TradeDecisionModelControlTests(unittest.TestCase):
+    def test_extract_features_derives_component_diversity_columns(self) -> None:
+        df = pd.DataFrame(
+            {
+                "p_up": [0.62],
+                "raw_p_up": [0.60],
+                "ret_pred": [0.01],
+                "close": [100.0],
+                "projected_price": [101.0],
+                "direction_next": ["up"],
+                "regime_state": ["neutral"],
+                "p_up_xgb": [0.65],
+                "p_up_lgbm": [0.63],
+                "p_up_transformer": [0.58],
+                "p_up_lstm": [0.61],
+                "p_up_garch_lstm": [0.55],
+            }
+        )
+
+        features = _extract_features(df)
+
+        self.assertIn("component_probability_std", features.columns)
+        self.assertIn("component_group_tree_p_up", features.columns)
+        self.assertIn("component_group_attention_p_up", features.columns)
+        self.assertIn("component_group_volatility_p_up", features.columns)
+        self.assertEqual(float(features.loc[0, "component_count"]), 5.0)
+        self.assertGreater(float(features.loc[0, "component_probability_std"]), 0.0)
+        self.assertGreaterEqual(float(features.loc[0, "component_agreement_ratio"]), 0.0)
+
     def test_disable_on_source_mismatch_zeros_reference_features(self) -> None:
         X = pd.DataFrame({column: [0.0, 0.0] for column in FEATURE_COLUMNS})
         X["incumbent_signal_reference"] = [1.0, 0.0]

@@ -20,6 +20,10 @@ from src.trading.feature_engineering import (
     apply_funding_rate_features as _shared_apply_funding_rate_features,
     augment_hourly_price_features as _shared_augment_hourly_price_features,
 )
+from src.utils.component_diversity_support import (
+    summarize_component_probabilities,
+    summarize_pairwise_history,
+)
 
 
 def _augment_price_features(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1778,6 +1782,17 @@ def compute_signal_for_index(
             ensemble_debug["effective_weights"] = effective_weights
             ensemble_debug["base_weights"] = applicable_weights
 
+        component_summary = summarize_component_probabilities(
+            probabilities,
+            model_groups=(direction_ensemble_policy or {}).get("model_groups") if isinstance(direction_ensemble_policy, Mapping) else None,
+        )
+        pairwise_summary = summarize_pairwise_history(ensemble_debug.get("pairwise"))
+        component_summary.update(pairwise_summary)
+        component_summary["direction_ensemble_selected_count"] = float(len(selected_probabilities))
+        component_summary["direction_ensemble_rejected_count"] = float(len(ensemble_debug.get("rejected_models", [])))
+        component_summary["direction_ensemble_missing_preferred_group_count"] = float(len(ensemble_debug.get("missing_preferred_groups", [])))
+        ensemble_debug["component_summary"] = component_summary
+
         if effective_weights:
             try:
                 p_up = weighted_average(selected_probabilities, effective_weights)
@@ -1925,6 +1940,10 @@ def compute_signal_for_index(
         for name, value in probabilities.items():
             result[f"p_up_{name}"] = value
         result["direction_ensemble"] = ensemble_debug
+        component_summary = ensemble_debug.get("component_summary") if isinstance(ensemble_debug, Mapping) else None
+        if isinstance(component_summary, Mapping):
+            for key, value in component_summary.items():
+                result[str(key)] = float(value)
 
     if direction_model_kind is not None:
         result["direction_model_kind"] = direction_model_kind

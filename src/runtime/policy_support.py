@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+from src.utils.component_diversity_support import resolve_component_group_map
+
 
 def normalize_horizon_float_map(
     raw: Any,
@@ -168,10 +170,20 @@ def resolve_regime_model_weights_policy(
     if not config:
         return None
     if not bool(config.get("enabled", False)):
-        return {"enabled": False, "weights_by_regime": {}, "weights_by_regime_horizon": {}}
+        return {
+            "enabled": False,
+            "weights_by_regime": {},
+            "weights_by_regime_horizon": {},
+            "family_map": resolve_component_group_map(),
+            "family_weights_by_regime": {},
+            "family_weights_by_regime_horizon": {},
+        }
 
     weights_by_regime: Dict[str, Dict[str, float]] = {}
     weights_by_regime_horizon: Dict[str, Dict[float, Dict[str, float]]] = {}
+    family_map = resolve_component_group_map(
+        config.get("family_map") if isinstance(config.get("family_map"), Mapping) else None,
+    )
     for regime in regimes:
         raw = config.get(regime)
         if not raw:
@@ -192,11 +204,62 @@ def resolve_regime_model_weights_policy(
         parsed = parse_weight_spec(str(raw))
         if parsed:
             weights_by_regime[regime] = {str(k): float(v) for k, v in parsed.items()}
+
+    family_weights_by_regime: Dict[str, Dict[str, float]] = {}
+    family_weights_by_regime_horizon: Dict[str, Dict[float, Dict[str, float]]] = {}
+    raw_family_weights = config.get("family_weights") if isinstance(config.get("family_weights"), Mapping) else {}
+    for regime in regimes:
+        raw = raw_family_weights.get(regime)
+        if not raw:
+            continue
+        if isinstance(raw, Mapping):
+            per_horizon: Dict[float, Dict[str, float]] = {}
+            for raw_horizon, raw_weights in raw.items():
+                horizon = coerce_numeric_horizon(raw_horizon)
+                if horizon is None:
+                    continue
+                parsed = parse_weight_spec(str(raw_weights))
+                if parsed:
+                    per_horizon[normalize_horizon_value(horizon)] = {str(k): float(v) for k, v in parsed.items()}
+            if per_horizon:
+                family_weights_by_regime_horizon[regime] = per_horizon
+            continue
+
+        parsed = parse_weight_spec(str(raw))
+        if parsed:
+            family_weights_by_regime[regime] = {str(k): float(v) for k, v in parsed.items()}
     return {
         "enabled": True,
         "weights_by_regime": weights_by_regime,
         "weights_by_regime_horizon": weights_by_regime_horizon,
+        "family_map": family_map,
+        "family_weights_by_regime": family_weights_by_regime,
+        "family_weights_by_regime_horizon": family_weights_by_regime_horizon,
     }
+
+
+def _resolve_active_family_weight_override(
+    *,
+    regime_state: str,
+    horizon: float | None,
+    policy: Optional[Mapping[str, Any]],
+    normalize_horizon_value: Callable[[float], float],
+) -> Optional[Dict[str, float]]:
+    if not policy or not bool(policy.get("enabled")):
+        return None
+    normalized_horizon = normalize_horizon_value(horizon) if horizon is not None else None
+    weights_by_regime_horizon = policy.get("family_weights_by_regime_horizon") or {}
+    if normalized_horizon is not None:
+        horizon_overrides = weights_by_regime_horizon.get(regime_state)
+        if isinstance(horizon_overrides, Mapping):
+            override = horizon_overrides.get(normalized_horizon)
+            if isinstance(override, Mapping):
+                return {str(k): float(v) for k, v in override.items()}
+    weights_by_regime = policy.get("family_weights_by_regime") or {}
+    override = weights_by_regime.get(regime_state)
+    if isinstance(override, Mapping):
+        return {str(k): float(v) for k, v in override.items()}
+    return None
 
 
 def resolve_direction_ensemble_policy(
@@ -451,6 +514,18 @@ def apply_regime_weight_overrides(
     resolved = {str(k): float(v) for k, v in base_weights.items()}
     if not policy or not bool(policy.get("enabled")):
         return resolved
+    family_override = _resolve_active_family_weight_override(
+        regime_state=regime_state,
+        horizon=horizon,
+        policy=policy,
+        normalize_horizon_value=normalize_horizon_value,
+    )
+    family_map = resolve_component_group_map(policy.get("family_map") if isinstance(policy.get("family_map"), Mapping) else None)
+    if family_override:
+        for key, value in list(resolved.items()):
+            family = family_map.get(str(key).strip().lower())
+            if family and family in family_override:
+                resolved[key] = float(value) * float(family_override[family])
     normalized_horizon = normalize_horizon_value(horizon) if horizon is not None else None
     weights_by_regime_horizon = policy.get("weights_by_regime_horizon") or {}
     if normalized_horizon is not None:
@@ -479,6 +554,12 @@ def get_active_regime_weight_override(
 ) -> Optional[Dict[str, float]]:
     if not policy or not bool(policy.get("enabled")):
         return None
+    family_override = _resolve_active_family_weight_override(
+        regime_state=regime_state,
+        horizon=horizon,
+        policy=policy,
+        normalize_horizon_value=normalize_horizon_value,
+    )
     normalized_horizon = normalize_horizon_value(horizon) if horizon is not None else None
     weights_by_regime_horizon = policy.get("weights_by_regime_horizon") or {}
     if normalized_horizon is not None:
@@ -486,9 +567,23 @@ def get_active_regime_weight_override(
         if isinstance(horizon_overrides, Mapping):
             override = horizon_overrides.get(normalized_horizon)
             if isinstance(override, Mapping):
-                return {str(k): float(v) for k, v in override.items()}
+                model_override = {str(k): float(v) for k, v in override.items()}
+                if family_override:
+                    return {
+                        "model_overrides": model_override,
+                        "family_multipliers": family_override,
+                    }
+                return model_override
     weights_by_regime = policy.get("weights_by_regime") or {}
     override = weights_by_regime.get(regime_state)
     if isinstance(override, Mapping):
-        return {str(k): float(v) for k, v in override.items()}
+        model_override = {str(k): float(v) for k, v in override.items()}
+        if family_override:
+            return {
+                "model_overrides": model_override,
+                "family_multipliers": family_override,
+            }
+        return model_override
+    if family_override:
+        return {"family_multipliers": family_override}
     return None

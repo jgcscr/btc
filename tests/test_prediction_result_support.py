@@ -9,6 +9,9 @@ from src.runtime.prediction_result_support import build_prediction_result
 def test_build_prediction_result_populates_expected_fields_and_pending_states() -> None:
 	signal = {
 		"p_up_components": {"xgb": 0.7},
+			"component_probability_std": 0.12,
+			"component_group_tree_p_up": 0.7,
+			"direction_ensemble_selected_count": 3.0,
 		"volatility": {"snapshot": {"atr": 1.2}, "triggered": False},
 		"volatility_flag": False,
 	}
@@ -105,3 +108,6 @@ def test_build_prediction_result_populates_expected_fields_and_pending_states() 
 	assert result["uncertainty"]["available"] is False
 	assert result["range_expansion_1h"] == 1.1
 	assert result["momentum_slope_2h"] == 0.2
+	assert result["component_probability_std"] == pytest.approx(0.12)
+	assert result["component_group_tree_p_up"] == pytest.approx(0.7)
+	assert result["direction_ensemble_selected_count"] == pytest.approx(3.0)

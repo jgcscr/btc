@@ -7,6 +7,8 @@ from typing import Dict, List
 
 import pandas as pd
 
+from src.utils.component_diversity_support import component_feature_column_names
+
 
 FEATURE_COLUMNS: List[str] = [
     "ret_pred",
@@ -40,6 +42,7 @@ FEATURE_COLUMNS: List[str] = [
     "incumbent_signal_reference",
     "candidate_only_reference",
     "candidate_incumbent_disagreement",
+    *component_feature_column_names(),
 ]
 
 

@@ -226,6 +226,47 @@ def test_regime_weight_policy_prefers_horizon_override_and_reports_active_overri
     assert active == {"gru": 1.2, "xgb": 0.8}
 
 
+def test_regime_weight_policy_applies_family_multipliers_before_model_overrides() -> None:
+    policy = resolve_regime_model_weights_policy(
+        {
+            "enabled": True,
+            "family_map": {
+                "xgb": "tree",
+                "lgbm": "tree",
+                "transformer": "attention",
+            },
+            "family_weights": {
+                "neutral": "tree:1.1,attention:0.9",
+            },
+            "neutral": "xgb:1.5",
+        },
+        regimes=("trend_ignition", "neutral", "chop"),
+        coerce_numeric_horizon=_coerce_numeric_horizon,
+        normalize_horizon_value=_normalize_horizon_value,
+        parse_weight_spec=_parse_weight_spec,
+    )
+
+    resolved = apply_regime_weight_overrides(
+        {"xgb": 1.0, "lgbm": 1.0, "transformer": 2.0},
+        regime_state="neutral",
+        horizon=1.0,
+        policy=policy,
+        normalize_horizon_value=_normalize_horizon_value,
+    )
+    active = get_active_regime_weight_override(
+        regime_state="neutral",
+        horizon=1.0,
+        policy=policy,
+        normalize_horizon_value=_normalize_horizon_value,
+    )
+
+    assert resolved == {"xgb": 1.5, "lgbm": 1.1, "transformer": 1.8}
+    assert active == {
+        "model_overrides": {"xgb": 1.5},
+        "family_multipliers": {"tree": 1.1, "attention": 0.9},
+    }
+
+
 def test_resolve_regime_specific_dir_path_uses_existing_override(tmp_path: Path) -> None:
     default_path = tmp_path / "default.json"
     default_path.write_text("{}", encoding="utf-8")

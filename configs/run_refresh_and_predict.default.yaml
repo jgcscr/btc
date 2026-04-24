@@ -497,6 +497,21 @@ adaptive_thresholds:
   ret_min_ceiling: 0.003
 regime_model_weights:
   enabled: true
+  family_map:
+    xgb: tree
+    lgbm: tree
+    lstm: recurrent
+    bilstm: recurrent
+    gru: recurrent
+    cnn_lstm: recurrent
+    cnn_bilstm: recurrent
+    garch_lstm: volatility
+    transformer: attention
+    transformer_large: attention
+  family_weights:
+    trend_ignition: tree:1.1,attention:1.05,recurrent:0.95,volatility:0.9
+    neutral: tree:1.05,attention:1.0,recurrent:0.95,volatility:1.0
+    chop: tree:1.05,attention:0.9,recurrent:0.95,volatility:1.1
   trend_ignition:
     "1": "transformer:1.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,lgbm:0.0,xgb:1.5"
     "4": "transformer:1.0,lstm:1.25,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:1.0,xgb:1.5"

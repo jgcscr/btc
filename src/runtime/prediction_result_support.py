@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, Mapping, Sequence
 
+from src.utils.component_diversity_support import (
+    component_feature_column_names,
+    pairwise_feature_column_names,
+)
+
 
 PredictionResult = Dict[str, Any]
 
@@ -153,6 +158,17 @@ def build_prediction_result(
     )
     result["direction_output"] = direction_output
     result["direction_next_display"] = direction_output.get("direction", result["direction_next"])
+
+    for field in [
+        *component_feature_column_names(),
+        *pairwise_feature_column_names(),
+        "direction_ensemble_selected_count",
+        "direction_ensemble_rejected_count",
+        "direction_ensemble_missing_preferred_group_count",
+    ]:
+        if field in signal:
+            value = finite_float_or_none(signal.get(field))
+            result[field] = 0.0 if value is None else float(value)
 
     for field in optional_feature_fields:
         if field in row_features.index:

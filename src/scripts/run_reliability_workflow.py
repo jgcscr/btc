@@ -836,6 +836,11 @@ def _write_meta_component_frame(
     output_path: Path,
     requested_columns: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
+    from src.utils.component_diversity_support import (
+        build_component_feature_frame,
+        summarize_component_history,
+    )
+
     if not source_path.exists():
         return {
             "written": False,
@@ -903,6 +908,9 @@ def _write_meta_component_frame(
     derived = frame[[ts_col, ret_col, *component_columns]].copy()
     if ret_col != "ret_1h":
         derived = derived.rename(columns={ret_col: "ret_1h"})
+    component_features = build_component_feature_frame(derived, component_columns)
+    for column in component_features.columns:
+        derived[column] = pd.to_numeric(component_features[column], errors="coerce").fillna(0.0)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     derived.to_csv(output_path, index=False)
     return {
@@ -911,6 +919,7 @@ def _write_meta_component_frame(
         "output": str(output_path),
         "rows": int(len(derived)),
         "component_columns": component_columns,
+        "component_diversity": summarize_component_history(derived, component_columns),
     }
 
 
@@ -2097,6 +2106,8 @@ def _materialize_trade_decision_feature_frame(
     candidate_path: Path,
     model_payload: Dict[str, Any],
 ) -> pd.DataFrame:
+    from src.utils.component_diversity_support import build_component_feature_frame
+
     if candidate_path.suffix.lower() == ".parquet":
         df = pd.read_parquet(candidate_path)
     else:
@@ -2134,6 +2145,12 @@ def _materialize_trade_decision_feature_frame(
     resolved_side = pd.Series("neutral", index=working.index, dtype=object)
     resolved_side.loc[p_up_series >= 0.52] = "up"
     resolved_side.loc[p_up_series <= 0.48] = "down"
+    component_columns = [
+        str(column)
+        for column in working.columns
+        if str(column).startswith("p_up_") and str(column) not in {"p_up_meta", "p_up_gate"}
+    ]
+    component_features = build_component_feature_frame(working, component_columns)
     for column in feature_columns:
         if column == "expected_value_proxy":
             working[column] = p_up_series * ret_pred_series
@@ -2165,6 +2182,8 @@ def _materialize_trade_decision_feature_frame(
             working[column] = (regime_series == "neutral").astype(float)
         elif column == "regime_is_chop":
             working[column] = (regime_series == "chop").astype(float)
+        elif column in component_features.columns:
+            working[column] = pd.to_numeric(component_features[column], errors="coerce").fillna(0.0)
         else:
             source = working[column] if column in working.columns else pd.Series(0.0, index=working.index, dtype=float)
             working[column] = pd.to_numeric(source, errors="coerce").fillna(0.0)

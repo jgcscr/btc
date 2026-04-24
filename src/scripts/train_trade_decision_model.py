@@ -12,6 +12,11 @@ from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import TimeSeriesSplit
 
+from src.utils.component_diversity_support import (
+    build_component_feature_frame,
+    component_feature_column_names,
+)
+
 
 FEATURE_COLUMNS = [
     "p_up",
@@ -58,6 +63,7 @@ FEATURE_COLUMNS = [
     "regime_is_trend",
     "regime_is_neutral",
     "regime_is_chop",
+    *component_feature_column_names(),
 ]
 
 REFERENCE_FEATURE_COLUMNS = [
@@ -279,6 +285,18 @@ def _extract_features(df: pd.DataFrame) -> pd.DataFrame:
     out["regime_is_trend"] = (regime == "trend_ignition").astype(float)
     out["regime_is_neutral"] = (regime == "neutral").astype(float)
     out["regime_is_chop"] = (regime == "chop").astype(float)
+
+    component_columns = [
+        str(column)
+        for column in df.columns
+        if str(column).startswith("p_up_") and str(column) not in {"p_up_meta", "p_up_gate"}
+    ]
+    component_features = build_component_feature_frame(df, component_columns)
+    for column in component_feature_column_names():
+        if column in df.columns:
+            out[column] = _series(column, component_features.get(column, 0.0))
+        else:
+            out[column] = pd.to_numeric(component_features.get(column, 0.0), errors="coerce").fillna(0.0)
     return out[FEATURE_COLUMNS]
 
 

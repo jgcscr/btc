@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, Mapping
 
 import numpy as np
 
+from src.utils.component_diversity_support import component_feature_column_names, pairwise_feature_column_names
+
 
 SummaryPayload = Dict[str, Dict[str, Any]]
 ExecutionContexts = Mapping[str, Mapping[str, Any]]
@@ -262,6 +264,14 @@ def apply_trade_decision_model(
         "regime_is_neutral": 1.0 if regime_state == regime_neutral else 0.0,
         "regime_is_chop": 1.0 if regime_state == regime_chop else 0.0,
     }
+    for column in [
+        *component_feature_column_names(),
+        *pairwise_feature_column_names(),
+        "direction_ensemble_selected_count",
+        "direction_ensemble_rejected_count",
+        "direction_ensemble_missing_preferred_group_count",
+    ]:
+        feature_values[column] = float(result.get(column, 0.0) or 0.0)
 
     logit = intercept
     for name, coef in zip(feature_names, coefficients):

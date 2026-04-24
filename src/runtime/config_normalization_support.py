@@ -175,6 +175,30 @@ def normalize_regime_model_weights_block(
         if key == "enabled":
             normalized[key] = bool(raw_value)
             continue
+        if key == "family_map":
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("regime_model_weights.family_map must be a mapping.")
+            normalized[key] = {str(inner_key): str(inner_value) for inner_key, inner_value in raw_value.items()}
+            continue
+        if key == "family_weights":
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("regime_model_weights.family_weights must be a mapping.")
+            family_weights: Dict[str, Any] = {}
+            for regime_key, regime_value in raw_value.items():
+                regime_name = str(regime_key).replace("-", "_")
+                if regime_name not in valid_regimes:
+                    stderr_write(
+                        f"Warning: Unknown regime_model_weights.family_weights key '{regime_key}' ignored.\n"
+                    )
+                    continue
+                if isinstance(regime_value, Mapping):
+                    family_weights[regime_name] = {
+                        str(inner_key): str(inner_value) for inner_key, inner_value in regime_value.items()
+                    }
+                else:
+                    family_weights[regime_name] = str(regime_value) if regime_value is not None else None
+            normalized[key] = family_weights
+            continue
         if key in valid_regimes:
             if isinstance(raw_value, Mapping):
                 normalized[key] = {str(inner_key): str(inner_value) for inner_key, inner_value in raw_value.items()}
