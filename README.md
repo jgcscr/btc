@@ -339,6 +339,54 @@ Smoke-test the packaged profile through the refresh path:
   --dry-run
 ```
 
+### Derivatives Shadow Package
+
+Generate the derivatives-first shadow candidate config and readiness package:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_derivatives_shadow_rollout
+```
+
+Smoke-test the derivatives candidate through the refresh path:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml \
+  --dry-run
+```
+
+Run the derivatives candidate through the regular shadow-comparison surface:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_derivatives_shadow_comparison
+```
+
+### State-Engineering Guarded Package
+
+Write the dedicated guarded state-engineering rollout package:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_state_engineering_guarded_rollout
+```
+
+Refresh the underlying guarded 4h-only shadow artifact when needed:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_state_engineering_guarded_shadow
+```
+
+### Unified Signal-Expansion Rollout Summary
+
+Write the combined rollout summary for derivatives, 4h feature-lift, and guarded state-engineering:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_signal_expansion_rollout
+```
+
+Current operator note:
+
+- this summary keeps macro explicitly deprioritized, treats derivatives as the next shadow-validation lane, and points to the guarded 4h-only state-engineering runner instead of widening that family prematurely
+
 ### Full-History Trade-Decision Rebuild
 
 Rebuild the hardened trade-decision artifact used by the 4h shadow package:

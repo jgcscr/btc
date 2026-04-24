@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
@@ -534,6 +535,93 @@ def build_derivatives_shadow_scaffold(audit: Mapping[str, Any]) -> Dict[str, Any
         "notes": [
             "This is a scaffold-only artifact; it does not change live inference behavior.",
             "If blocked, resolve local funding/futures data coverage before adding replay logic.",
+        ],
+    }
+
+
+def build_derivatives_shadow_candidate_config(
+    base_config: Mapping[str, Any],
+    *,
+    audit: Mapping[str, Any],
+) -> Dict[str, Any]:
+    config = deepcopy(dict(base_config))
+    coverage = config.get("feature_coverage_policy")
+    if not isinstance(coverage, Mapping):
+        coverage = {}
+    coverage = dict(coverage)
+
+    ignored_sources = [
+        str(source).strip()
+        for source in (coverage.get("ignored_sources") or [])
+        if str(source).strip()
+    ]
+    ignored_columns = [
+        str(column).strip()
+        for column in (coverage.get("ignored_columns") or [])
+        if str(column).strip()
+    ]
+
+    coverage["enabled"] = True
+    coverage["ignored_sources"] = [source for source in ignored_sources if source.lower() != "funding"]
+    coverage["ignored_columns"] = [
+        column for column in ignored_columns if classify_feature_family(column) != "derivatives"
+    ]
+    config["feature_coverage_policy"] = coverage
+
+    return config
+
+
+def build_signal_expansion_rollout_summary(
+    *,
+    signal_payload: Mapping[str, Any],
+    derivatives_audit: Mapping[str, Any],
+    derivatives_scaffold: Mapping[str, Any],
+    derivatives_config_path: str,
+    featurelift_config_path: str,
+    featurelift_package_path: str,
+    state_guarded_json_path: str,
+    state_guarded_md_path: str,
+) -> Dict[str, Any]:
+    families = signal_payload.get("families") if isinstance(signal_payload.get("families"), Mapping) else {}
+    macro_payload = families.get("macro") if isinstance(families, Mapping) and isinstance(families.get("macro"), Mapping) else {}
+    state_payload = (
+        families.get("state_engineering")
+        if isinstance(families, Mapping) and isinstance(families.get("state_engineering"), Mapping)
+        else {}
+    )
+    readiness = derivatives_audit.get("readiness") if isinstance(derivatives_audit.get("readiness"), Mapping) else {}
+
+    return {
+        "next_priority_family": "derivatives",
+        "program_direction": {
+            "macro": {
+                "status": str(macro_payload.get("status") or "unknown"),
+                "disposition": str(macro_payload.get("disposition") or "unknown"),
+                "recommended_action": "keep_deprioritized",
+            },
+            "derivatives": {
+                "status": str(readiness.get("decision") or "unknown"),
+                "next_action": str(readiness.get("next_action") or "unknown"),
+                "candidate_config": derivatives_config_path,
+                "scaffold_runner_status": str(derivatives_scaffold.get("runner_status") or "unknown"),
+            },
+            "featurelift_4h": {
+                "status": "shadow_candidate",
+                "candidate_config": featurelift_config_path,
+                "package_markdown": featurelift_package_path,
+            },
+            "state_engineering": {
+                "status": str(state_payload.get("status") or "unknown"),
+                "disposition": str(state_payload.get("disposition") or "unknown"),
+                "guarded_shadow_json": state_guarded_json_path,
+                "guarded_shadow_markdown": state_guarded_md_path,
+            },
+        },
+        "implementation_notes": [
+            "Derivatives move into a dedicated shadow candidate config rather than remaining ignored by live coverage.",
+            "4h feature-lift remains the shadow retrain lane for model-level improvement.",
+            "State-engineering stays constrained to the guarded 4h-only runner until stronger evidence appears.",
+            "Macro remains contextual and explicitly deprioritized.",
         ],
     }
 

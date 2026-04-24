@@ -286,6 +286,57 @@ Rebuild the hardened decision gate artifact if the package summary shows an outd
   --candidate-only
 ```
 
+## 8. Derivatives Shadow Rollout
+
+Generate the derivatives-first shadow candidate config and readiness package:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_derivatives_shadow_rollout
+```
+
+Validate the candidate config without emitting a live run:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml \
+  --dry-run
+```
+
+Run the candidate through the regular shadow-comparison surface:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_derivatives_shadow_comparison
+```
+
+## 9. State-Engineering Guarded Rollout Package
+
+Write the dedicated guarded state-engineering rollout package:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_state_engineering_guarded_rollout
+```
+
+Refresh the underlying guarded 4h-only shadow artifact when needed:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_state_engineering_guarded_shadow
+```
+
+## 10. Unified Signal-Expansion Rollout Summary
+
+Write the combined rollout summary for the active expansion lanes:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_signal_expansion_rollout
+```
+
+Current rollout posture:
+
+- derivatives: next-priority shadow lane with a dedicated candidate config
+- 4h feature-lift: existing retrain-driven shadow package remains active
+- state-engineering: keep the guarded `4h`-only runner rather than widening scope
+- macro: keep deprioritized unless materially new evidence appears
+
 ### Trust Hardening Rollout Checks
 
 For profiles with trust hardening enabled, verify these fields in `artifacts/runtime_runs/<run-id>/predictions.json` or `artifacts/runtime_runs/<run-id>/monitoring.json` before promotion to live use.

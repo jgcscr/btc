@@ -1,0 +1,459 @@
+hours: 360
+targets:
+- 0.25
+- 1
+- 4
+- 12
+p_up_min: 0.45
+ret_min: 0.0
+direction_threshold: 0.6
+auto_direction_threshold: true
+thresholds_json: artifacts/models/calibrated_thresholds_merged.json
+data_quality:
+  enabled: false
+  max_staleness_hours: 6.0
+  max_missing_ratio: 0.01
+  max_zero_volume_ratio: 0.2
+  min_rows: 120
+confidence_min: 0.33
+confidence_min_by_horizon_regime:
+  '8':
+    trend_ignition: 0.23
+position_size_floor: 0.0
+position_size_cap: 0.35
+position_size_cap_by_horizon:
+  '0.25': 0.0
+  '1': 0.15
+  '4': 0.35
+  '8': 0.2
+  '12': 0.35
+abstention_policy:
+  enabled: true
+  min_confidence: 0.2
+  min_abs_expected_value: 0.0002
+  min_edge_over_fee: 0.0001
+  require_positive_ev: true
+  hold_prob_center: 0.5
+  hold_prob_band: 0.03
+  thresholds_by_horizon_regime:
+    '8':
+      trend_ignition:
+        hold_prob_band: 0.0
+uncertainty_policy:
+  enabled: true
+  alpha: 0.2
+  hold_prob_center: 0.5
+  max_interval_width: 0.75
+  require_center_cross: true
+  min_component_count: 3
+  thresholds_by_horizon_regime:
+    '1':
+      neutral:
+        max_interval_width: 0.6
+        require_center_cross: true
+      chop:
+        max_interval_width: 0.5
+        require_center_cross: true
+      trend_ignition:
+        max_interval_width: 0.65
+        require_center_cross: true
+    '4':
+      neutral:
+        max_interval_width: 0.8
+        require_center_cross: true
+      chop:
+        max_interval_width: 0.7
+        require_center_cross: true
+      trend_ignition:
+        max_interval_width: 0.85
+        require_center_cross: false
+    '8':
+      neutral:
+        max_interval_width: 0.85
+        require_center_cross: false
+      chop:
+        max_interval_width: 0.75
+        require_center_cross: true
+      trend_ignition:
+        max_interval_width: 0.95
+        require_center_cross: false
+    '12':
+      neutral:
+        max_interval_width: 0.95
+        require_center_cross: false
+      chop:
+        max_interval_width: 0.8
+        require_center_cross: true
+      trend_ignition:
+        max_interval_width: 1.0
+        require_center_cross: false
+trade_decision_policy:
+  enabled: true
+  model_path: artifacts/models/trade_decision_model.json
+  threshold: 0.5495
+  thresholds_by_horizon_regime:
+    '8':
+      trend_ignition: 0.4175
+    '12':
+      trend_ignition: 0.4175
+  use_oof_expected_value: true
+  oof_expected_value_mode: max_with_raw_calibrated
+  enforce_positive_oof_envelope: true
+  positive_oof_envelope_mode: populated_bin_sign
+  block_when_no_positive_oof_bin: true
+  positive_oof_min_samples: 4
+  allow_raw_ev_fallback_when_no_positive_oof_bin: true
+  raw_ev_fallback_quantile: 0.9
+  raw_ev_fallback_min_edge_over_fee: 0.0
+  min_expected_net: 0.0
+  min_edge_over_fee: 0.0
+  replace_threshold_rule: true
+  require_direction_ret_alignment: true
+  midband_veto:
+    enabled: true
+    p_up_low: 0.56
+    p_up_high: 0.59
+    high_inclusive: false
+    min_abs_ret_pred: 0.001
+    max_abs_ret_pred: null
+    regime_states:
+    - chop
+feature_coverage_policy:
+  enabled: true
+  max_imputed_zero_columns: 12
+  max_imputed_zero_ratio: 0.2
+  max_source_lag_hours: 6.0
+  block_on_violation: true
+  ignored_sources:
+  - macro
+  - onchain
+  ignored_columns:
+  - macro_dollar_proxy
+  - macro_dollar_proxy_change_1d
+  - macro_dollar_proxy_zscore_30d
+  - macro_dollar_proxy_trend_5d
+  - macro_us10y
+  - macro_us10y_change_1d
+  - macro_us10y_zscore_30d
+  - macro_us10y_trend_5d
+  - macro_eurusd
+  - macro_eurusd_change_1d
+  - macro_eurusd_zscore_30d
+  - macro_eurusd_trend_5d
+  - interaction_breakout_volume_8h
+  - interaction_imbalance_trend_6h
+  - interaction_momentum_volatility_4h
+  - price_distance_to_high_atr_24h
+  - price_distance_to_high_pct_rank_24h
+  - price_distance_to_low_atr_24h
+  - price_distance_to_low_pct_rank_24h
+  - range_compression_ratio_4h_24h
+  - range_compression_transition_8h
+  - trades_taker_imbalance_acceleration_3h
+  - trades_taker_imbalance_persistence_6h
+  - trend_directional_persistence_4h
+  - trend_directional_persistence_8h
+  - trend_path_efficiency_4h
+  - trend_path_efficiency_8h
+  - volume_regime_zscore_24h
+forecast_coherence_policy:
+  enabled: true
+  horizons:
+  - 1
+  - 4
+  - 12
+  block_on_direction_ret_mismatch: true
+  block_on_direction_projected_price_mismatch: true
+  block_on_p_up_ret_mismatch: true
+  p_up_neutral_band: 0.02
+  min_p_up_edge: 0.05
+  min_abs_ret_pred: 0.0
+  allow_consensus_p_up_ret_relief: true
+  consensus_relief_horizons:
+  - 1
+  - 4
+  consensus_relief_max_p_up_edge: 0.12
+  consensus_relief_exclude_from_voting: false
+  exclude_blocked_horizons_from_voting: true
+trust_hardening_policy:
+  enabled: true
+  horizons:
+  - 4
+  high_impact_horizons:
+  - 4
+  fail_closed: true
+  default_action: exclude
+  action_by_horizon:
+    '4': deweight
+  deweight_factor: 0.35
+  deweight_factor_by_horizon:
+    '4': 0.5
+  divergence_abs_gap_min: 0.12
+  divergence_flip_required: true
+  probability_neutral_band: 0.0
+  metadata_checks:
+    enabled: true
+    require_metadata: true
+    leakage_signature_features:
+    - ret_1h
+    - ret_4h
+    - ret_8h
+    - ret_12h
+    max_val_accuracy: 0.995
+    max_test_accuracy: 0.995
+    max_train_accuracy: 0.999
+    max_train_val_accuracy_gap: 0.03
+  model_summary_paths_by_horizon:
+    '4': artifacts/models/lgbm_dir4h_v1/summary.json
+direction_output_policy:
+  enabled: true
+  horizons:
+  - 0.25
+  - 1
+  neutral_band: 0.02
+  neutral_band_by_horizon:
+    '0.25': 0.04
+    '1': 0.025
+  calibration_path: artifacts/models/direction_output_isotonic_1h.json
+  use_trade_probability_fallback: true
+  probability_shrinkage:
+    enabled: true
+    horizons:
+    - 0.25
+    - 1
+    regimes:
+    - chop
+    - neutral
+    default_strength: 0.3
+    strength_by_horizon:
+      '0.25': 0.5
+      '1': 0.25
+    bypass_edge: 0.32
+  marginal_rerank:
+    enabled: true
+    horizons:
+    - 1
+    lower: 0.5
+    upper: 0.6
+    min_component_count: 2
+    use_raw_probability_gate: true
+    weight_specs:
+      default: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
+      trend_ignition: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
+      neutral: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
+      chop: transformer:1.0,lstm:1.0,bilstm:1.0,gru:1.5,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,xgb:0.0
+direction_ensemble_policy:
+  enabled: true
+  horizons:
+  - 1
+  - 4
+  - 12
+  lookback_bars: 96
+  min_history_points: 24
+  max_correlation: 0.985
+  min_mean_abs_probability_gap: 0.02
+  model_groups:
+    tree:
+    - xgb
+    - lgbm
+    recurrent:
+    - lstm
+    - bilstm
+    - gru
+    - cnn_lstm
+    - cnn_bilstm
+    attention:
+    - transformer
+    - transformer_large
+    volatility:
+    - garch_lstm
+  max_active_by_horizon:
+    '1': 3
+    '4': 5
+    '12': 5
+  max_models_per_group_by_horizon:
+    '1':
+      tree: 1
+      recurrent: 1
+      attention: 1
+      volatility: 1
+    '4':
+      tree: 2
+      recurrent: 2
+      attention: 1
+      volatility: 1
+    '12':
+      tree: 2
+      recurrent: 2
+      attention: 1
+      volatility: 1
+  priority_by_horizon:
+    '1':
+    - xgb
+    - transformer
+    - lstm
+    - lgbm
+    - garch_lstm
+    - gru
+    - bilstm
+    - cnn_lstm
+    - cnn_bilstm
+    '4':
+    - xgb
+    - lgbm
+    - lstm
+    - transformer
+    - garch_lstm
+    - gru
+    - bilstm
+    - cnn_lstm
+    - cnn_bilstm
+    '12':
+    - xgb
+    - lgbm
+    - transformer
+    - lstm
+    - garch_lstm
+    - gru
+    - bilstm
+    - cnn_lstm
+    - cnn_bilstm
+  preferred_groups_by_horizon:
+    '1':
+    - tree
+    - attention
+    - recurrent
+    '4':
+    - tree
+    - attention
+    '12':
+    - tree
+    - attention
+regime_model_weights:
+  enabled: true
+  family_map:
+    xgb: tree
+    lgbm: tree
+    lstm: recurrent
+    bilstm: recurrent
+    gru: recurrent
+    cnn_lstm: recurrent
+    cnn_bilstm: recurrent
+    garch_lstm: volatility
+    transformer: attention
+    transformer_large: attention
+  family_weights:
+    trend_ignition: tree:1.1,attention:1.05,recurrent:0.95,volatility:0.9
+    neutral: tree:1.05,attention:1.0,recurrent:0.95,volatility:1.0
+    chop: tree:1.05,attention:0.9,recurrent:0.95,volatility:1.1
+  trend_ignition:
+    '1': transformer:1.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,lgbm:0.0,xgb:1.5
+    '4': transformer:1.0,lstm:1.25,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:0.75,xgb:1.5
+    '12': transformer:1.25,lstm:1.0,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:0.75,xgb:1.5
+  neutral:
+    '1': transformer:1.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,lgbm:0.0,xgb:1.5
+    '4': transformer:1.0,lstm:1.0,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:0.75,xgb:1.5
+    '12': transformer:1.25,lstm:1.0,bilstm:0.5,gru:0.75,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.75,lgbm:0.75,xgb:1.5
+  chop:
+    '1': transformer:1.0,lstm:1.0,bilstm:0.0,gru:0.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:0.0,lgbm:0.0,xgb:1.5
+    '4': transformer:0.5,lstm:1.25,bilstm:0.5,gru:1.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,lgbm:0.75,xgb:1.5
+    '12': transformer:0.5,lstm:1.25,bilstm:0.5,gru:1.0,cnn_lstm:0.0,cnn_bilstm:0.0,garch_lstm:1.0,lgbm:0.75,xgb:1.5
+confluence_policy:
+  enabled: true
+  short_horizons:
+  - 1
+  mid_horizons:
+  - 4
+  - 12
+  min_support_ratio: 0.66
+  min_support_ratio_by_horizon:
+    '4': 0.8
+  min_aligned_horizons: 2
+  min_aligned_horizons_by_horizon:
+    '4': 3
+  require_mid_term_alignment: true
+  min_mid_term_ratio: 0.66
+  require_short_term_alignment: false
+  min_short_term_ratio: 1.0
+  dominant_ratio_floor: 0.67
+execution_policy:
+  enabled: true
+  bias_horizons:
+  - 4
+  - 12
+  execution_horizons:
+  - 4
+  - 12
+  horizon_bias_weights:
+    '1': 0.7
+    '4': 1.0
+    '12': 1.2
+  min_bias_alignment_ratio: 0.57
+  coherence_weighting:
+    enabled: true
+    low_trust_penalty: 0.5
+    blocked_penalty: 1.0
+    p_up_conflict_penalty: 0.3
+    consensus_bonus: 0.08
+    neutral_band: 0.02
+    min_multiplier: 0.1
+    by_horizon:
+      '1': 0.85
+      '4': 1.0
+      '12': 1.05
+  short_term_strict_horizons: []
+  short_term_min_mid_ratio: 0.8
+  short_term_min_support_ratio: 0.8
+  require_bias_alignment: true
+  immediate_entry_min_support_ratio: 0.8
+  pullback_entry_min_support_ratio: 0.5
+  immediate_entry_min_mid_ratio: 1.0
+  pullback_entry_min_mid_ratio: 0.66
+  high_execution_alignment_ratio: 0.5
+  medium_execution_alignment_ratio: 0.5
+  entry_zone_atr_mult: 0.25
+  max_chase_atr_mult: 0.35
+  session_lookback_bars: 8
+  swing_lookback_bars: 6
+  structure_buffer_atr_mult: 0.2
+  minimum_rr_by_horizon:
+    '0.25': 1.1
+    '1': 1.25
+    '4': 1.6
+    '8': 1.75
+    '12': 1.75
+  time_stop_bars_by_horizon:
+    '0.25': 4
+    '1': 3
+    '4': 2
+    '8': 2
+    '12': 2
+  partial_take_profit:
+    enabled: true
+    tp1_r_multiple: 1.0
+    tp1_size_fraction: 0.5
+    move_stop_to_break_even: true
+  trailing_stop:
+    enabled: true
+    activation_r_multiple: 1.0
+    trail_buffer_atr_mult: 0.75
+  adaptive_take_profit:
+    enabled: true
+    min_rr_fraction_of_floor: 0.75
+  regime_templates:
+    trend_ignition:
+      tp_multiplier: 1.1
+  analytics:
+    enabled: true
+    lookback_bars: 240
+    mae_quantile: 0.75
+    mfe_quantile: 0.75
+    min_samples: 40
+    regime_volatility_buckets:
+      enabled: true
+      regime_col: regime_state
+      volatility_col: volatility_realized_24h
+      min_bucket_samples: 12
+      low_vol_quantile: 0.5
+      max_projection_mfe_ratio: 1.25
+      breakout_score_threshold: 0.8

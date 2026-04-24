@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from src.runtime.signal_program_support import (
+    build_derivatives_shadow_candidate_config,
     build_derivatives_family_audit,
+    build_signal_expansion_rollout_summary,
     build_derivatives_shadow_scaffold,
     build_signal_program_dispositions,
 )
@@ -153,6 +155,46 @@ class SignalProgramSupportTests(unittest.TestCase):
         self.assertEqual(payload["readiness"]["decision"], "dataset_ready_retrain_required")
         self.assertIn("checked_model_metadata_not_refreshed_after_derivatives_wiring", payload["readiness"]["blockers"])
         self.assertGreater(payload["dataset_derivatives_family_count"], 0)
+
+    def test_derivatives_shadow_candidate_config_requires_derivatives_in_coverage(self) -> None:
+        config = build_derivatives_shadow_candidate_config(
+            {
+                "feature_coverage_policy": {
+                    "ignored_sources": ["funding", "macro", "onchain"],
+                    "ignored_columns": ["fut_close", "open_interest", "macro_us10y"],
+                }
+            },
+            audit={"readiness": {"decision": "shadow_scaffold_ready", "next_action": "run_first_shadow_derivatives_validation"}},
+        )
+
+        coverage = config["feature_coverage_policy"]
+        self.assertEqual(coverage["ignored_sources"], ["macro", "onchain"])
+        self.assertEqual(coverage["ignored_columns"], ["macro_us10y"])
+        self.assertNotIn("derivatives_shadow_validation", config)
+
+    def test_signal_expansion_rollout_summary_keeps_macro_deprioritized(self) -> None:
+        payload = build_signal_expansion_rollout_summary(
+            signal_payload={
+                "families": {
+                    "macro": {"status": "closed", "disposition": "deprioritize_for_now"},
+                    "state_engineering": {"status": "active", "disposition": "guarded_shadow_validation_active"},
+                }
+            },
+            derivatives_audit={"readiness": {"decision": "shadow_scaffold_ready", "next_action": "run_first_shadow_derivatives_validation"}},
+            derivatives_scaffold={"runner_status": "ready"},
+            derivatives_config_path="configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml",
+            featurelift_config_path="configs/run_refresh_and_predict.shadow_featurelift_4h_candidate.yaml",
+            featurelift_package_path="artifacts/analysis/featurelift_20260331_rerun/shadow_rollout_4h_package.md",
+            state_guarded_json_path="artifacts/analysis/state_engineering_guarded_shadow_4h_latest.json",
+            state_guarded_md_path="artifacts/analysis/state_engineering_guarded_shadow_4h_latest.md",
+        )
+
+        self.assertEqual(payload["next_priority_family"], "derivatives")
+        self.assertEqual(payload["program_direction"]["macro"]["recommended_action"], "keep_deprioritized")
+        self.assertEqual(
+            payload["program_direction"]["derivatives"]["candidate_config"],
+            "configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml",
+        )
 
 
 if __name__ == "__main__":
