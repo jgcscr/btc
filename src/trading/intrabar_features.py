@@ -15,6 +15,27 @@ def _sign_persistence(series: pd.Series) -> float:
     return float(np.abs(non_zero.mean()))
 
 
+def _mean_or_zero(series: pd.Series) -> float:
+    numeric = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if numeric.empty:
+        return 0.0
+    return float(numeric.mean())
+
+
+def _segment_return(bucket: pd.DataFrame) -> float:
+    if bucket.empty:
+        return 0.0
+    open_ = pd.to_numeric(bucket["open"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    close = pd.to_numeric(bucket["close"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    if open_.empty or close.empty:
+        return 0.0
+    first_open = open_.iloc[0]
+    last_close = close.iloc[-1]
+    if pd.isna(first_open) or pd.isna(last_close) or np.isclose(float(first_open), 0.0):
+        return 0.0
+    return float((last_close / first_open) - 1.0)
+
+
 def compute_hourly_intrabar_features(frame: pd.DataFrame) -> pd.DataFrame:
     required = {
         "ts",
@@ -104,12 +125,30 @@ def compute_hourly_intrabar_features(frame: pd.DataFrame) -> pd.DataFrame:
 
     persist_rows = []
     for hour_ts, bucket in grouped:
+        ordered_bucket = bucket.sort_values("ts").reset_index(drop=True)
+        split_idx = max(int(len(ordered_bucket) / 2), 1)
+        first_half = ordered_bucket.iloc[:split_idx]
+        second_half = ordered_bucket.iloc[split_idx:]
+        if second_half.empty:
+            second_half = first_half
+
+        early_imbalance = _mean_or_zero(first_half["_imbalance"])
+        late_imbalance = _mean_or_zero(second_half["_imbalance"])
+        first_half_ret = _segment_return(first_half)
+        second_half_ret = _segment_return(second_half)
+        reversal_score = 0.0
+        if first_half_ret * second_half_ret < 0.0:
+            reversal_score = float(np.sign(second_half_ret) * (abs(first_half_ret) + abs(second_half_ret)))
+
         persist_rows.append(
             {
                 "hour_ts": hour_ts,
                 "intrabar_taker_imbalance_persistence": _sign_persistence(bucket["_imbalance"]),
                 "intrabar_wick_asymmetry_persistence": _sign_persistence(bucket["_wick_asym"]),
                 "intrabar_directional_persistence_1h": _sign_persistence(bucket["_bar_direction"]),
+                "intrabar_taker_imbalance_early_late_delta": late_imbalance - early_imbalance,
+                "intrabar_reversal_score_1h": reversal_score,
+                "intrabar_wick_asymmetry_shift": _mean_or_zero(second_half["_wick_asym"]) - _mean_or_zero(first_half["_wick_asym"]),
             }
         )
     hourly = hourly.merge(pd.DataFrame(persist_rows), on="hour_ts", how="left")
@@ -125,6 +164,18 @@ def compute_hourly_intrabar_features(frame: pd.DataFrame) -> pd.DataFrame:
     hourly["intrabar_volume_regime_zscore_24h"] = volume_z
     hourly["intrabar_volume_regime_transition"] = volume_z.diff().abs()
     hourly["intrabar_flow_acceleration_3h"] = hourly["intrabar_taker_imbalance_mean"].diff().rolling(window=3, min_periods=1).mean()
+    hourly["intrabar_breakout_failure_1h"] = (
+        hourly["intrabar_path_range"].clip(lower=0.0)
+        * (1.0 - hourly["intrabar_path_efficiency_1h"].clip(lower=0.0, upper=1.0))
+    )
+    dispersion_3h = hourly["intrabar_return_dispersion_15m"].rolling(window=3, min_periods=2).mean().replace(0.0, np.nan)
+    dispersion_6h = hourly["intrabar_return_dispersion_15m"].rolling(window=6, min_periods=3).mean().replace(0.0, np.nan)
+    hourly["intrabar_return_dispersion_regime_3h"] = (
+        hourly["intrabar_return_dispersion_15m"] / dispersion_3h
+    ).replace([np.inf, -np.inf], np.nan)
+    hourly["intrabar_return_dispersion_regime_6h"] = (
+        hourly["intrabar_return_dispersion_15m"] / dispersion_6h
+    ).replace([np.inf, -np.inf], np.nan)
 
     intrabar_cols = [column for column in hourly.columns if column.startswith("intrabar_")]
     for column in intrabar_cols:

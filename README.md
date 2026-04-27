@@ -339,6 +339,22 @@ Smoke-test the packaged profile through the refresh path:
   --dry-run
 ```
 
+### 12h Interaction Shadow Package
+
+Generate the dedicated 12h shadow candidate package for horizon-specific intrabar interaction experiments:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_featurelift_12h_shadow_rollout
+```
+
+Smoke-test the 12h candidate through the refresh path:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.shadow_featurelift_12h_candidate.yaml \
+  --dry-run
+```
+
 ### Derivatives Shadow Package
 
 Generate the derivatives-first shadow candidate config and readiness package:

@@ -131,10 +131,15 @@ def _derive_regime_state(df: pd.DataFrame) -> pd.Series:
     if "regime_state" in df.columns:
         return df["regime_state"].fillna("unknown").astype(str).str.strip().str.lower()
 
-    volatility = pd.to_numeric(df.get("volatility_realized_24h"), errors="coerce")
-    range_expansion = pd.to_numeric(df.get("range_expansion_1h"), errors="coerce")
-    momentum = pd.to_numeric(df.get("momentum_slope_4h"), errors="coerce")
-    ignition = pd.to_numeric(df.get("trend_ignition_6h"), errors="coerce")
+    def _numeric_or_nan(column: str) -> pd.Series:
+        if column not in df.columns:
+            return pd.Series(np.nan, index=df.index, dtype=float)
+        return pd.to_numeric(df[column], errors="coerce")
+
+    volatility = _numeric_or_nan("volatility_realized_24h")
+    range_expansion = _numeric_or_nan("range_expansion_1h")
+    momentum = _numeric_or_nan("momentum_slope_4h")
+    ignition = _numeric_or_nan("trend_ignition_6h")
 
     regime = pd.Series("neutral", index=df.index, dtype=object)
     trend_mask = (

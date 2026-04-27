@@ -286,6 +286,28 @@ Rebuild the hardened decision gate artifact if the package summary shows an outd
   --candidate-only
 ```
 
+### 12h Interaction Shadow Rollout
+
+Write the dedicated 12h shadow rollout package:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_featurelift_12h_shadow_rollout
+```
+
+Validate the 12h candidate config without emitting a live run:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_refresh_and_predict \
+  --config configs/run_refresh_and_predict.shadow_featurelift_12h_candidate.yaml \
+  --dry-run
+```
+
+Current guidance:
+
+- keep the validated 4h package active for the current feature-lift lane
+- use the 12h candidate only for horizon-specific interaction experiments
+- do not replace the main 12h artifacts with broad pruning variants unless walkforward improves versus the current untrimmed stack
+
 ## 8. Derivatives Shadow Rollout
 
 Generate the derivatives-first shadow candidate config and readiness package:
@@ -334,6 +356,7 @@ Current rollout posture:
 
 - derivatives: next-priority shadow lane with a dedicated candidate config
 - 4h feature-lift: existing retrain-driven shadow package remains active
+- 12h interaction experiments: use the dedicated shadow package rather than changing the validated shared stack in place
 - state-engineering: keep the guarded `4h`-only runner rather than widening scope
 - macro: keep deprioritized unless materially new evidence appears
 

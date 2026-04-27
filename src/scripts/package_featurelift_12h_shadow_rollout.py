@@ -10,10 +10,13 @@ import yaml
 
 
 BASE_CONFIG = Path("configs/run_refresh_and_predict.shadow_simplified.yaml")
-OUTPUT_CONFIG = Path("configs/run_refresh_and_predict.shadow_featurelift_4h_candidate.yaml")
-OUTPUT_JSON = Path("artifacts/analysis/featurelift_20260331_rerun/shadow_rollout_4h_package.json")
-OUTPUT_MD = Path("artifacts/analysis/featurelift_20260331_rerun/shadow_rollout_4h_package.md")
-DEFAULT_WALKFORWARD = Path("artifacts/analysis/featurelift_20260331_rerun/walkforward_4h_xgb.json")
+OUTPUT_CONFIG = Path("configs/run_refresh_and_predict.shadow_featurelift_12h_candidate.yaml")
+OUTPUT_JSON = Path("artifacts/analysis/intrabar_featurelift_apr2026/shadow_rollout_12h_package.json")
+OUTPUT_MD = Path("artifacts/analysis/intrabar_featurelift_apr2026/shadow_rollout_12h_package.md")
+DEFAULT_DIRECTION_DIR = Path("artifacts/models/xgb_dir12h_v1")
+DEFAULT_REGRESSION_DIR = Path("artifacts/models/xgb_ret12h_v1")
+DEFAULT_WALKFORWARD = Path("artifacts/analysis/intrabar_featurelift_apr2026/walkforward_12h.json")
+DEFAULT_TRADE_DECISION_MODEL = Path("artifacts/models/featurelift_20260331_rerun/trade_decision_model_full_history.json")
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -28,19 +31,20 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def _render_markdown(payload: dict[str, Any]) -> str:
     validation = payload["validation"]
     lines = [
-        "# 4h Shadow Rollout Package",
+        "# 12h Shadow Rollout Package",
         "",
         f"Generated: {payload['generated_at']}",
         "",
         "## Recommendation",
         "",
-        "Promote the 4h feature-lift candidate to shadow or paper evaluation only.",
+        "Use this package for 12h-only shadow or paper evaluation of intrabar interaction experiments.",
         "",
         "## Package",
         "",
         f"- Config: {payload['config_path']}",
         f"- Direction model dir: {payload['artifacts']['direction_model_dir']}",
         f"- Regression model dir: {payload['artifacts']['regression_model_dir']}",
+        f"- Walkforward artifact: {payload['artifacts']['walkforward_path']}",
         f"- Trade decision model: {payload['artifacts']['trade_decision_model']}",
         "",
         "## Validation",
@@ -61,15 +65,17 @@ def _render_markdown(payload: dict[str, Any]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Write a reusable 4h shadow rollout package for the feature-lift candidate.")
+    parser = argparse.ArgumentParser(
+        description="Write a reusable 12h shadow rollout package for horizon-specific intrabar interaction evaluation.",
+    )
     parser.add_argument("--base-config", type=Path, default=BASE_CONFIG)
     parser.add_argument("--output-config", type=Path, default=OUTPUT_CONFIG)
     parser.add_argument("--output-json", type=Path, default=OUTPUT_JSON)
     parser.add_argument("--output-markdown", type=Path, default=OUTPUT_MD)
-    parser.add_argument("--direction-dir", type=Path, default=Path("artifacts/models/featurelift_20260331_rerun/xgb_dir4h"))
-    parser.add_argument("--regression-dir", type=Path, default=Path("artifacts/models/featurelift_20260331_rerun/xgb_ret4h"))
+    parser.add_argument("--direction-dir", type=Path, default=DEFAULT_DIRECTION_DIR)
+    parser.add_argument("--regression-dir", type=Path, default=DEFAULT_REGRESSION_DIR)
     parser.add_argument("--walkforward-path", type=Path, default=DEFAULT_WALKFORWARD)
-    parser.add_argument("--trade-decision-model", type=Path, default=Path("artifacts/models/featurelift_20260331_rerun/trade_decision_model_full_history.json"))
+    parser.add_argument("--trade-decision-model", type=Path, default=DEFAULT_TRADE_DECISION_MODEL)
     args = parser.parse_args()
 
     config_payload = _load_yaml(args.base_config)
@@ -77,7 +83,7 @@ def main() -> None:
     if not isinstance(regression_model_dirs, dict):
         regression_model_dirs = {"enabled": True}
     regression_model_dirs["enabled"] = True
-    regression_model_dirs["4h"] = str(args.regression_dir)
+    regression_model_dirs["12h"] = str(args.regression_dir)
     config_payload["regression_model_dirs"] = regression_model_dirs
 
     regime_model_dirs = config_payload.get("regime_model_dirs")
@@ -86,7 +92,7 @@ def main() -> None:
     for regime in ("trend_ignition", "neutral", "chop"):
         raw_regime_dirs = regime_model_dirs.get(regime)
         regime_dirs = dict(raw_regime_dirs) if isinstance(raw_regime_dirs, dict) else {}
-        regime_dirs["4h"] = str(args.direction_dir)
+        regime_dirs["12h"] = str(args.direction_dir)
         regime_model_dirs[regime] = regime_dirs
     regime_model_dirs["enabled"] = True
     config_payload["regime_model_dirs"] = regime_model_dirs
@@ -97,6 +103,7 @@ def main() -> None:
     trade_decision_policy["model_path"] = str(args.trade_decision_model)
     config_payload["trade_decision_policy"] = trade_decision_policy
 
+    args.output_config.parent.mkdir(parents=True, exist_ok=True)
     args.output_config.write_text(yaml.safe_dump(config_payload, sort_keys=False), encoding="utf-8")
 
     dir_summary = _load_json(args.direction_dir / "summary.json")
@@ -122,8 +129,9 @@ def main() -> None:
             "trade_decision_deploy_ready": bool(decision_payload.get("deploy_ready", False)),
         },
         "notes": [
-            "This package leaves 1h, 8h, and 12h artifacts unchanged.",
-            "Use this config for shadow or paper evaluation only; do not treat it as a live-promotion config.",
+            "This package leaves 1h, 4h, and 8h artifacts unchanged.",
+            "Use this config for 12h-specific shadow or paper evaluation only; do not treat it as a live-promotion config.",
+            "The current April 27 trimmed-12h ablation underperformed; future 12h work should prefer additive interaction experiments over broad feature removal.",
         ],
     }
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
