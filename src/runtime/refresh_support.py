@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import sys
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from src.runtime.horizon_support import coerce_numeric_horizon, format_horizon_label, normalize_horizon_value
-from src.scripts import run_refresh_and_predict as legacy
+from src.runtime.prediction_paths import TARGET_RANGE_MODEL_DIR
 from src.trading.thresholds import load_calibrated_thresholds
 
 
@@ -366,20 +367,20 @@ def resolve_prediction_inputs(args: argparse.Namespace) -> PredictionInputBundle
     thresholds_path = args.thresholds_json or None
     platt_calibration = load_probability_calibration(
         getattr(args, "platt_calibration", None),
-        stderr_write=legacy.sys.stderr.write,
+        stderr_write=sys.stderr.write,
     )
     direction_output_cfg = dict(getattr(args, "direction_output_policy", {}) or {})
     direction_output_calibration_path = direction_output_cfg.get("calibration_path")
     direction_output_cfg["calibration_map"] = load_probability_calibration(
         direction_output_calibration_path,
-        stderr_write=legacy.sys.stderr.write,
+        stderr_write=sys.stderr.write,
     )
     if args.target_range_models is None:
-        target_range_meta = legacy.TARGET_RANGE_MODEL_DIR / "metadata.json"
+        target_range_meta = TARGET_RANGE_MODEL_DIR / "metadata.json"
         if target_range_meta.exists():
             args.target_range_models = {
                 "enabled": True,
-                "model_dir": str(legacy.TARGET_RANGE_MODEL_DIR),
+                "model_dir": str(TARGET_RANGE_MODEL_DIR),
             }
     thresholds_by_horizon = load_calibrated_thresholds(thresholds_path)
     if thresholds_by_horizon:
@@ -395,7 +396,7 @@ def resolve_prediction_inputs(args: argparse.Namespace) -> PredictionInputBundle
         normalize_horizon_value=normalize_horizon_value,
         coerce_numeric_horizon=coerce_numeric_horizon,
         format_horizon_label=format_horizon_label,
-        stderr_write=legacy.sys.stderr.write,
+        stderr_write=sys.stderr.write,
     )
     return PredictionInputBundle(
         direction_output_cfg=direction_output_cfg,

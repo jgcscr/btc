@@ -35,16 +35,6 @@ def test_persist_outputs_uses_runtime_output_functions_not_legacy_helpers(tmp_pa
     def fake_refresh_meta_baseline(**kwargs):
         calls.append("refresh_meta_baseline")
 
-    monkeypatch.setattr(refresh_pipeline.legacy, "write_summary", fail)
-    monkeypatch.setattr(refresh_pipeline.legacy, "_write_monitoring_latest", fail)
-    monkeypatch.setattr(refresh_pipeline.legacy, "_write_trade_ready_monitoring", fail)
-    monkeypatch.setattr(refresh_pipeline.legacy, "_refresh_meta_baseline", fail)
-    monkeypatch.setattr(refresh_pipeline.legacy, "_build_prompt_ready_summary", fail)
-    monkeypatch.setattr(refresh_pipeline.legacy, "_build_blocked_trade_analytics", fail)
-    monkeypatch.setattr(refresh_pipeline.legacy, "_build_degradation_monitoring", fail)
-    monkeypatch.setattr(refresh_pipeline.legacy, "_horizon_sort_key", fail)
-    monkeypatch.setattr(refresh_pipeline.legacy, "_format_horizon_label", fail)
-    monkeypatch.setattr(refresh_pipeline.legacy, "_append_detected_meta_columns", fail)
     monkeypatch.setattr(refresh_pipeline, "runtime_write_prediction_summary", fake_write_prediction_summary)
     monkeypatch.setattr(refresh_pipeline, "runtime_write_monitoring_artifact", fake_write_monitoring_artifact)
     monkeypatch.setattr(refresh_pipeline, "runtime_refresh_meta_baseline", fake_refresh_meta_baseline)

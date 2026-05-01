@@ -202,14 +202,14 @@ def test_resolve_prediction_inputs_uses_runtime_calibration_loader(base_args: ar
 
     from src.runtime import refresh_support as refresh_support_module
 
-    original_target_range_dir = refresh_support_module.legacy.TARGET_RANGE_MODEL_DIR
+    original_target_range_dir = refresh_support_module.TARGET_RANGE_MODEL_DIR
     original_threshold_loader = refresh_support_module.load_calibrated_thresholds
-    refresh_support_module.legacy.TARGET_RANGE_MODEL_DIR = target_range_dir
+    refresh_support_module.TARGET_RANGE_MODEL_DIR = target_range_dir
     refresh_support_module.load_calibrated_thresholds = lambda _path: {1.0: {"p_up_min": 0.55, "ret_min": 0.01}}
     try:
         bundle = resolve_prediction_inputs(base_args)
     finally:
-        refresh_support_module.legacy.TARGET_RANGE_MODEL_DIR = original_target_range_dir
+        refresh_support_module.TARGET_RANGE_MODEL_DIR = original_target_range_dir
         refresh_support_module.load_calibrated_thresholds = original_threshold_loader
 
     assert bundle.platt_calibration == {"1h": {"method": "platt", "a": 1.0, "b": 0.0}}

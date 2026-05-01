@@ -6,50 +6,79 @@ import shlex
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
-import yaml
 from sklearn.metrics import roc_auc_score
 
-from src.scripts.build_direction_output_shadow_config import build_shadow_config
+from src.runtime.reliability_workflow_common import (
+    StepResult,
+    emit_step_event as _emit_step_event,
+    load_json as _load_json,
+    load_yaml as _load_yaml,
+    run_with_step_event_sink as _run_with_step_event_sink,
+)
+from src.runtime.reliability_config_support import (
+    build_audit_weighted_runtime_config as _build_audit_weighted_runtime_config,
+    extract_audit_weight_spec as _extract_audit_weight_spec,
+    format_horizon_label as _format_horizon_label,
+    format_weight_spec as _format_weight_spec,
+    join_horizons as _join_horizons,
+    load_prediction_targets as _load_prediction_targets,
+    parse_weight_spec as _parse_weight_spec,
+)
+from src.runtime.reliability_candidate_config_support import (
+    resolve_direction_output_shadow_horizons as _resolve_direction_output_shadow_horizons,
+    write_direction_output_shadow_config as _write_direction_output_shadow_config,
+    write_upstream_direction_candidate_config as _write_upstream_direction_candidate_config,
+    derive_trade_decision_regime_midband_candidate as _derive_trade_decision_regime_midband_candidate_impl,
+    write_trade_decision_midband_candidate_config as _write_trade_decision_midband_candidate_config_impl,
+)
+from src.runtime.reliability_champion_support import (
+    build_champion_gate_alignment_check as _build_champion_gate_alignment_check,
+    extract_trade_decision_reference_source as _extract_trade_decision_reference_source,
+    resolve_effective_champion_gate as _resolve_effective_champion_gate,
+    resolve_trade_decision_model_path_for_variant as _resolve_trade_decision_model_path_for_variant,
+)
+from src.runtime.reliability_command_builders import (
+    build_calibration_robustness_command as _build_calibration_robustness_command,
+    build_directional_objectives_command as _build_directional_objectives_command,
+    build_rolling_ab_command as _build_rolling_ab_command,
+)
+from src.runtime.reliability_model_shift_guard_support import (
+    apply_trade_decision_model_shift_guard as _apply_trade_decision_model_shift_guard_impl,
+    build_trade_decision_model_shift_guard as _build_trade_decision_model_shift_guard_impl,
+)
+from src.runtime.reliability_quality_support import (
+    write_calibrated_quality_input as _write_calibrated_quality_input_impl,
+    write_meta_component_frame as _write_meta_component_frame,
+)
+from src.runtime.reliability_selection_guard_support import (
+    augment_selection_guard_candidate_floors as _augment_selection_guard_candidate_floors_impl,
+    dedupe_selection_calibration_guard_rules as _dedupe_selection_calibration_guard_rules_impl,
+    load_reusable_selection_calibration_guard_rules as _load_reusable_selection_calibration_guard_rules,
+    normalize_selection_calibration_guard_rules as _normalize_selection_calibration_guard_rules,
+)
+from src.runtime.reliability_regime_shadow_support import (
+    build_regime_abs_ret_pred_floor_shadow as _build_regime_abs_ret_pred_floor_shadow,
+    build_regime_max_p_up_shadow as _build_regime_max_p_up_shadow,
+)
+from src.runtime.reliability_shadow_variant_support import (
+    REFERENCE_FEATURE_ABLATION_THRESHOLD_VARIANT_PREFIX,
+    REFERENCE_FEATURE_ABLATION_VARIANT,
+    format_threshold_variant_name as _format_threshold_variant_name,
+    format_reference_feature_ablation_threshold_variant_name as _format_reference_feature_ablation_threshold_variant_name,
+    format_reference_feature_ablation_selection_guard_variant_name as _format_reference_feature_ablation_selection_guard_variant_name,
+    format_reference_feature_ablation_abs_ret_pred_variant_name as _format_reference_feature_ablation_abs_ret_pred_variant_name,
+    format_reference_feature_ablation_neutral_p_up_cap_variant_name as _format_reference_feature_ablation_neutral_p_up_cap_variant_name,
+    shadow_variant_uses_reference_feature_ablation_model as _shadow_variant_uses_reference_feature_ablation_model,
+    is_supported_official_shadow_variant as _is_supported_official_shadow_variant,
+    official_shadow_overlap_triggered_trade_diag_path as _official_shadow_overlap_triggered_trade_diag_path,
+)
 from src.scripts import run_refresh_and_predict as rrp
-
-
-@dataclass(frozen=True)
-class StepResult:
-    name: str
-    command: List[str]
-    returncode: int
-    log_path: Path
-
-
-REFERENCE_FEATURE_ABLATION_VARIANT = "reference_feature_ablation"
-REFERENCE_FEATURE_ABLATION_THRESHOLD_VARIANT_PREFIX = f"{REFERENCE_FEATURE_ABLATION_VARIANT}_threshold_"
-_STEP_EVENT_SINK: Callable[[str, str, Mapping[str, Any] | None], None] | None = None
-
-
-def _set_step_event_sink(sink: Callable[[str, str, Mapping[str, Any] | None], None] | None) -> None:
-    global _STEP_EVENT_SINK
-    _STEP_EVENT_SINK = sink
-
-
-def _emit_step_event(name: str, status: str, details: Mapping[str, Any] | None = None) -> None:
-    if _STEP_EVENT_SINK is not None:
-        _STEP_EVENT_SINK(name, status, details)
-
-
-def _load_json(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        raise FileNotFoundError(path)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected JSON object at {path}")
-    return payload
 
 
 def _annotate_monitoring_with_regime(monitoring_path: Path, regime_payload: Dict[str, Any]) -> None:
@@ -62,263 +91,6 @@ def _annotate_monitoring_with_regime(monitoring_path: Path, regime_payload: Dict
     monitoring_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
 
 
-def _load_yaml(path: Path) -> Dict[str, Any]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if payload is None:
-        return {}
-    if not isinstance(payload, dict):
-        raise ValueError(f"Workflow config must be a mapping: {path}")
-    return payload
-
-
-def _parse_weight_spec(spec: str | None, *, allowed_components: Sequence[str] | None = None) -> Dict[str, float]:
-    if not spec:
-        return {}
-    allowed = {str(value) for value in allowed_components} if allowed_components else None
-    parsed: Dict[str, float] = {}
-    for raw_chunk in str(spec).split(","):
-        chunk = raw_chunk.strip()
-        if not chunk or ":" not in chunk:
-            continue
-        raw_name, raw_value = chunk.split(":", 1)
-        name = raw_name.strip()
-        if allowed is not None and name not in allowed:
-            continue
-        try:
-            parsed[name] = float(raw_value.strip())
-        except ValueError:
-            continue
-    return parsed
-
-
-def _format_weight_spec(weights: Dict[str, float]) -> str:
-    ordered = [
-        "transformer",
-        "transformer_large",
-        "lstm",
-        "bilstm",
-        "gru",
-        "cnn_lstm",
-        "cnn_bilstm",
-        "garch_lstm",
-        "xgb",
-        "lgbm",
-    ]
-    seen = set()
-    parts: List[str] = []
-    for name in ordered:
-        if name in weights:
-            parts.append(f"{name}:{weights[name]:.1f}")
-            seen.add(name)
-    for name in sorted(weights):
-        if name not in seen:
-            parts.append(f"{name}:{weights[name]:.1f}")
-    return ",".join(parts)
-
-
-def _extract_audit_weight_spec(
-    audit_payload: Dict[str, Any],
-    *,
-    allowed_components: Sequence[str] | None = None,
-) -> str | None:
-    recs = audit_payload.get("weight_recommendations") if isinstance(audit_payload, dict) else None
-    if not isinstance(recs, dict):
-        return None
-    weights = recs.get("recommended_weights")
-    if isinstance(weights, dict):
-        filtered = {
-            str(name): float(value)
-            for name, value in weights.items()
-            if allowed_components is None or str(name) in set(str(v) for v in allowed_components)
-        }
-        if filtered:
-            return _format_weight_spec(filtered)
-    spec = recs.get("recommended_weight_spec_1h")
-    parsed = _parse_weight_spec(str(spec) if spec is not None else None, allowed_components=allowed_components)
-    return _format_weight_spec(parsed) if parsed else None
-
-
-def _build_audit_weighted_runtime_config(
-    *,
-    base_config_path: Path,
-    audit_payload: Dict[str, Any],
-    output_path: Path,
-) -> bool:
-    payload = _load_yaml(base_config_path)
-    recs = audit_payload.get("weight_recommendations") if isinstance(audit_payload, dict) else None
-    if not isinstance(recs, dict):
-        return False
-
-    regime_specs = recs.get("recommended_regime_weights_1h")
-    fallback_spec = recs.get("recommended_weight_spec_1h")
-    apply_fallback_for_missing_regimes = bool(recs.get("apply_fallback_for_missing_regimes", True))
-    if not isinstance(regime_specs, dict) and not fallback_spec:
-        return False
-
-    regime_model_weights = payload.get("regime_model_weights")
-    if not isinstance(regime_model_weights, dict):
-        regime_model_weights = {}
-    regime_model_weights["enabled"] = True
-
-    for regime in ("trend_ignition", "neutral", "chop"):
-        spec = None
-        if isinstance(regime_specs, dict):
-            raw = regime_specs.get(regime)
-            if raw is not None:
-                spec = str(raw)
-        if spec is None and apply_fallback_for_missing_regimes and fallback_spec is not None:
-            spec = str(fallback_spec)
-        if spec is None:
-            continue
-
-        current = regime_model_weights.get(regime)
-        if isinstance(current, dict):
-            updated = dict(current)
-            horizon_key: Any = "1"
-            for existing_key in updated:
-                try:
-                    if float(existing_key) == 1.0:
-                        horizon_key = existing_key
-                        break
-                except (TypeError, ValueError):
-                    continue
-            updated[horizon_key] = spec
-            regime_model_weights[regime] = updated
-        else:
-            regime_model_weights[regime] = {"1": spec}
-
-    payload["regime_model_weights"] = regime_model_weights
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
-    return True
-
-
-def _join_horizons(horizons: Sequence[float | int]) -> str:
-    return ",".join(str(v) for v in horizons)
-
-
-def _format_horizon_label(horizon: float | int) -> str:
-    value = float(horizon)
-    if value.is_integer() and value >= 1.0:
-        return f"{int(round(value))}h"
-    if value < 1.0:
-        return f"{int(round(value * 60))}m"
-    return f"{value:g}h"
-
-
-def _load_prediction_targets(config_path: Path | None) -> List[float]:
-    if config_path is None or not config_path.exists():
-        return []
-    try:
-        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    if not isinstance(payload, dict):
-        return []
-    targets = payload.get("targets")
-    if not isinstance(targets, list):
-        return []
-    resolved: List[float] = []
-    for item in targets:
-        try:
-            resolved.append(float(item))
-        except (TypeError, ValueError):
-            continue
-    return resolved
-
-
-def _resolve_direction_output_shadow_horizons(
-    shadow_cfg: Mapping[str, Any],
-    *,
-    default_horizons: Sequence[float | int] = (1.0,),
-) -> List[float]:
-    raw_values = shadow_cfg.get("horizons") if isinstance(shadow_cfg, Mapping) else None
-    values = raw_values if isinstance(raw_values, list) and raw_values else list(default_horizons)
-    resolved: List[float] = []
-    for value in values:
-        try:
-            horizon = float(value)
-        except (TypeError, ValueError):
-            continue
-        if horizon <= 0:
-            continue
-        if horizon not in resolved:
-            resolved.append(horizon)
-    return resolved or [1.0]
-
-
-def _write_direction_output_shadow_config(
-    *,
-    base_config_path: Path,
-    direction_output_calibration_path: Path,
-    output_path: Path,
-    meta_output_path: Path,
-    marginal_audit_path: Path | None = None,
-    neutral_band: float = 0.02,
-    horizons: Sequence[float] = (1.0,),
-) -> Dict[str, Any]:
-    payload = build_shadow_config(
-        base_config_path=base_config_path,
-        direction_output_calibration_path=direction_output_calibration_path,
-        output_path=output_path,
-        marginal_audit_path=marginal_audit_path,
-        neutral_band=neutral_band,
-        horizons=horizons,
-    )
-    meta_output_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return payload
-
-
-def _write_upstream_direction_candidate_config(
-    *,
-    base_config_path: Path,
-    marginal_audit_path: Path,
-    output_path: Path,
-    meta_output_path: Path,
-    apply_to_paper_live: bool = False,
-) -> Dict[str, Any]:
-    audit_payload = _load_json(marginal_audit_path)
-    applied = _build_audit_weighted_runtime_config(
-        base_config_path=base_config_path,
-        audit_payload=audit_payload,
-        output_path=output_path,
-    )
-    weight_recommendations = audit_payload.get("weight_recommendations") if isinstance(audit_payload, dict) else None
-    payload = {
-        "base_config": str(base_config_path),
-        "marginal_audit_path": str(marginal_audit_path),
-        "output_path": str(output_path),
-        "apply_to_paper_live": bool(apply_to_paper_live),
-        "internal_direction_weight_update_applied": bool(applied),
-        "horizon_scope": [1.0],
-        "recommended_weight_spec_1h": (
-            weight_recommendations.get("recommended_weight_spec_1h") if isinstance(weight_recommendations, Mapping) else None
-        ),
-        "recommended_regime_weights_1h": (
-            weight_recommendations.get("recommended_regime_weights_1h") if isinstance(weight_recommendations, Mapping) else None
-        ),
-        "apply_fallback_for_missing_regimes": (
-            weight_recommendations.get("apply_fallback_for_missing_regimes") if isinstance(weight_recommendations, Mapping) else None
-        ),
-    }
-    meta_output_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return payload
-
-
-def _round_down_to_step(value: float, *, step: float) -> float:
-    if step <= 0.0:
-        return float(value)
-    return float(np.floor(float(value) / float(step)) * float(step))
-
-
-def _round_up_to_step(value: float, *, step: float) -> float:
-    if step <= 0.0:
-        return float(value)
-    return float(np.ceil(float(value) / float(step)) * float(step))
-
-
 def _derive_trade_decision_regime_midband_candidate(
     *,
     candidate_path: Path,
@@ -328,112 +100,25 @@ def _derive_trade_decision_regime_midband_candidate(
     ret_pred_col: str,
     return_col: str,
     regime_col: str,
+    volatility_col: str = "volatility_realized_24h",
     min_regime_rows: int,
     require_overall_regime_negative: bool,
     band_step: float = 0.01,
 ) -> Dict[str, Any]:
-    recent_rule = _derive_recent_triggered_regime_volatility_rule(
+    return _derive_trade_decision_regime_midband_candidate_impl(
         candidate_path=candidate_path,
         recent_window_rows=recent_window_rows,
         signal_col=signal_col,
+        p_col=p_col,
+        ret_pred_col=ret_pred_col,
         return_col=return_col,
         regime_col=regime_col,
-        volatility_col="volatility_realized_24h",
+        volatility_col=volatility_col,
         min_regime_rows=min_regime_rows,
         require_overall_regime_negative=require_overall_regime_negative,
+        band_step=band_step,
+        derive_recent_triggered_regime_volatility_rule=_derive_recent_triggered_regime_volatility_rule,
     )
-    if not bool(recent_rule.get("enabled", False)):
-        return {
-            "enabled": False,
-            "reason": recent_rule.get("reason", "recent_rule_disabled"),
-            "candidate_path": str(candidate_path),
-            "recent_rule": recent_rule,
-        }
-
-    df = pd.read_csv(candidate_path)
-    required = {signal_col, p_col, ret_pred_col, regime_col}
-    missing = [column for column in required if column not in df.columns]
-    if missing:
-        return {
-            "enabled": False,
-            "reason": "missing_required_columns",
-            "candidate_path": str(candidate_path),
-            "missing_columns": missing,
-            "recent_rule": recent_rule,
-        }
-
-    working = df.copy()
-    if "ts" in working.columns:
-        working["ts"] = pd.to_datetime(working["ts"], utc=True, errors="coerce")
-        working = working.sort_values("ts")
-    recent = working.tail(max(int(recent_window_rows), 1)).copy()
-    signal = pd.to_numeric(recent[signal_col], errors="coerce").fillna(0.0)
-    recent = recent.loc[signal > 0.0].copy()
-    if recent.empty:
-        return {
-            "enabled": False,
-            "reason": "no_recent_active_trades",
-            "candidate_path": str(candidate_path),
-            "recent_rule": recent_rule,
-        }
-
-    recent["_regime"] = recent[regime_col].map(
-        lambda value: str(value).strip().lower() if pd.notna(value) else "missing"
-    )
-    selected_regimes = [
-        str(value).strip().lower()
-        for value in (recent_rule.get("selected_regimes", []) if isinstance(recent_rule.get("selected_regimes"), list) else [])
-        if str(value).strip()
-    ]
-    scoped = recent.loc[recent["_regime"].isin(selected_regimes)].copy()
-    if scoped.empty:
-        return {
-            "enabled": False,
-            "reason": "no_rows_for_selected_regimes",
-            "candidate_path": str(candidate_path),
-            "selected_regimes": selected_regimes,
-            "recent_rule": recent_rule,
-        }
-
-    p_values = pd.to_numeric(scoped[p_col], errors="coerce")
-    abs_ret_pred = pd.to_numeric(scoped[ret_pred_col], errors="coerce").abs()
-    valid = p_values.notna() & abs_ret_pred.notna()
-    scoped = scoped.loc[valid].copy()
-    p_values = p_values.loc[valid]
-    abs_ret_pred = abs_ret_pred.loc[valid]
-    if scoped.empty:
-        return {
-            "enabled": False,
-            "reason": "no_valid_probability_rows",
-            "candidate_path": str(candidate_path),
-            "selected_regimes": selected_regimes,
-            "recent_rule": recent_rule,
-        }
-
-    p_up_low = round(max(0.0, min(1.0, _round_down_to_step(float(p_values.min()), step=band_step))), 6)
-    p_up_high = round(max(0.0, min(1.0, _round_up_to_step(float(p_values.max()), step=band_step))), 6)
-    min_abs_ret_pred = round(max(0.0, _round_down_to_step(float(abs_ret_pred.min()), step=0.0001)), 6)
-    if p_up_high < p_up_low:
-        p_up_high = p_up_low
-
-    return {
-        "enabled": True,
-        "reason": "ready",
-        "candidate_path": str(candidate_path),
-        "selected_regimes": selected_regimes,
-        "recent_window_rows": int(recent_window_rows),
-        "row_count": int(scoped.shape[0]),
-        "p_up_low": float(p_up_low),
-        "p_up_high": float(p_up_high),
-        "high_inclusive": True,
-        "min_abs_ret_pred": float(min_abs_ret_pred),
-        "max_abs_ret_pred": None,
-        "p_up_min_observed": float(p_values.min()),
-        "p_up_max_observed": float(p_values.max()),
-        "abs_ret_pred_min_observed": float(abs_ret_pred.min()),
-        "abs_ret_pred_max_observed": float(abs_ret_pred.max()),
-        "recent_rule": recent_rule,
-    }
 
 
 def _write_trade_decision_midband_candidate_config(
@@ -448,62 +133,28 @@ def _write_trade_decision_midband_candidate_config(
     ret_pred_col: str = "ret_pred",
     return_col: str = "ret_ensemble_net",
     regime_col: str = "regime_state",
+    volatility_col: str = "volatility_realized_24h",
     min_regime_rows: int = 2,
     require_overall_regime_negative: bool = True,
     apply_to_paper_live: bool = False,
 ) -> Dict[str, Any]:
-    candidate_rule = _derive_trade_decision_regime_midband_candidate(
+    return _write_trade_decision_midband_candidate_config_impl(
+        base_config_path=base_config_path,
         candidate_path=candidate_path,
+        output_path=output_path,
+        meta_output_path=meta_output_path,
         recent_window_rows=recent_window_rows,
         signal_col=signal_col,
         p_col=p_col,
         ret_pred_col=ret_pred_col,
         return_col=return_col,
         regime_col=regime_col,
+        volatility_col=volatility_col,
         min_regime_rows=min_regime_rows,
         require_overall_regime_negative=require_overall_regime_negative,
+        apply_to_paper_live=apply_to_paper_live,
+        derive_recent_triggered_regime_volatility_rule=_derive_recent_triggered_regime_volatility_rule,
     )
-
-    payload = _load_yaml(base_config_path)
-    trade_decision_policy = payload.get("trade_decision_policy")
-    if not isinstance(trade_decision_policy, dict):
-        trade_decision_policy = {}
-    current_midband = trade_decision_policy.get("midband_veto")
-    if not isinstance(current_midband, dict):
-        current_midband = {}
-
-    applied = False
-    if bool(candidate_rule.get("enabled", False)):
-        updated_midband = dict(current_midband)
-        updated_midband.update(
-            {
-                "enabled": True,
-                "p_up_low": float(candidate_rule["p_up_low"]),
-                "p_up_high": float(candidate_rule["p_up_high"]),
-                "high_inclusive": bool(candidate_rule.get("high_inclusive", True)),
-                "min_abs_ret_pred": float(candidate_rule.get("min_abs_ret_pred", 0.0)),
-                "max_abs_ret_pred": candidate_rule.get("max_abs_ret_pred"),
-                "regime_states": list(candidate_rule.get("selected_regimes", [])),
-            }
-        )
-        trade_decision_policy["midband_veto"] = updated_midband
-        payload["trade_decision_policy"] = trade_decision_policy
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
-        applied = True
-
-    meta_payload = {
-        "base_config": str(base_config_path),
-        "candidate_path": str(candidate_path),
-        "output_path": str(output_path),
-        "apply_to_paper_live": bool(apply_to_paper_live),
-        "trade_decision_midband_update_applied": bool(applied),
-        "candidate_rule": candidate_rule,
-        "previous_midband_veto": current_midband,
-    }
-    meta_output_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_output_path.write_text(json.dumps(meta_payload, indent=2), encoding="utf-8")
-    return meta_payload
 
 
 def _count_npz_rows(npz_path: Path) -> int:
@@ -752,242 +403,15 @@ def _write_calibrated_quality_input(
     output_path: Path,
     regime_col: str = "regime_state",
 ) -> Dict[str, Any]:
-    if not source_path.exists():
-        return {
-            "written": False,
-            "reason": "source_missing",
-            "source": str(source_path),
-            "output": str(output_path),
-        }
-    if not calibration_path.exists():
-        return {
-            "written": False,
-            "reason": "calibration_missing",
-            "source": str(source_path),
-            "output": str(output_path),
-            "calibration": str(calibration_path),
-        }
-
-    frame = pd.read_csv(source_path)
-    if "p_up" not in frame.columns:
-        return {
-            "written": False,
-            "reason": "missing_p_up",
-            "source": str(source_path),
-            "output": str(output_path),
-            "calibration": str(calibration_path),
-        }
-
-    calibration_payload = _load_json(calibration_path)
-    working = frame.copy()
-    raw_p_up = pd.to_numeric(working.get("raw_p_up", working["p_up"]), errors="coerce")
-    raw_p_up = raw_p_up.fillna(pd.to_numeric(working["p_up"], errors="coerce")).fillna(0.5)
-
-    calibrated_values: List[float] = []
-    applied_keys: List[str] = []
-    guard_applied: List[float] = []
-    used_regime_key: List[float] = []
-
-    for row in working.to_dict(orient="records"):
-        raw_probability = _safe_float(row.get("raw_p_up", row.get("p_up", 0.5)), 0.5)
-        horizon_label = _calibration_label_from_value(row.get("horizon", "1h"))
-        regime_state = str(row.get(regime_col, "unknown") or "unknown").strip().lower() or "unknown"
-        close = _safe_float(row.get("close", 0.0), 0.0)
-        projected_price = _safe_float(row.get("projected_price", close), close)
-        ret_pred = _safe_float(row.get("ret_pred", 0.0), 0.0)
-        calibrated_probability, applied_key, used_regime, guard_payload = rrp._resolve_trade_probability_for_horizon(
-            platt_calibration=calibration_payload,
-            label=horizon_label,
-            regime_state=regime_state,
-            raw_probability=raw_probability,
-            close=close,
-            projected_price=projected_price,
-            ret_pred=ret_pred,
-        )
-        calibrated_values.append(float(calibrated_probability))
-        applied_keys.append(str(applied_key or ""))
-        used_regime_key.append(float(bool(used_regime)))
-        guard_applied.append(float(bool(isinstance(guard_payload, Mapping) and guard_payload.get("applied"))))
-
-    calibrated_series = pd.Series(calibrated_values, index=working.index, dtype=float)
-    working["raw_p_up"] = raw_p_up.astype(float)
-    working["p_up"] = calibrated_series
-    working["raw_calibrated_probability_gap"] = calibrated_series - working["raw_p_up"]
-    working["probability_calibration_used_regime_key"] = pd.Series(used_regime_key, index=working.index, dtype=float)
-    working["probability_calibration_guard_applied"] = pd.Series(guard_applied, index=working.index, dtype=float)
-    working["probability_calibration_applied_key"] = pd.Series(applied_keys, index=working.index, dtype=object)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    working.to_csv(output_path, index=False)
-    return {
-        "written": True,
-        "source": str(source_path),
-        "output": str(output_path),
-        "calibration": str(calibration_path),
-        "rows": int(len(working)),
-        "mean_abs_delta": float((working["raw_calibrated_probability_gap"].abs().mean())),
-        "regime_col": regime_col,
-    }
-
-
-def _write_meta_component_frame(
-    *,
-    source_path: Path,
-    output_path: Path,
-    requested_columns: Sequence[str] | None = None,
-) -> Dict[str, Any]:
-    from src.utils.component_diversity_support import (
-        build_component_feature_frame,
-        summarize_component_history,
+    return _write_calibrated_quality_input_impl(
+        source_path=source_path,
+        calibration_path=calibration_path,
+        output_path=output_path,
+        regime_col=regime_col,
+        safe_float=_safe_float,
+        calibration_label_from_value=_calibration_label_from_value,
+        resolve_trade_probability_for_horizon=rrp._resolve_trade_probability_for_horizon,
     )
-
-    if not source_path.exists():
-        return {
-            "written": False,
-            "reason": "source_missing",
-            "source": str(source_path),
-            "output": str(output_path),
-        }
-
-    frame = pd.read_csv(source_path)
-    ts_col = "ts" if "ts" in frame.columns else None
-    if ts_col is None:
-        return {
-            "written": False,
-            "reason": "missing_ts",
-            "source": str(source_path),
-            "output": str(output_path),
-        }
-
-    ret_col = None
-    for candidate in ("ret_1h", "ret_realized"):
-        if candidate in frame.columns:
-            ret_col = candidate
-            break
-    if ret_col is None:
-        return {
-            "written": False,
-            "reason": "missing_return_column",
-            "source": str(source_path),
-            "output": str(output_path),
-        }
-
-    candidate_columns = [
-        str(column)
-        for column in frame.columns
-        if str(column).startswith("p_up_") and str(column) not in {"p_up_meta", "p_up_gate"}
-    ]
-    if requested_columns:
-        aliases = {column: column for column in candidate_columns}
-        aliases.update(
-            {
-                column.removeprefix("p_up_"): column
-                for column in candidate_columns
-                if column.startswith("p_up_")
-            }
-        )
-        component_columns: List[str] = []
-        for raw_column in requested_columns:
-            key = str(raw_column).strip().lower()
-            if not key:
-                continue
-            resolved = aliases.get(key)
-            if resolved and resolved not in component_columns:
-                component_columns.append(resolved)
-    else:
-        component_columns = sorted(candidate_columns)
-
-    if not component_columns:
-        return {
-            "written": False,
-            "reason": "missing_component_columns",
-            "source": str(source_path),
-            "output": str(output_path),
-        }
-
-    derived = frame[[ts_col, ret_col, *component_columns]].copy()
-    if ret_col != "ret_1h":
-        derived = derived.rename(columns={ret_col: "ret_1h"})
-    component_features = build_component_feature_frame(derived, component_columns)
-    for column in component_features.columns:
-        derived[column] = pd.to_numeric(component_features[column], errors="coerce").fillna(0.0)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    derived.to_csv(output_path, index=False)
-    return {
-        "written": True,
-        "source": str(source_path),
-        "output": str(output_path),
-        "rows": int(len(derived)),
-        "component_columns": component_columns,
-        "component_diversity": summarize_component_history(derived, component_columns),
-    }
-
-
-def _format_threshold_variant_name(threshold: float) -> str:
-    normalized = f"{float(threshold):.4f}".rstrip("0").rstrip(".")
-    return f"threshold_{normalized.replace('.', 'p')}"
-
-
-def _format_reference_feature_ablation_threshold_variant_name(threshold: float) -> str:
-    return f"{REFERENCE_FEATURE_ABLATION_VARIANT}_{_format_threshold_variant_name(threshold)}"
-
-
-def _format_reference_feature_ablation_selection_guard_variant_name(threshold: float) -> str:
-    return f"{_format_reference_feature_ablation_threshold_variant_name(threshold)}_selection_calibration_guard"
-
-
-def _format_reference_feature_ablation_abs_ret_pred_variant_name(threshold: float, floor: float) -> str:
-    normalized_floor = f"{float(floor):.5f}".rstrip("0").rstrip(".")
-    return (
-        f"{_format_reference_feature_ablation_threshold_variant_name(threshold)}"
-        f"_neutral_abs_ret_pred_floor_{normalized_floor.replace('.', 'p')}"
-    )
-
-
-def _format_reference_feature_ablation_neutral_p_up_cap_variant_name(threshold: float, max_p_up: float) -> str:
-    normalized_cap = f"{float(max_p_up):.5f}".rstrip("0").rstrip(".")
-    return (
-        f"{_format_reference_feature_ablation_threshold_variant_name(threshold)}"
-        f"_neutral_p_up_cap_{normalized_cap.replace('.', 'p')}"
-    )
-
-
-def _shadow_variant_uses_reference_feature_ablation_model(official_shadow_variant: str) -> bool:
-    normalized = str(official_shadow_variant or "none").strip().lower()
-    return normalized == REFERENCE_FEATURE_ABLATION_VARIANT or normalized.startswith(
-        REFERENCE_FEATURE_ABLATION_THRESHOLD_VARIANT_PREFIX
-    )
-
-
-def _is_supported_official_shadow_variant(official_shadow_variant: str) -> bool:
-    normalized = str(official_shadow_variant or "none").strip().lower()
-    if normalized in {
-        "auto",
-        "none",
-        REFERENCE_FEATURE_ABLATION_VARIANT,
-        "selection_calibration_guard",
-        "weak_band",
-        "refined",
-        "midband",
-        "raw_ev_sign",
-        "direction_alignment",
-        "joint_direction_midband",
-        "regime_state",
-        "chop_high_volatility",
-        "volatility_only",
-        "triggered_regime_volatility",
-    }:
-        return True
-    if normalized.startswith("threshold_"):
-        return True
-    return _shadow_variant_uses_reference_feature_ablation_model(normalized)
-
-
-def _official_shadow_overlap_triggered_trade_diag_path(summary_dir: Path, official_shadow_variant: str) -> Path:
-    normalized = str(official_shadow_variant or "none").strip().lower()
-    if normalized == "none":
-        return summary_dir / "overlap_triggered_trade_diagnostics.json"
-    return summary_dir / f"overlap_triggered_trade_diagnostics_shadow_{normalized}.json"
 
 
 def _override_cli_arg(args: Sequence[str], flag: str, value: str) -> List[str]:
@@ -1068,162 +492,6 @@ def _compute_recent_policy_slice_metrics(
         "candidate": candidate_stats,
         "delta_net_return": float(candidate_stats["net_return_total"] - baseline_stats["net_return_total"]),
     }
-
-
-def _build_rolling_ab_command(
-    *,
-    python: str,
-    baseline_path: Path | str,
-    candidate_path: Path | str,
-    rolling_cfg: Dict[str, Any],
-    output_path: Path,
-    output_md_path: Path,
-) -> List[str]:
-    cmd = [
-        python,
-        "-m",
-        "src.scripts.evaluate_rolling_ab",
-        "--baseline",
-        str(baseline_path),
-        "--candidate",
-        str(candidate_path),
-        "--window-size",
-        str(int(rolling_cfg.get("window_size", 168))),
-        "--step-size",
-        str(int(rolling_cfg.get("step_size", 24))),
-        "--min-window-trades",
-        str(int(rolling_cfg.get("min_window_trades", 5))),
-        "--output",
-        str(output_path),
-        "--output-md",
-        str(output_md_path),
-    ]
-    if bool(rolling_cfg.get("allow_no_trade_baseline", False)):
-        cmd.append("--allow-no-trade-baseline")
-    return cmd
-
-
-def _build_calibration_robustness_command(
-    *,
-    python: str,
-    input_path: Path,
-    output_path: Path,
-    calibration_cfg: Dict[str, Any],
-    quality_cfg: Dict[str, Any],
-    trade_decision_cfg: Dict[str, Any],
-) -> List[str]:
-    cmd = [
-        python,
-        "-m",
-        "src.scripts.evaluate_calibration_robustness",
-        "--input",
-        str(input_path),
-        "--baseline-window",
-        str(int(calibration_cfg.get("baseline_window", 240))),
-        "--recent-window",
-        str(int(calibration_cfg.get("recent_window", 120))),
-        "--max-ece-drift",
-        str(float(calibration_cfg.get("max_ece_drift", 0.02))),
-        "--max-recent-ece",
-        str(float(quality_cfg.get("max_recent_ece", 1.0))),
-        "--min-recent-auc",
-        str(float(quality_cfg.get("min_recent_auc", 0.0))),
-        "--regime-col",
-        str(calibration_cfg.get("regime_col", "regime_state")),
-        "--signal-col",
-        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-        "--return-col",
-        str(calibration_cfg.get("return_col", "ret_ensemble_net")),
-        "--selection-scope",
-        str(calibration_cfg.get("selection_scope", "all")),
-        "--min-selection-rows",
-        str(int(calibration_cfg.get("min_selection_rows", 0))),
-        "--output",
-        str(output_path),
-    ]
-    adaptive_selection_cfg = (
-        calibration_cfg.get("adaptive_selection_rows")
-        if isinstance(calibration_cfg.get("adaptive_selection_rows"), dict)
-        else {}
-    )
-    if bool(adaptive_selection_cfg.get("enabled", False)):
-        cmd.append("--adaptive-selection-rows")
-        cmd.extend(
-            [
-                "--adaptive-selection-min-floor",
-                str(int(adaptive_selection_cfg.get("min_floor", 0))),
-                "--adaptive-selection-baseline-ratio",
-                str(float(adaptive_selection_cfg.get("baseline_ratio", 0.0))),
-                "--adaptive-selection-max-shortfall",
-                str(int(adaptive_selection_cfg.get("max_shortfall", 0))),
-            ]
-        )
-    return cmd
-
-
-def _build_directional_objectives_command(
-    *,
-    python: str,
-    input_path: Path,
-    output_path: Path,
-    directional_cfg: Dict[str, Any],
-) -> List[str]:
-    def _format_threshold_map(raw: Any) -> str:
-        if not isinstance(raw, dict):
-            return ""
-        parts: List[str] = []
-        for key, value in raw.items():
-            try:
-                numeric = float(value)
-            except (TypeError, ValueError):
-                continue
-            label = str(key).strip()
-            if not label:
-                continue
-            parts.append(f"{label}:{numeric}")
-        return ",".join(parts)
-
-    cmd = [
-        python,
-        "-m",
-        "src.scripts.evaluate_directional_objectives",
-        "--input",
-        str(input_path),
-        "--output",
-        str(output_path),
-        "--prob-col",
-        str(directional_cfg.get("prob_col", "p_up")),
-        "--regime-col",
-        str(directional_cfg.get("regime_col", "regime_state")),
-        "--threshold",
-        str(float(directional_cfg.get("threshold", 0.5))),
-        "--min-rows",
-        str(int(directional_cfg.get("min_rows", 300))),
-        "--group-min-rows",
-        str(int(directional_cfg.get("group_min_rows", 80))),
-        "--max-brier",
-        str(float(directional_cfg.get("max_brier", 0.25))),
-        "--max-ece",
-        str(float(directional_cfg.get("max_ece", 0.08))),
-        "--min-f1",
-        str(float(directional_cfg.get("min_f1", 0.45))),
-    ]
-    label_col = directional_cfg.get("label_col")
-    if label_col:
-        cmd.extend(["--label-col", str(label_col)])
-    for flag, key in (
-        ("--min-rows-by-regime", "min_rows_by_regime"),
-        ("--max-brier-by-horizon", "max_brier_by_horizon"),
-        ("--max-ece-by-horizon", "max_ece_by_horizon"),
-        ("--min-f1-by-horizon", "min_f1_by_horizon"),
-        ("--max-brier-by-regime", "max_brier_by_regime"),
-        ("--max-ece-by-regime", "max_ece_by_regime"),
-        ("--min-f1-by-regime", "min_f1_by_regime"),
-    ):
-        encoded = _format_threshold_map(directional_cfg.get(key))
-        if encoded:
-            cmd.extend([flag, encoded])
-    return cmd
 
 
 def _extract_recent_calibration_payload(
@@ -1382,165 +650,8 @@ def _derive_recent_triggered_regime_volatility_rule(
     }
 
 
-def _normalize_selection_calibration_guard_rules(rules_obj: Any) -> List[Dict[str, Any]]:
-    if not isinstance(rules_obj, list):
-        return []
-    normalized: List[Dict[str, Any]] = []
-    for item in rules_obj:
-        if not isinstance(item, dict):
-            continue
-        regime_state = str(item.get("regime_state", "")).strip().lower()
-        if not regime_state:
-            continue
-        try:
-            min_p_up = float(item.get("min_p_up"))
-        except (TypeError, ValueError):
-            continue
-        if not np.isfinite(min_p_up):
-            continue
-        normalized.append({"regime_state": regime_state, "min_p_up": min_p_up})
-    return normalized
-
-
 def _dedupe_selection_calibration_guard_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    deduped: List[Dict[str, Any]] = []
-    seen: set[tuple[str, float]] = set()
-    for rule in rules:
-        regime_state = str(rule.get("regime_state", "")).strip().lower()
-        min_p_up = _safe_float(rule.get("min_p_up"), default=float("nan"))
-        if not regime_state or not np.isfinite(min_p_up):
-            continue
-        key = (regime_state, round(float(min_p_up), 6))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append({"regime_state": regime_state, "min_p_up": float(min_p_up)})
-    return deduped
-
-
-def _load_reusable_selection_calibration_guard_rules(
-    *,
-    deployed_rule_path: Path,
-    deploy_manifest_path: Path | None,
-    expected_regime_col: str,
-    expected_p_col: str,
-) -> Dict[str, Any]:
-    manifest_payload: Dict[str, Any] = {}
-    if deploy_manifest_path is not None and deploy_manifest_path.exists():
-        try:
-            manifest_payload = _load_json(deploy_manifest_path)
-        except (FileNotFoundError, ValueError, json.JSONDecodeError):
-            manifest_payload = {}
-        deployed_variant = str(manifest_payload.get("official_shadow_variant", "none")).strip().lower()
-        if deployed_variant != "selection_calibration_guard":
-            return {
-                "enabled": False,
-                "reason": "last_deployed_variant_mismatch",
-                "rules": [],
-                "source_path": str(deployed_rule_path),
-                "source_run_id": manifest_payload.get("run_id"),
-                "source_official_shadow_variant": deployed_variant,
-            }
-
-    if not deployed_rule_path.exists():
-        return {
-            "enabled": False,
-            "reason": "deployed_rule_not_found",
-            "rules": [],
-            "source_path": str(deployed_rule_path),
-            "source_run_id": manifest_payload.get("run_id"),
-            "source_official_shadow_variant": str(manifest_payload.get("official_shadow_variant", "none")),
-        }
-
-    try:
-        deployed_payload = _load_json(deployed_rule_path)
-    except (FileNotFoundError, ValueError, json.JSONDecodeError):
-        return {
-            "enabled": False,
-            "reason": "deployed_rule_invalid",
-            "rules": [],
-            "source_path": str(deployed_rule_path),
-            "source_run_id": manifest_payload.get("run_id"),
-            "source_official_shadow_variant": str(manifest_payload.get("official_shadow_variant", "none")),
-        }
-
-    if not bool(deployed_payload.get("enabled", False)):
-        return {
-            "enabled": False,
-            "reason": "deployed_rule_disabled",
-            "rules": [],
-            "source_path": str(deployed_rule_path),
-            "source_run_id": manifest_payload.get("run_id"),
-            "source_official_shadow_variant": str(manifest_payload.get("official_shadow_variant", "none")),
-        }
-
-    regime_col = str(deployed_payload.get("regime_col", "")).strip()
-    p_col = str(deployed_payload.get("p_col", "")).strip()
-    if regime_col != expected_regime_col or p_col != expected_p_col:
-        return {
-            "enabled": False,
-            "reason": "deployed_rule_schema_mismatch",
-            "rules": [],
-            "source_path": str(deployed_rule_path),
-            "source_run_id": manifest_payload.get("run_id"),
-            "source_official_shadow_variant": str(manifest_payload.get("official_shadow_variant", "none")),
-            "expected_regime_col": expected_regime_col,
-            "expected_p_col": expected_p_col,
-            "actual_regime_col": regime_col,
-            "actual_p_col": p_col,
-        }
-
-    rules = _normalize_selection_calibration_guard_rules(deployed_payload.get("rules", []))
-    if not rules:
-        return {
-            "enabled": False,
-            "reason": "deployed_rule_empty",
-            "rules": [],
-            "source_path": str(deployed_rule_path),
-            "source_run_id": manifest_payload.get("run_id"),
-            "source_official_shadow_variant": str(manifest_payload.get("official_shadow_variant", "none")),
-        }
-
-    auto_derive_payload = deployed_payload.get("auto_derive", {}) if isinstance(deployed_payload, dict) else {}
-    source_candidate_path = (
-        str(auto_derive_payload.get("candidate_path"))
-        if isinstance(auto_derive_payload, dict) and auto_derive_payload.get("candidate_path") is not None
-        else None
-    )
-
-    return {
-        "enabled": True,
-        "reason": "reused_last_deployed",
-        "rules": rules,
-        "source_path": str(deployed_rule_path),
-        "source_run_id": manifest_payload.get("run_id"),
-        "source_official_shadow_variant": str(manifest_payload.get("official_shadow_variant", "none")),
-        "source_candidate_path": source_candidate_path,
-    }
-
-
-def _extract_trade_decision_reference_source(feature_meta_path: Path | None) -> str | None:
-    if feature_meta_path is None or not feature_meta_path.exists():
-        return None
-    try:
-        payload = _load_json(feature_meta_path)
-    except (FileNotFoundError, ValueError, json.JSONDecodeError):
-        return None
-    incumbent_reference = payload.get("incumbent_reference", {}) if isinstance(payload, dict) else {}
-    if not isinstance(incumbent_reference, dict):
-        return None
-    source = incumbent_reference.get("source")
-    if source in {None, ""}:
-        return None
-    return str(source)
-
-
-def _resolve_trade_decision_model_path_for_variant(summary_dir: Path, official_shadow_variant: str) -> Path:
-    if _shadow_variant_uses_reference_feature_ablation_model(official_shadow_variant):
-        ablation_model_path = summary_dir / "trade_decision_model_reference_feature_ablation.json"
-        if ablation_model_path.exists():
-            return ablation_model_path
-    return summary_dir / "trade_decision_model.json"
+    return _dedupe_selection_calibration_guard_rules_impl(rules, safe_float=_safe_float)
 
 
 def _augment_selection_guard_candidate_floors(
@@ -1551,20 +662,14 @@ def _augment_selection_guard_candidate_floors(
     lower_steps: int,
     upper_steps: int,
 ) -> List[float]:
-    floors = {round(float(value), 6) for value in base_floors if np.isfinite(float(value))}
-    step_value = float(step)
-    if not np.isfinite(step_value) or step_value <= 0.0:
-        return sorted(floors)
-
-    for rule in reference_rules:
-        min_p_up = _safe_float(rule.get("min_p_up"), default=float("nan"))
-        if not np.isfinite(min_p_up):
-            continue
-        for offset in range(-max(int(lower_steps), 0), max(int(upper_steps), 0) + 1):
-            candidate_floor = float(min_p_up + (float(offset) * step_value))
-            if 0.0 <= candidate_floor <= 1.0 and np.isfinite(candidate_floor):
-                floors.add(round(candidate_floor, 6))
-    return sorted(floors)
+    return _augment_selection_guard_candidate_floors_impl(
+        base_floors=base_floors,
+        reference_rules=reference_rules,
+        step=step,
+        lower_steps=lower_steps,
+        upper_steps=upper_steps,
+        safe_float=_safe_float,
+    )
 
 
 def _summarize_selection_guard_recent_distribution(
@@ -2444,70 +1549,11 @@ def _build_trade_decision_model_shift_guard(
     model_shift_payload: Dict[str, Any] | None,
     guard_cfg: Dict[str, Any],
 ) -> Dict[str, Any]:
-    enabled = bool(guard_cfg.get("enabled", False))
-    if not enabled:
-        return {"enabled": False, "passed": True, "reason": "disabled", "checks": {}, "failed_checks": []}
-
-    payload = model_shift_payload if isinstance(model_shift_payload, dict) else {}
-    available = bool(payload.get("available", False))
-    fail_when_unavailable = bool(guard_cfg.get("fail_when_unavailable", False))
-    if not available:
-        passed = not fail_when_unavailable
-        failed_checks = [] if passed else ["model_shift_unavailable"]
-        return {
-            "enabled": True,
-            "available": False,
-            "passed": passed,
-            "reason": "model_shift_unavailable",
-            "checks": {"model_shift_available": passed},
-            "failed_checks": failed_checks,
-        }
-
-    coef_entries = {
-        str(item.get("feature")): item
-        for item in payload.get("top_coefficient_deltas", [])
-        if isinstance(item, dict)
-    }
-    reference_sources = payload.get("reference_sources", {}) if isinstance(payload.get("reference_sources", {}), dict) else {}
-    current_reference = reference_sources.get("current", {}) if isinstance(reference_sources.get("current", {}), dict) else {}
-    source_reference = reference_sources.get("source", {}) if isinstance(reference_sources.get("source", {}), dict) else {}
-    counterfactual = payload.get("counterfactual_threshold_pass", {}) if isinstance(payload.get("counterfactual_threshold_pass", {}), dict) else {}
-
-    intercept_delta = abs(_safe_float((coef_entries.get("__intercept__") or {}).get("coef_delta"), default=0.0))
-    reference_feature_names = [
-        "incumbent_signal_reference",
-        "candidate_only_reference",
-        "candidate_incumbent_disagreement",
-    ]
-    max_reference_coef_delta = max(
-        abs(_safe_float((coef_entries.get(name) or {}).get("coef_delta"), default=0.0))
-        for name in reference_feature_names
+    return _build_trade_decision_model_shift_guard_impl(
+        model_shift_payload=model_shift_payload,
+        guard_cfg=guard_cfg,
+        safe_float=_safe_float,
     )
-    source_not_current_count = int(_safe_float(counterfactual.get("source_not_current_count"), default=0.0))
-    require_reference_source_stable = bool(guard_cfg.get("require_reference_source_stable", False))
-    reference_source_stable = str(current_reference.get("source")) == str(source_reference.get("source"))
-
-    checks = {
-        "intercept_delta_ok": intercept_delta <= float(guard_cfg.get("max_abs_intercept_delta", 1e9)),
-        "reference_coef_delta_ok": max_reference_coef_delta <= float(guard_cfg.get("max_abs_reference_coef_delta", 1e9)),
-        "source_not_current_count_ok": source_not_current_count <= int(guard_cfg.get("max_source_not_current_count", 10**9)),
-        "reference_source_stable": True if not require_reference_source_stable else bool(reference_source_stable),
-    }
-    failed_checks = [name for name, ok in checks.items() if not ok]
-    return {
-        "enabled": True,
-        "available": True,
-        "passed": len(failed_checks) == 0,
-        "checks": checks,
-        "failed_checks": failed_checks,
-        "details": {
-            "intercept_delta": intercept_delta,
-            "max_reference_coef_delta": max_reference_coef_delta,
-            "source_not_current_count": source_not_current_count,
-            "current_reference_source": current_reference.get("source"),
-            "source_reference_source": source_reference.get("source"),
-        },
-    }
 
 
 def _apply_trade_decision_model_shift_guard(
@@ -2517,33 +1563,13 @@ def _apply_trade_decision_model_shift_guard(
     trade_decision_cfg: Dict[str, Any],
     model_shift_payload: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
-    gate_payload = dict(promotion_gate_payload) if isinstance(promotion_gate_payload, dict) else {}
-    model_shift_guard_cfg = (
-        trade_decision_cfg.get("model_shift_guard")
-        if isinstance(trade_decision_cfg.get("model_shift_guard"), dict)
-        else {}
-    )
-    model_shift_guard_payload = _build_trade_decision_model_shift_guard(
+    return _apply_trade_decision_model_shift_guard_impl(
+        summary_dir=summary_dir,
+        promotion_gate_payload=promotion_gate_payload,
+        trade_decision_cfg=trade_decision_cfg,
         model_shift_payload=model_shift_payload,
-        guard_cfg=model_shift_guard_cfg,
+        safe_float=_safe_float,
     )
-    (summary_dir / "trade_decision_model_shift_guard.json").write_text(
-        json.dumps(model_shift_guard_payload, indent=2),
-        encoding="utf-8",
-    )
-    gate_payload["trade_decision_model_shift_guard"] = model_shift_guard_payload
-    if bool(model_shift_guard_payload.get("enabled", False)) and not bool(model_shift_guard_payload.get("passed", True)):
-        existing_failed_checks = gate_payload.get("failed_checks", []) if isinstance(gate_payload.get("failed_checks", []), list) else []
-        existing_failed_checks.extend(
-            [
-                f"trade_decision_model_shift_guard:{name}"
-                for name in model_shift_guard_payload.get("failed_checks", [])
-            ]
-        )
-        gate_payload["failed_checks"] = existing_failed_checks
-        gate_payload["promote"] = False
-        gate_payload["reason"] = "trade_decision_model_shift_guard_failed"
-    return gate_payload
 
 
 def _evaluate_selection_calibration_guard_rule_viability(
@@ -3352,134 +2378,6 @@ def _extract_selection_scope_ranking_metrics(calibration_variant_recent: Dict[st
     }
 
 
-def _resolve_effective_champion_gate(
-    *,
-    summary_dir: Path,
-    champion_gate_payload: Dict[str, Any] | None,
-    official_shadow_variant: str,
-    champion_gate_source: str,
-    policy_aligned_gate_path: Path | None = None,
-) -> tuple[Path, Dict[str, Any] | None, Dict[str, Any]]:
-    labeled_gate_path = summary_dir / "champion_challenger_gate.json"
-    policy_gate_path = policy_aligned_gate_path or (summary_dir / "champion_challenger_policy_aligned_companion.json")
-    selected_source = "labeled"
-    effective_gate_path = labeled_gate_path
-    effective_gate_payload = champion_gate_payload if isinstance(champion_gate_payload, dict) else None
-
-    normalized_source = str(champion_gate_source or "labeled").strip().lower()
-    allow_policy_aligned = normalized_source in {"auto", "policy_aligned", "policy_aligned_official_shadow"}
-    require_policy_aligned = normalized_source == "policy_aligned"
-    auto_policy_aligned = normalized_source in {"auto", "policy_aligned_official_shadow"}
-    policy_shadow_active = str(official_shadow_variant or "none").strip().lower() != "none"
-
-    if policy_gate_path.exists() and allow_policy_aligned and (
-        require_policy_aligned or (auto_policy_aligned and policy_shadow_active)
-    ):
-        effective_gate_path = policy_gate_path
-        effective_gate_payload = _load_json(policy_gate_path)
-        selected_source = "policy_aligned"
-
-    resolution = {
-        "configured_source": normalized_source,
-        "selected_source": selected_source,
-        "official_shadow_variant": str(official_shadow_variant or "none"),
-        "labeled_gate_path": str(labeled_gate_path),
-        "policy_aligned_gate_path": str(policy_gate_path),
-        "effective_gate_path": str(effective_gate_path),
-        "policy_aligned_available": bool(policy_gate_path.exists()),
-    }
-    return effective_gate_path, effective_gate_payload, resolution
-
-
-def _build_champion_gate_alignment_check(
-    *,
-    summary_dir: Path,
-    official_shadow_variant: str,
-    champion_gate_source: str,
-    selection_payload: Dict[str, Any] | None,
-    effective_champion_gate_path: Path,
-    effective_champion_gate_payload: Dict[str, Any] | None,
-    champion_gate_resolution: Dict[str, Any],
-    policy_aligned_gate_path: Path | None = None,
-) -> Dict[str, Any]:
-    normalized_variant = str(official_shadow_variant or "none").strip().lower()
-    configured_source = str(champion_gate_source or "labeled").strip().lower()
-    expected_source = "labeled"
-    if normalized_variant != "none" and configured_source in {"auto", "policy_aligned", "policy_aligned_official_shadow"}:
-        expected_source = "policy_aligned"
-
-    selection_candidate: Dict[str, Any] | None = None
-    if isinstance(selection_payload, dict):
-        for candidate in selection_payload.get("candidates", []):
-            if not isinstance(candidate, dict):
-                continue
-            if str(candidate.get("variant", "")).strip().lower() == normalized_variant:
-                selection_candidate = candidate
-                break
-
-    labeled_gate_path = summary_dir / "champion_challenger_gate.json"
-    policy_gate_path = policy_aligned_gate_path or (summary_dir / "champion_challenger_policy_aligned_companion.json")
-    expected_gate_path = policy_gate_path if expected_source == "policy_aligned" else labeled_gate_path
-    selected_source = str(champion_gate_resolution.get("selected_source", "labeled")).strip().lower()
-    errors: List[str] = []
-
-    if selected_source != expected_source:
-        errors.append(
-            f"selected_source_mismatch expected={expected_source} actual={selected_source}"
-        )
-    if expected_gate_path != effective_champion_gate_path:
-        errors.append(
-            f"effective_gate_path_mismatch expected={expected_gate_path} actual={effective_champion_gate_path}"
-        )
-
-    companion_payload = selection_candidate.get("companion", {}) if isinstance(selection_candidate, dict) else {}
-    effective_stats = effective_champion_gate_payload.get("stats", {}) if isinstance(effective_champion_gate_payload, dict) else {}
-    companion_promote = None
-    companion_mean_diff = None
-    companion_pvalue = None
-    if expected_source == "policy_aligned" and isinstance(companion_payload, dict) and companion_payload:
-        companion_promote = bool(companion_payload.get("promote", False))
-        companion_mean_diff = _safe_float(companion_payload.get("mean_diff"), default=float("nan"))
-        companion_pvalue = _safe_float(companion_payload.get("pvalue_one_sided"), default=float("nan"))
-        effective_promote = bool((effective_champion_gate_payload or {}).get("promote", False))
-        effective_mean_diff = _safe_float(effective_stats.get("mean_diff"), default=float("nan"))
-        effective_pvalue = _safe_float(effective_stats.get("pvalue_one_sided"), default=float("nan"))
-        if companion_promote != effective_promote:
-            errors.append(
-                f"effective_promote_mismatch expected={companion_promote} actual={effective_promote}"
-            )
-        if np.isfinite(companion_mean_diff) and np.isfinite(effective_mean_diff) and abs(companion_mean_diff - effective_mean_diff) > 1e-12:
-            errors.append(
-                f"effective_mean_diff_mismatch expected={companion_mean_diff} actual={effective_mean_diff}"
-            )
-        if np.isfinite(companion_pvalue) and np.isfinite(effective_pvalue) and abs(companion_pvalue - effective_pvalue) > 1e-12:
-            errors.append(
-                f"effective_pvalue_mismatch expected={companion_pvalue} actual={effective_pvalue}"
-            )
-
-    return {
-        "passed": not errors,
-        "official_shadow_variant": normalized_variant,
-        "configured_source": configured_source,
-        "expected_source": expected_source,
-        "selected_source": selected_source,
-        "expected_gate_path": str(expected_gate_path),
-        "effective_gate_path": str(effective_champion_gate_path),
-        "selection_candidate_found": bool(selection_candidate is not None),
-        "selection_candidate_companion": {
-            "promote": companion_promote,
-            "mean_diff": None if companion_mean_diff is None or not np.isfinite(companion_mean_diff) else companion_mean_diff,
-            "pvalue_one_sided": None if companion_pvalue is None or not np.isfinite(companion_pvalue) else companion_pvalue,
-        },
-        "effective_gate": {
-            "promote": bool((effective_champion_gate_payload or {}).get("promote", False)),
-            "mean_diff": effective_stats.get("mean_diff") if isinstance(effective_stats, dict) else None,
-            "pvalue_one_sided": effective_stats.get("pvalue_one_sided") if isinstance(effective_stats, dict) else None,
-        },
-        "errors": errors,
-    }
-
-
 def _deploy_promoted_reliability_artifacts(
     *,
     run_dir: Path,
@@ -3739,7 +2637,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def execute_reliability_workflow(args: argparse.Namespace) -> Dict[str, Any]:
+def execute_reliability_workflow(
+    args: argparse.Namespace,
+    *,
+    step_event_sink: Callable[[str, str, Mapping[str, Any] | None], None] | None = None,
+) -> Dict[str, Any]:
+    if step_event_sink is not None:
+        return _run_with_step_event_sink(
+            step_event_sink,
+            lambda: execute_reliability_workflow(args),
+        )
 
     config = _load_yaml(args.config)
     cv_cfg = config.get("cv", {})

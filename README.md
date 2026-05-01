@@ -131,12 +131,14 @@ Important runtime modules for agents:
 - `src/runtime/summary_support.py`: prompt summary, degradation monitoring, blocked-trade analytics, prediction payload writing
 - `src/runtime/output_support.py`: monitoring artifacts and meta-baseline refresh
 - `src/runtime/reliability_pipeline.py`: runtime telemetry wrapper around the reliability workflow
+- `src/runtime/prediction_dependency_support.py`: runtime-owned dependency wiring for the prediction pipeline; most normalization, policy resolution, horizon handling, and post-processing hooks now come from runtime modules rather than the legacy script
 
 Current deliberate legacy boundaries:
 
 - `src/scripts/run_refresh_and_predict.py` still owns `parse_args(...)` and remains the broad CLI/config compatibility surface
+- `src/scripts/run_refresh_and_predict.py` still supplies some model/execution-specific helper callbacks and constants to the runtime prediction dependency builder while those final helper slices are being drained
 - `src/scripts/run_reliability_workflow.py` still owns reliability workflow execution
-- `src/runtime/reliability_pipeline.py` still uses the reliability workflow step-event sink from the legacy workflow module
+- `src/runtime/reliability_pipeline.py` now passes a scoped step-event callback directly into the legacy workflow entrypoint instead of mutating a global sink; the remaining legacy boundary is the workflow implementation itself
 
 ## Service API
 

@@ -8,7 +8,9 @@ from pathlib import Path
 import pandas as pd
 
 from src.scripts.run_reliability_workflow import (
+    _build_calibration_robustness_command,
     _build_directional_objectives_command,
+    _build_rolling_ab_command,
     _build_regime_max_p_up_shadow,
     _build_regime_abs_ret_pred_floor_shadow,
     _apply_trade_decision_model_shift_guard,
@@ -42,6 +44,64 @@ from src.scripts.run_reliability_workflow import (
 
 
 class ChampionGateAlignmentCheckTests(unittest.TestCase):
+    def test_build_rolling_ab_command_includes_optional_baseline_flag(self) -> None:
+        cmd = _build_rolling_ab_command(
+            python="python",
+            baseline_path=Path("baseline.csv"),
+            candidate_path=Path("candidate.csv"),
+            rolling_cfg={
+                "window_size": 96,
+                "step_size": 12,
+                "min_window_trades": 7,
+                "allow_no_trade_baseline": True,
+            },
+            output_path=Path("rolling.json"),
+            output_md_path=Path("rolling.md"),
+        )
+
+        rendered = " ".join(cmd)
+        self.assertIn("src.scripts.evaluate_rolling_ab", rendered)
+        self.assertIn("--window-size 96", rendered)
+        self.assertIn("--step-size 12", rendered)
+        self.assertIn("--min-window-trades 7", rendered)
+        self.assertIn("--allow-no-trade-baseline", rendered)
+
+    def test_build_calibration_robustness_command_includes_adaptive_selection_flags(self) -> None:
+        cmd = _build_calibration_robustness_command(
+            python="python",
+            input_path=Path("candidate.csv"),
+            output_path=Path("calibration.json"),
+            calibration_cfg={
+                "baseline_window": 360,
+                "recent_window": 144,
+                "max_ece_drift": 0.03,
+                "regime_col": "market_regime",
+                "return_col": "ret_net",
+                "selection_scope": "trades_only",
+                "min_selection_rows": 25,
+                "adaptive_selection_rows": {
+                    "enabled": True,
+                    "min_floor": 20,
+                    "baseline_ratio": 0.4,
+                    "max_shortfall": 12,
+                },
+            },
+            quality_cfg={"max_recent_ece": 0.07, "min_recent_auc": 0.58},
+            trade_decision_cfg={"signal_col": "signal_filtered"},
+        )
+
+        rendered = " ".join(cmd)
+        self.assertIn("src.scripts.evaluate_calibration_robustness", rendered)
+        self.assertIn("--baseline-window 360", rendered)
+        self.assertIn("--recent-window 144", rendered)
+        self.assertIn("--regime-col market_regime", rendered)
+        self.assertIn("--return-col ret_net", rendered)
+        self.assertIn("--signal-col signal_filtered", rendered)
+        self.assertIn("--adaptive-selection-rows", rendered)
+        self.assertIn("--adaptive-selection-min-floor 20", rendered)
+        self.assertIn("--adaptive-selection-baseline-ratio 0.4", rendered)
+        self.assertIn("--adaptive-selection-max-shortfall 12", rendered)
+
     def test_build_directional_objectives_command_includes_overrides(self) -> None:
         cmd = _build_directional_objectives_command(
             python="python",

@@ -6,7 +6,7 @@ from typing import Any
 from src.runtime.models import PipelineExecutionResult, RuntimeMode
 from src.runtime.persistence import RuntimeStateStore
 from src.runtime.reliability_registry import ReliabilityRunRegistry
-from src.scripts import run_reliability_workflow as legacy
+from src.runtime.reliability_workflow_support import execute_reliability_workflow
 
 
 def execute_reliability_pipeline(args: argparse.Namespace) -> PipelineExecutionResult:
@@ -20,9 +20,8 @@ def execute_reliability_pipeline(args: argparse.Namespace) -> PipelineExecutionR
             payload.update(details)
         store.append_event(run_paths, stage="workflow_step", status=status, details=payload)
 
-    legacy._set_step_event_sink(sink)
     try:
-        manifest = legacy.execute_reliability_workflow(args)
+        manifest = execute_reliability_workflow(args, step_event_sink=sink)
     except Exception as exc:
         store.append_event(run_paths, stage="pipeline", status="failed", details={"error": str(exc)})
         store.finalize(
@@ -32,8 +31,6 @@ def execute_reliability_pipeline(args: argparse.Namespace) -> PipelineExecutionR
             summary={"error": str(exc)},
         )
         raise
-    finally:
-        legacy._set_step_event_sink(None)
 
     store.write_predictions(run_paths, {"workflow_manifest": manifest})
     registry_payload = ReliabilityRunRegistry().record_workflow_manifest(manifest if isinstance(manifest, dict) else {})

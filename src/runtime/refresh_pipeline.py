@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Any, Dict, Mapping
 
 from src.runtime.horizon_support import format_horizon_label, horizon_sort_key
@@ -8,6 +9,16 @@ from src.runtime.market_preparation import apply_replay_override, prepare_market
 from src.runtime.models import PipelineExecutionResult, RuntimeMode, RuntimeRunPaths
 from src.runtime.output_support import write_monitoring_artifact as runtime_write_monitoring_artifact, refresh_meta_baseline as runtime_refresh_meta_baseline
 from src.runtime.persistence import RuntimeStateStore
+from src.runtime.prediction_defaults import CONFIDENCE_MIN_DEFAULT, POSITION_SIZE_CAP_DEFAULT, POSITION_SIZE_FLOOR_DEFAULT
+from src.runtime.prediction_paths import (
+    HISTORY_PREDICTION_PATH,
+    LATEST_PREDICTION_PATH,
+    META_BASELINE_JSON_PATH,
+    META_BASELINE_PARQUET_PATH,
+    META_BASELINE_SOURCE_CSV,
+    MONITORING_LATEST_PATH,
+    TRADE_READY_MONITOR_PATH,
+)
 from src.runtime.prediction_execution import run_predictions as runtime_run_predictions
 from src.runtime.refresh_support import (
     PredictionInputBundle,
@@ -21,8 +32,13 @@ from src.runtime.summary_support import (
     build_runtime_prompt_ready_summary,
     write_prediction_summary as runtime_write_prediction_summary,
 )
-from src.scripts import run_refresh_and_predict as legacy
-from src.scripts.build_signal_baseline import _append_detected_meta_columns
+from src.scripts.build_signal_baseline import (
+    DEFAULT_COLUMNS as BASELINE_DEFAULT_COLUMNS,
+    _append_detected_meta_columns,
+    baseline_to_dataframe,
+    compute_baseline,
+    load_dataframe,
+)
 from src.trading.signals import PreparedData
 
 
@@ -145,10 +161,10 @@ def _run_prediction_stage(
         direction_ensemble_policy=getattr(args, "direction_ensemble_policy", None),
         trust_hardening_policy=getattr(args, "trust_hardening_policy", None),
         latest_close=latest_close,
-        confidence_min=float(getattr(args, "confidence_min", legacy.CONFIDENCE_MIN_DEFAULT)),
+        confidence_min=float(getattr(args, "confidence_min", CONFIDENCE_MIN_DEFAULT)),
         confidence_min_by_horizon_regime=getattr(args, "confidence_min_by_horizon_regime", None),
-        position_size_floor=float(getattr(args, "position_size_floor", legacy.POSITION_SIZE_FLOOR_DEFAULT)),
-        position_size_cap=float(getattr(args, "position_size_cap", legacy.POSITION_SIZE_CAP_DEFAULT)),
+        position_size_floor=float(getattr(args, "position_size_floor", POSITION_SIZE_FLOOR_DEFAULT)),
+        position_size_cap=float(getattr(args, "position_size_cap", POSITION_SIZE_CAP_DEFAULT)),
         position_size_cap_by_horizon=getattr(args, "position_size_cap_by_horizon", None),
         disabled_horizons=getattr(args, "disabled_horizons", None),
     )
@@ -167,8 +183,8 @@ def _persist_outputs(
     predictions_payload = runtime_write_prediction_summary(
         summary,
         degradation_policy=getattr(args, "degradation_monitoring", None),
-        latest_prediction_path=legacy.LATEST_PREDICTION_PATH,
-        history_prediction_path=legacy.HISTORY_PREDICTION_PATH,
+        latest_prediction_path=LATEST_PREDICTION_PATH,
+        history_prediction_path=HISTORY_PREDICTION_PATH,
         build_prompt_ready_summary_fn=lambda payload: build_runtime_prompt_ready_summary(
             payload,
             horizon_sort_key=horizon_sort_key,
@@ -188,12 +204,12 @@ def _persist_outputs(
         monitoring_payload = runtime_write_monitoring_artifact(
             predictions_payload,
             args,
-            output_path=legacy.MONITORING_LATEST_PATH,
+            output_path=MONITORING_LATEST_PATH,
             horizon_sort_key=horizon_sort_key,
             format_horizon_label=format_horizon_label,
-            confidence_min_default=legacy.CONFIDENCE_MIN_DEFAULT,
-            position_size_floor_default=legacy.POSITION_SIZE_FLOOR_DEFAULT,
-            position_size_cap_default=legacy.POSITION_SIZE_CAP_DEFAULT,
+            confidence_min_default=CONFIDENCE_MIN_DEFAULT,
+            position_size_floor_default=POSITION_SIZE_FLOOR_DEFAULT,
+            position_size_cap_default=POSITION_SIZE_CAP_DEFAULT,
         )
         store.write_monitoring(run_paths, monitoring_payload)
 
@@ -202,25 +218,25 @@ def _persist_outputs(
         trade_ready_payload = runtime_write_monitoring_artifact(
             predictions_payload,
             args,
-            output_path=legacy.TRADE_READY_MONITOR_PATH,
+            output_path=TRADE_READY_MONITOR_PATH,
             horizon_sort_key=horizon_sort_key,
             format_horizon_label=format_horizon_label,
-            confidence_min_default=legacy.CONFIDENCE_MIN_DEFAULT,
-            position_size_floor_default=legacy.POSITION_SIZE_FLOOR_DEFAULT,
-            position_size_cap_default=legacy.POSITION_SIZE_CAP_DEFAULT,
+            confidence_min_default=CONFIDENCE_MIN_DEFAULT,
+            position_size_floor_default=POSITION_SIZE_FLOOR_DEFAULT,
+            position_size_cap_default=POSITION_SIZE_CAP_DEFAULT,
             payload=monitoring_payload,
         )
         store.write_trade_ready(run_paths, trade_ready_payload)
         runtime_refresh_meta_baseline(
-            source_csv=legacy.META_BASELINE_SOURCE_CSV,
-            json_path=legacy.META_BASELINE_JSON_PATH,
-            parquet_path=legacy.META_BASELINE_PARQUET_PATH,
-            load_dataframe=legacy.load_dataframe,
-            compute_baseline=legacy.compute_baseline,
-            baseline_to_dataframe=legacy.baseline_to_dataframe,
+            source_csv=META_BASELINE_SOURCE_CSV,
+            json_path=META_BASELINE_JSON_PATH,
+            parquet_path=META_BASELINE_PARQUET_PATH,
+            load_dataframe=load_dataframe,
+            compute_baseline=compute_baseline,
+            baseline_to_dataframe=baseline_to_dataframe,
             append_detected_meta_columns=_append_detected_meta_columns,
-            default_columns=list(legacy.BASELINE_DEFAULT_COLUMNS),
-            stderr_write=legacy.sys.stderr.write,
+            default_columns=list(BASELINE_DEFAULT_COLUMNS),
+            stderr_write=sys.stderr.write,
         )
 
     prompt_summary = predictions_payload.get("prompt_ready_summary", {}) if isinstance(predictions_payload, Mapping) else {}

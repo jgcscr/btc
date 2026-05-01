@@ -70,9 +70,9 @@ def test_apply_replay_override_uses_runtime_dataset_resolution(tmp_path: Path, m
 
     import src.runtime.market_preparation as market_preparation
 
-    monkeypatch.setattr(market_preparation.legacy, "DATASET_MULTI_PATH", legacy_dataset_path)
-    monkeypatch.setattr(market_preparation.legacy, "DATASET_1H_PATH", dataset_path)
-    monkeypatch.setattr(market_preparation.legacy, "DATASET_15M_PATH", tmp_path / "dataset_15m.npz")
+    monkeypatch.setattr(market_preparation, "DATASET_MULTI_PATH", legacy_dataset_path)
+    monkeypatch.setattr(market_preparation, "DATASET_1H_PATH", dataset_path)
+    monkeypatch.setattr(market_preparation, "DATASET_15M_PATH", tmp_path / "dataset_15m.npz")
     import src.runtime.refresh_support as refresh_support
 
     monkeypatch.setattr(

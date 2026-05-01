@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
-import pandas as pd
-
+from src.runtime.prediction_dependency_support import build_prediction_pipeline_dependencies
 from src.runtime.prediction_pipeline import (
     PredictionPipelineConfig,
-    PredictionPipelineDependencies,
     execute_prediction_pipeline,
 )
 
@@ -54,8 +52,6 @@ def run_predictions(
     position_size_cap_by_horizon: Mapping[float | int | str, float] | None = None,
     disabled_horizons: Sequence[float] | None = None,
 ) -> Dict[str, Dict[str, Any]]:
-    from src.scripts import run_refresh_and_predict as legacy
-
     config = PredictionPipelineConfig(
         targets=targets,
         p_up_min=p_up_min,
@@ -99,75 +95,5 @@ def run_predictions(
         position_size_cap_by_horizon=position_size_cap_by_horizon,
         disabled_horizons=disabled_horizons,
     )
-    deps = PredictionPipelineDependencies(
-        normalize_horizon_value=legacy._normalize_horizon_value,
-        normalize_threshold_overrides=legacy._normalize_threshold_overrides,
-        normalize_horizon_regime_float_map=legacy._normalize_horizon_regime_float_map,
-        normalize_horizon_float_map=legacy._normalize_horizon_float_map,
-        dataset_profile_for_horizon=legacy._dataset_profile_for_horizon,
-        select_dataset_candidate=legacy._select_dataset_candidate,
-        prepare_base_direction_configs=legacy._prepare_base_direction_configs,
-        load_prepared=legacy._load_prepared,
-        resolve_trend_ignition_payload=legacy._resolve_trend_ignition_payload,
-        resolve_direction_fallback_policy=legacy._resolve_direction_fallback_policy,
-        resolve_adaptive_thresholds_policy=legacy._resolve_adaptive_thresholds_policy,
-        resolve_target_range_policy=legacy._resolve_target_range_policy,
-        resolve_abstention_policy=legacy._resolve_abstention_policy,
-        resolve_uncertainty_policy=legacy._resolve_uncertainty_policy,
-        resolve_trade_decision_policy=legacy._resolve_trade_decision_policy,
-        resolve_regime_model_weights_policy=legacy._resolve_regime_model_weights_policy,
-        resolve_regime_model_dirs_policy=legacy._resolve_regime_model_dirs_policy,
-        resolve_regression_model_dirs_policy=legacy._resolve_regression_model_dirs_policy,
-        resolve_confluence_policy=legacy._resolve_confluence_policy,
-        resolve_execution_policy=legacy._resolve_execution_policy,
-        resolve_forecast_coherence_policy=legacy._resolve_forecast_coherence_policy,
-        resolve_direction_output_policy=legacy._resolve_direction_output_policy,
-        resolve_direction_ensemble_policy=legacy._resolve_direction_ensemble_policy,
-        resolve_trust_hardening_policy=legacy._resolve_trust_hardening_policy,
-        compute_breakout_scores=legacy._compute_breakout_scores,
-        load_target_range_models=legacy._load_target_range_models,
-        format_horizon_label=legacy._format_horizon_label,
-        model_paths_for_horizon=legacy._model_paths_for_horizon,
-        classify_regime_from_score=legacy._classify_regime_from_score,
-        resolve_regime_specific_dir_path=legacy._resolve_regime_specific_dir_path,
-        resolve_regression_dir_path=legacy._resolve_regression_dir_path,
-        direction_configs_for_horizon=legacy._direction_configs_for_horizon,
-        resolve_thresholds_for_horizon=legacy._resolve_thresholds_for_horizon,
-        apply_adaptive_thresholds=legacy._apply_adaptive_thresholds,
-        apply_regime_weight_overrides=legacy._apply_regime_weight_overrides,
-        scope_direction_ensemble_policy=legacy._scope_direction_ensemble_policy,
-        resolve_direction_threshold_for_horizon=legacy._resolve_direction_threshold_for_horizon,
-        project_price=legacy._project_price,
-        resolve_trade_probability_for_horizon=legacy._resolve_trade_probability_for_horizon,
-        resolve_direction_signal_for_horizon=legacy._resolve_direction_signal_for_horizon,
-        compute_directional_stop_take_prices=legacy._compute_directional_stop_take_prices,
-        resolve_confidence_min_for_horizon=legacy._resolve_confidence_min_for_horizon,
-        lookup_horizon_value=legacy._lookup_horizon_value,
-        compute_position_size=legacy._compute_position_size,
-        parse_iso_timestamp=legacy._parse_iso_timestamp,
-        predict_target_range_prices=legacy._predict_target_range_prices,
-        build_prediction_result=legacy.runtime_build_prediction_result,
-        get_active_regime_weight_override=legacy._get_active_regime_weight_override,
-        derive_probability_alignment_features=legacy._derive_probability_alignment_features,
-        build_direction_output=legacy._build_direction_output,
-        apply_target_range_overrides=legacy._apply_target_range_overrides,
-        evaluate_direction_only_fallback=legacy._evaluate_direction_only_fallback,
-        finite_float_or_none=legacy._finite_float_or_none,
-        coerce_row_value=lambda value: None
-        if pd.isna(pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0])
-        else float(pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]),
-        write_trend_ignition_state=legacy._write_trend_ignition_state,
-        write_direction_fallback_state=legacy._write_direction_fallback_state,
-        apply_post_prediction_policies=legacy.runtime_apply_post_prediction_policies,
-        apply_forecast_coherence_policy=legacy._apply_forecast_coherence_policy,
-        apply_trust_hardening_stage=legacy._apply_trust_hardening,
-        apply_confluence_policy=legacy._apply_confluence_policy,
-        apply_trade_decision_stage=legacy._apply_trade_decision_stage,
-        apply_post_trade_gates=legacy._apply_post_trade_gates,
-        apply_execution_policy=legacy._apply_execution_policy,
-        build_stub_summary=legacy._build_stub_summary,
-        stderr_write=legacy.sys.stderr.write,
-        regime_neutral=legacy.REGIME_NEUTRAL,
-        target_range_default_confidence_scale=legacy.TARGET_RANGE_DEFAULT_CONFIDENCE_SCALE,
-    )
+    deps = build_prediction_pipeline_dependencies()
     return execute_prediction_pipeline(config, deps)
