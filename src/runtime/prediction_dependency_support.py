@@ -40,6 +40,7 @@ from src.runtime.execution_policy_support import (
     summarize_bias_context,
 )
 from src.runtime.forecast_coherence_support import apply_forecast_coherence_policy, resolve_forecast_coherence_policy
+from src.runtime.forecast_coherence_support import forecast_coherence_excluded
 from src.runtime.gate_trace_support import append_gate_trace
 from src.runtime.horizon_support import coerce_numeric_horizon, format_horizon_label, normalize_horizon_value
 from src.runtime.model_resolution_support import (
@@ -118,6 +119,7 @@ from src.runtime.regime_policy_support import (
     classify_regime_from_score,
     compute_breakout_scores,
     compute_profile_breakout_score,
+    inactive_direction_fallback,
     load_last_trigger_ts,
     resolve_adaptive_thresholds_policy,
     resolve_direction_fallback_policy,
@@ -135,7 +137,13 @@ from src.runtime.target_range_support import (
     resolve_target_range_policy,
     target_range_label,
 )
-from src.runtime.trade_decision_support import apply_trade_decision_stage, resolve_trade_decision_policy
+from src.runtime.trade_decision_support import (
+    apply_trade_decision_model,
+    apply_trade_decision_stage,
+    resolve_trade_decision_policy,
+    resolve_trade_decision_threshold,
+    upstream_trade_gate_reasons,
+)
 from src.runtime.trust_hardening_support import apply_trust_hardening, resolve_trust_hardening_policy
 from src.trading.direction_config import (
     apply_path_overrides,
@@ -641,22 +649,7 @@ def _build_direction_output(**kwargs) -> Mapping[str, Any]:
 
 
 def _build_prediction_result(**kwargs):
-    return build_prediction_result(
-        **kwargs,
-        project_price=project_price,
-        get_active_regime_weight_override=lambda regime_state, horizon, policy: get_active_regime_weight_override(
-            regime_state=regime_state,
-            horizon=horizon,
-            policy=policy,
-            normalize_horizon_value=normalize_horizon_value,
-        ),
-        derive_probability_alignment_features=_derive_probability_alignment_features,
-        build_direction_output=_build_direction_output,
-        apply_target_range_overrides=apply_target_range_overrides,
-        evaluate_direction_only_fallback=evaluate_direction_only_fallback,
-        finite_float_or_none=finite_float_or_none,
-        coerce_row_value=coerce_row_value,
-    )
+    return build_prediction_result(**kwargs)
 
 
 def _load_target_range_models(policy: Mapping[str, Any] | None, horizons: Sequence[float]) -> Dict[float, Dict[str, Any]]:
@@ -698,10 +691,53 @@ def _apply_confluence_policy(summary: Dict[str, Dict[str, Any]], policy: Mapping
     return apply_confluence_policy(
         summary,
         policy,
+        forecast_coherence_excluded=forecast_coherence_excluded,
         coerce_result_horizon=_coerce_result_horizon,
         direction_vote=_direction_vote,
-        direction_from_probability=_direction_from_probability,
-        finite_float_or_none=finite_float_or_none,
+        lookup_horizon_value=lookup_horizon_value,
+        append_gate_trace=append_gate_trace,
+    )
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0.0:
+        exp_term = math.exp(-value)
+        return float(1.0 / (1.0 + exp_term))
+    exp_term = math.exp(value)
+    return float(exp_term / (1.0 + exp_term))
+
+
+def _apply_trade_decision_stage(
+    summary: Dict[str, Dict[str, Any]],
+    execution_contexts: Mapping[str, Mapping[str, Any]],
+    policy: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    return apply_trade_decision_stage(
+        summary,
+        execution_contexts,
+        policy,
+        default_residual_std=MIN_RESIDUAL_STD,
+        regime_neutral=REGIME_NEUTRAL,
+        default_fee_bps=DEFAULT_FEE_BPS,
+        default_slippage_bps=DEFAULT_SLIPPAGE_BPS,
+        apply_trade_decision_model=lambda **kwargs: apply_trade_decision_model(
+            **kwargs,
+            regime_trend=REGIME_TREND,
+            regime_neutral=REGIME_NEUTRAL,
+            regime_chop=REGIME_CHOP,
+            resolve_trade_decision_threshold=lambda threshold_policy, *, horizon_label=None, regime_state: resolve_trade_decision_threshold(
+                threshold_policy,
+                horizon_label=horizon_label,
+                regime_state=regime_state,
+                normalize_horizon_value=normalize_horizon_value,
+                parse_horizon_label=_parse_horizon_label,
+                format_horizon_label=format_horizon_label,
+            ),
+            sigmoid=_sigmoid,
+            finite_float_or_none=finite_float_or_none,
+            finite_float=finite_float,
+        ),
+        upstream_trade_gate_reasons=upstream_trade_gate_reasons,
         append_gate_trace=append_gate_trace,
     )
 
@@ -908,7 +944,13 @@ def build_prediction_pipeline_dependencies() -> PredictionPipelineDependencies:
         lookup_horizon_value=lookup_horizon_value,
         compute_position_size=compute_position_size,
         parse_iso_timestamp=parse_iso_timestamp,
-        predict_target_range_prices=predict_target_range_prices,
+        predict_target_range_prices=lambda bundle, row, *, close, confidence_scale: predict_target_range_prices(
+            bundle,
+            row,
+            close=close,
+            confidence_scale=confidence_scale,
+            finite_float_or_none=finite_float_or_none,
+        ),
         build_prediction_result=_build_prediction_result,
         get_active_regime_weight_override=lambda regime_state, horizon=None, policy=None: get_active_regime_weight_override(
             regime_state=regime_state,
@@ -919,7 +961,12 @@ def build_prediction_pipeline_dependencies() -> PredictionPipelineDependencies:
         derive_probability_alignment_features=_derive_probability_alignment_features,
         build_direction_output=_build_direction_output,
         apply_target_range_overrides=apply_target_range_overrides,
-        evaluate_direction_only_fallback=evaluate_direction_only_fallback,
+        evaluate_direction_only_fallback=lambda policy, **kwargs: evaluate_direction_only_fallback(
+            policy,
+            **kwargs,
+            inactive_direction_fallback=inactive_direction_fallback,
+            parse_iso_timestamp=parse_iso_timestamp,
+        ),
         finite_float_or_none=finite_float_or_none,
         coerce_row_value=coerce_row_value,
         write_trend_ignition_state=_write_trend_ignition_state,
@@ -928,7 +975,7 @@ def build_prediction_pipeline_dependencies() -> PredictionPipelineDependencies:
         apply_forecast_coherence_policy=_apply_forecast_coherence_policy,
         apply_trust_hardening_stage=_apply_trust_hardening,
         apply_confluence_policy=_apply_confluence_policy,
-        apply_trade_decision_stage=apply_trade_decision_stage,
+        apply_trade_decision_stage=_apply_trade_decision_stage,
         apply_post_trade_gates=_apply_post_trade_gates,
         apply_execution_policy=_apply_execution_policy,
         build_stub_summary=_build_stub_summary,
