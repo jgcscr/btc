@@ -51,6 +51,26 @@ This wrapper:
 - executes `src.runtime.refresh_pipeline.execute_refresh_pipeline(..., mode=RuntimeMode.RESEARCH)`
 - writes runtime telemetry under `artifacts/runtime_runs/<run-id>/`
 
+Current operator note:
+
+- the checked-in `configs/run_refresh_and_predict.default.yaml` sets `write_artifacts: false`, so the baseline research command refreshes `artifacts/predictions/latest.json`, `artifacts/monitoring/latest.json`, and `artifacts/runtime_runs/latest.json`, but it does not rewrite `artifacts/monitoring/trade_ready_summary.json`
+- when you need the trade-ready monitoring snapshot to match the current research run, rerun the same command with `--write-artifacts`
+
+Exact fresh research commands used successfully:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_research_refresh \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --targets 0.25,1,4,8,12
+```
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_research_refresh \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --targets 0.25,1,4,8,12 \
+  --write-artifacts
+```
+
 ### Live Inference
 
 Recommended live-style command:
@@ -176,7 +196,7 @@ Read these first after any runtime refresh or cadence run:
 - `artifacts/predictions/latest.json`
 - `artifacts/predictions/history.json`
 - `artifacts/monitoring/latest.json`
-- `artifacts/monitoring/trade_ready_summary.json`
+- `artifacts/monitoring/trade_ready_summary.json` only when the run used `--write-artifacts` or a profile with `write_artifacts: true`
 - `artifacts/monitoring/data_quality_latest.json`
 - `artifacts/runtime_runs/<run-id>/request.json`
 - `artifacts/runtime_runs/<run-id>/events.jsonl`
@@ -274,6 +294,7 @@ Current GitHub Actions behavior from `.github/workflows/cadence.yml`:
 Current operator note:
 
 - this profile still fails closed on remaining feature coverage violations, but stale auxiliary `funding`, `macro`, and `onchain` lag alone no longer blocks the refresh
+- this profile leaves `write_artifacts: false`, so use the command above for fresh `predictions/latest.json` plus `monitoring/latest.json`, then add `--write-artifacts` only when you also need `monitoring/trade_ready_summary.json` and `runtime_runs/<run-id>/trade_ready.json` to roll forward
 
 ### Research-Safe Refresh
 

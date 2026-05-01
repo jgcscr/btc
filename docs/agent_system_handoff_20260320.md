@@ -36,6 +36,7 @@ Current wrapper behavior that matters in practice:
 - it emits `0.25,1,4,12` by default and auto-forwards `--intrabar-enabled` when `0.25` is present
 - the approved live profile ignores stale `funding`, `macro`, and `onchain` sources in `feature_coverage_policy`
 - `configs/run_refresh_and_predict.research_safe.yaml` is the documented fallback when research refreshes should warn instead of hard-fail on remaining feature-coverage violations
+- `src.scripts.run_research_refresh` parses the same full CLI surface as `run_refresh_and_predict`, but the checked-in `configs/run_refresh_and_predict.default.yaml` leaves `write_artifacts: false`, so a baseline research refresh does not update `artifacts/monitoring/trade_ready_summary.json` unless `--write-artifacts` is added
 
 ## 2. Read These First
 
@@ -79,7 +80,7 @@ Read these artifacts before relying on any recent runtime state:
 - `artifacts/runtime_runs/latest_by_mode/<mode>.json`
 - `artifacts/predictions/latest.json`
 - `artifacts/monitoring/latest.json`
-- `artifacts/monitoring/trade_ready_summary.json`
+- `artifacts/monitoring/trade_ready_summary.json` only when the run used `--write-artifacts` or a profile with `write_artifacts: true`
 - `artifacts/runtime_runs/<run-id>/request.json`
 - `artifacts/runtime_runs/<run-id>/events.jsonl`
 - `artifacts/runtime_runs/<run-id>/summary.json`
@@ -100,15 +101,32 @@ Research refresh:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_research_refresh \
-  --config configs/run_refresh_and_predict.default.yaml
+  --config configs/run_refresh_and_predict.default.yaml \
+  --targets 0.25,1,4,8,12
+```
+
+Research refresh with trade-ready artifacts:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_research_refresh \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --targets 0.25,1,4,8,12 \
+  --write-artifacts
 ```
 
 Research-safe fallback:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_research_refresh \
-  --config configs/run_refresh_and_predict.research_safe.yaml
+  --config configs/run_refresh_and_predict.research_safe.yaml \
+  --targets 0.25,1,4,8,12
 ```
+
+Agent reading rule after a research run:
+
+1. read `artifacts/runtime_runs/latest.json` first to confirm the latest run succeeded
+2. read `artifacts/predictions/latest.json` and `artifacts/monitoring/latest.json` as the default fresh outputs
+3. only treat `artifacts/monitoring/trade_ready_summary.json` as current if the run used `--write-artifacts` or a profile with `write_artifacts: true`
 
 Live inference:
 

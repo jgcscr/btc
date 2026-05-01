@@ -43,6 +43,20 @@ Legacy full-surface note:
   --targets 0.25,1,4,8,12
 ```
 
+When you need the trade-ready monitoring snapshot to match the current research run, rerun with:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_research_refresh \
+  --config configs/run_refresh_and_predict.default.yaml \
+  --targets 0.25,1,4,8,12 \
+  --write-artifacts
+```
+
+Current research note:
+
+- `configs/run_refresh_and_predict.default.yaml` keeps `write_artifacts: false`, so the first command refreshes `artifacts/predictions/latest.json`, `artifacts/monitoring/latest.json`, and `artifacts/runtime_runs/latest.json`, but leaves `artifacts/monitoring/trade_ready_summary.json` untouched
+- the `--write-artifacts` form refreshes `artifacts/monitoring/trade_ready_summary.json`, the run-scoped `trade_ready.json`, and the meta baseline in the same runtime pipeline pass
+
 ### Live Inference
 
 ```bash
@@ -166,7 +180,7 @@ Read these first after a direct refresh, live inference run, or cadence refresh:
 - `artifacts/predictions/latest.json`
 - `artifacts/predictions/history.json`
 - `artifacts/monitoring/latest.json`
-- `artifacts/monitoring/trade_ready_summary.json`
+- `artifacts/monitoring/trade_ready_summary.json` only when the run used `--write-artifacts` or a profile with `write_artifacts: true`
 - `artifacts/monitoring/data_quality_latest.json`
 - `artifacts/runtime_runs/latest.json`
 - `artifacts/runtime_runs/latest_by_mode/<mode>.json`
@@ -228,7 +242,9 @@ Confirm all of these before acting on a fresh run:
 2. `request.local_feature_overrides.feature_coverage.ok` is true when local overrides are used
 3. source freshness in `request.local_feature_overrides.source_freshness` is acceptable when local overrides are used
 4. `prompt_ready_summary.operator_summary_compact` matches the interpretation you are about to use
-5. per-horizon `trade_action`, `execution_plan.status`, `execution_plan.reason`, `confidence_min_source`, and `abstention.reason` support the same conclusion
+5. `artifacts/runtime_runs/latest.json` shows `status: succeeded` for the run you are about to cite
+6. `artifacts/monitoring/trade_ready_summary.json` is not older than the latest run unless you intentionally skipped `--write-artifacts`
+7. per-horizon `trade_action`, `execution_plan.status`, `execution_plan.reason`, `confidence_min_source`, and `abstention.reason` support the same conclusion
 
 Operator-facing fields worth checking first:
 
