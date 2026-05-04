@@ -102,6 +102,11 @@ def build_shadow_config(
         direction_output_policy["marginal_rerank"] = marginal_rerank_policy
 
     config["direction_output_policy"] = direction_output_policy
+    feature_coverage_policy = config.get("feature_coverage_policy")
+    if isinstance(feature_coverage_policy, dict):
+        # The weekly paper-live shadow refresh runs against Binance-only inputs and
+        # should report coverage gaps without aborting the whole recalibration.
+        feature_coverage_policy["block_on_violation"] = False
     config["write_artifacts"] = False
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

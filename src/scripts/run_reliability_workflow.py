@@ -3033,6 +3033,64 @@ def execute_reliability_workflow(
             candidate_quality_input = quality_input
         candidate_gate_input = candidate_quality_input
         tuning_quality_input = candidate_quality_input
+        decision_model_input = candidate_quality_input
+        incumbent_backtest_for_features = quality_cfg.get("incumbent_backtest_csv")
+        aligned_candidate_input = candidate_gate_input
+        trade_policy_cfg: Dict[str, Any] = {}
+        resolved_trade_decision_threshold = float(trade_decision_cfg.get("threshold", 0.55))
+        direct_midband_policy_enabled = False
+        direct_midband_policy_low = 0.55
+        direct_midband_policy_high = 0.60
+        direct_midband_policy_high_inclusive = False
+        direct_midband_policy_min_abs_ret_pred = None
+        direct_midband_policy_max_abs_ret_pred = None
+        direct_midband_policy_regime_states: List[str] = []
+        common_align_args = [
+            "--threshold",
+            str(resolved_trade_decision_threshold),
+            "--fee-bps",
+            str(float(quality_cfg.get("walkforward_fee_bps", 2.0))),
+            "--slippage-bps",
+            str(float(quality_cfg.get("walkforward_slippage_bps", 1.0))),
+            "--replace-threshold-rule",
+            "1" if bool(trade_policy_cfg.get("replace_threshold_rule", True)) else "0",
+            "--require-direction-ret-alignment",
+            "1" if bool(trade_policy_cfg.get("require_direction_ret_alignment", True)) else "0",
+            "--use-oof-expected-value",
+            "1" if bool(trade_policy_cfg.get("use_oof_expected_value", True)) else "0",
+            "--oof-expected-value-mode",
+            str(trade_policy_cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")),
+            "--enforce-positive-oof-envelope",
+            "1" if bool(trade_policy_cfg.get("enforce_positive_oof_envelope", False)) else "0",
+            "--positive-oof-envelope-mode",
+            str(trade_policy_cfg.get("positive_oof_envelope_mode", "strict_positive_bin")),
+            "--block-when-no-positive-oof-bin",
+            "1" if bool(trade_policy_cfg.get("block_when_no_positive_oof_bin", True)) else "0",
+            "--positive-oof-min-samples",
+            str(int(trade_policy_cfg.get("positive_oof_min_samples", 4))),
+            "--allow-raw-ev-fallback-when-no-positive-oof-bin",
+            "1" if bool(trade_policy_cfg.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False)) else "0",
+            "--raw-ev-fallback-quantile",
+            str(float(trade_policy_cfg.get("raw_ev_fallback_quantile", 0.9))),
+            "--raw-ev-fallback-min-edge-over-fee",
+            str(float(trade_policy_cfg.get("raw_ev_fallback_min_edge_over_fee", 0.0))),
+            "--min-expected-net",
+            str(float(trade_policy_cfg.get("min_expected_net", 0.0))),
+            "--min-edge-over-fee",
+            str(float(trade_policy_cfg.get("min_edge_over_fee", 0.0))),
+            "--policy-midband-veto",
+            "1" if direct_midband_policy_enabled else "0",
+            "--policy-midband-pup-low",
+            str(direct_midband_policy_low),
+            "--policy-midband-pup-high",
+            str(direct_midband_policy_high),
+            "--policy-midband-high-inclusive",
+            "1" if direct_midband_policy_high_inclusive else "0",
+        ]
+        weak_veto_cfg: Dict[str, Any] = {}
+        weak_veto_enabled_official = False
+        weak_veto_official_mode = "weak_band"
+        official_shadow_selection_cfg: Dict[str, Any] = {}
         official_shadow_variant = "none"
         selection_payload: Dict[str, Any] | None = None
         selected_shadow_path: Path | None = None
@@ -5497,6 +5555,9 @@ def execute_reliability_workflow(
                 if candidate_raw is None or str(candidate_raw).strip().lower() in {"", "auto"}
                 else str(candidate_raw)
             )
+            companion_candidate_input = str(candidate_input)
+            companion_baseline_input = str(baseline_input)
+            official_profile_summary_path = summary_dir / "official_profile_policy_metrics.json"
 
             baseline_resolution = {
                 "champion_baseline_config": baseline_raw,
