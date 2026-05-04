@@ -9,7 +9,7 @@ cv:
   embargo_size: 4
 
 search:
-  horizons: [1, 4, 8, 12]
+  horizons: [1, 4, 12]
   n_trials: 5
   timeout: null
   threshold_objective: cumret_with_dd_constraint
@@ -19,8 +19,11 @@ search:
   max_drawdown: -0.08
   min_trades: 10
   meta_weight_threshold: 0.52
+  meta_component_frame_csv: artifacts/monitoring/meta_component_frame_1h.csv
+  meta_component_frame_source: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+  meta_component_columns: [xgb, transformer, lstm]
   meta_component_weights_from_audit_path: artifacts/analysis/direction_model_audit_latest.json
-  paper_live_config: configs/run_refresh_and_predict.shadow_simplified.yaml
+  paper_live_config: configs/run_refresh_and_predict.live_conservative_binance_only.yaml
   apply_direction_audit_to_paper_live: true
   direction_output_shadow:
     enabled: true
@@ -50,7 +53,7 @@ search:
   paper_live_dry_run: false
 
 monitoring:
-  horizons: ["1h", "4h", "8h", "12h"]
+  horizons: ["1h", "4h", "12h"]
   triggers:
     baseline_window: 8
     recent_window: 4
@@ -101,7 +104,7 @@ quality:
     meta_margin: 0.001
     meta_min_rolling_trades: 40
   walkforward_labeled_reconciliation:
-    enabled: true
+    enabled: false
     use_as_primary: true
     ts_col: ts
     min_rows: 80
