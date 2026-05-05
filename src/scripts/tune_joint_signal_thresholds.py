@@ -224,6 +224,13 @@ def main() -> None:
     overlap_rows_before = int(len(df))
     overlap_rows_after = int(len(df))
     overlap_enabled = args.overlap_dataset is not None
+
+    def _write_payload_and_exit(payload: dict, exit_code: int) -> None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(json.dumps(payload, indent=2))
+        raise SystemExit(int(exit_code))
+
     if args.overlap_dataset is not None:
         if not args.overlap_dataset.exists():
             raise FileNotFoundError(args.overlap_dataset)
@@ -236,11 +243,63 @@ def main() -> None:
         df = df.loc[mask].copy()
         overlap_rows_after = int(len(df))
         if overlap_rows_after < int(args.min_overlap_rows):
-            raise RuntimeError(
-                f"Overlap filtered rows {overlap_rows_after} below min_overlap_rows={int(args.min_overlap_rows)}",
-            )
+            payload = {
+                "rows": int(len(df)),
+                "constraints": {
+                    "min_trades": int(args.min_trades),
+                    "max_dd": float(args.max_dd),
+                    "min_cum_ret": float(args.min_cum_ret),
+                    "selection_metric": str(args.selection_metric),
+                    "stability_gap_penalty": float(args.stability_gap_penalty),
+                    "max_stability_gap": float(args.max_stability_gap),
+                    "min_overlap_rows": int(args.min_overlap_rows),
+                    "economics_turnover_penalty": float(args.economics_turnover_penalty),
+                    "economics_downside_penalty": float(args.economics_downside_penalty),
+                },
+                "overlap_filter": {
+                    "enabled": True,
+                    "dataset": str(args.overlap_dataset),
+                    "ts_col": str(args.ts_col),
+                    "rows_before": int(overlap_rows_before),
+                    "rows_after": int(overlap_rows_after),
+                },
+                "accepted": False,
+                "reason": "insufficient_overlap_rows",
+                "n_candidates": 0,
+                "n_feasible": 0,
+                "n_deployable": 0,
+            }
+            exit_code = 2 if bool(args.strict_accept) else 0
+            _write_payload_and_exit(payload, exit_code)
     if df.empty:
-        raise RuntimeError("No valid rows available after numeric coercion.")
+        payload = {
+            "rows": 0,
+            "constraints": {
+                "min_trades": int(args.min_trades),
+                "max_dd": float(args.max_dd),
+                "min_cum_ret": float(args.min_cum_ret),
+                "selection_metric": str(args.selection_metric),
+                "stability_gap_penalty": float(args.stability_gap_penalty),
+                "max_stability_gap": float(args.max_stability_gap),
+                "min_overlap_rows": int(args.min_overlap_rows),
+                "economics_turnover_penalty": float(args.economics_turnover_penalty),
+                "economics_downside_penalty": float(args.economics_downside_penalty),
+            },
+            "overlap_filter": {
+                "enabled": bool(overlap_enabled),
+                "dataset": str(args.overlap_dataset) if args.overlap_dataset else None,
+                "ts_col": str(args.ts_col),
+                "rows_before": int(overlap_rows_before),
+                "rows_after": int(overlap_rows_after),
+            },
+            "accepted": False,
+            "reason": "no_valid_rows_after_numeric_coercion",
+            "n_candidates": 0,
+            "n_feasible": 0,
+            "n_deployable": 0,
+        }
+        exit_code = 2 if bool(args.strict_accept) else 0
+        _write_payload_and_exit(payload, exit_code)
 
     p_up_grid = _parse_grid(args.p_up_grid)
     ret_min_grid = _parse_grid(args.ret_min_grid)
@@ -361,15 +420,14 @@ def main() -> None:
     if not accepted:
         payload["reason"] = "no_deployable_candidate"
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(json.dumps(payload, indent=2))
+    exit_code = 0
     if not accepted and bool(args.strict_accept):
         print(
             "No deployable threshold candidate satisfied min_trades/max_dd/min_cum_ret constraints.",
             file=sys.stderr,
         )
-        raise SystemExit(2)
+        exit_code = 2
+    _write_payload_and_exit(payload, exit_code)
 
 
 if __name__ == "__main__":

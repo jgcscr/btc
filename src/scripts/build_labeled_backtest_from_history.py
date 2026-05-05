@@ -9,6 +9,37 @@ import numpy as np
 import pandas as pd
 
 
+_HISTORY_DIAGNOSTIC_FIELDS = [
+    "probability_alignment_gap",
+    "raw_p_up_ret_mismatch",
+    "p_up_ret_mismatch",
+    "confluence_support_ratio",
+    "confluence_short_term_ratio",
+    "confluence_mid_term_ratio",
+    "confluence_direction_matches_dominant",
+    "component_count",
+    "component_group_count",
+    "component_probability_std",
+    "component_probability_range",
+    "component_mean_abs_gap",
+    "component_max_abs_gap",
+    "component_entropy",
+    "component_agreement_ratio",
+    "component_disagreement_ratio",
+    "component_pairwise_count",
+    "component_pairwise_correlation_mean",
+    "component_pairwise_correlation_max",
+    "component_pairwise_correlation_min",
+    "component_pairwise_probability_gap_mean",
+    "component_pairwise_probability_gap_max",
+    "component_pairwise_probability_gap_min",
+    "direction_ensemble_selected_count",
+    "direction_ensemble_rejected_count",
+    "direction_ensemble_missing_preferred_group_count",
+    "regime_score",
+]
+
+
 def _format_horizon_label(horizon: float) -> str:
     if float(horizon).is_integer() and horizon >= 1.0:
         return f"{int(round(horizon))}h"
@@ -207,6 +238,13 @@ def _load_history_rows(
             "expected_value": horizon_pred.get("expected_value"),
             "regime_state": horizon_pred.get("regime_state"),
         }
+        regime_state = str(horizon_pred.get("regime_state") or "").strip().lower()
+        row["regime_is_trend"] = float(regime_state == "trend_ignition")
+        row["regime_is_neutral"] = float(regime_state == "neutral")
+        row["regime_is_chop"] = float(regime_state == "chop")
+        for field in _HISTORY_DIAGNOSTIC_FIELDS:
+            if field in horizon_pred:
+                row[field] = horizon_pred.get(field)
         row.update(_cross_horizon_context(predictions if isinstance(predictions, dict) else {}, horizon))
         volatility = horizon_pred.get("volatility", {})
         if isinstance(volatility, dict):
@@ -249,6 +287,7 @@ def _load_ohlcv(path: Path, horizons: Optional[List[str]] = None) -> pd.DataFram
     out["close"] = pd.to_numeric(out["close"], errors="coerce")
     out = out.dropna(subset=["ts", "close"]).sort_values("ts").drop_duplicates(subset=["ts"], keep="last")
     out["ts_hour"] = out["ts"].dt.floor("h")
+    out = out.drop_duplicates(subset=["ts_hour"], keep="last").reset_index(drop=True)
 
     target_horizons = horizons or ["1h"]
     for horizon in target_horizons:
@@ -349,9 +388,16 @@ def _enrich_with_history_decision_features(
         "signal_dir_only",
         "expected_value",
         "regime_state",
+        "regime_is_trend",
+        "regime_is_neutral",
+        "regime_is_chop",
+        "regime_score",
         "volatility_realized_24h",
         "volatility_ewm_24h",
         "volatility_garch_like",
+        "probability_alignment_gap",
+        "raw_p_up_ret_mismatch",
+        "p_up_ret_mismatch",
         "horizon_consensus_support_ratio",
         "horizon_directional_agreement_ratio",
         "horizon_directional_disagreement_count",
@@ -361,6 +407,29 @@ def _enrich_with_history_decision_features(
         "horizon_weighted_ret_pred",
         "horizon_p_up_dispersion",
         "horizon_bias_conflict",
+        "confluence_support_ratio",
+        "confluence_short_term_ratio",
+        "confluence_mid_term_ratio",
+        "confluence_direction_matches_dominant",
+        "component_count",
+        "component_group_count",
+        "component_probability_std",
+        "component_probability_range",
+        "component_mean_abs_gap",
+        "component_max_abs_gap",
+        "component_entropy",
+        "component_agreement_ratio",
+        "component_disagreement_ratio",
+        "component_pairwise_count",
+        "component_pairwise_correlation_mean",
+        "component_pairwise_correlation_max",
+        "component_pairwise_correlation_min",
+        "component_pairwise_probability_gap_mean",
+        "component_pairwise_probability_gap_max",
+        "component_pairwise_probability_gap_min",
+        "direction_ensemble_selected_count",
+        "direction_ensemble_rejected_count",
+        "direction_ensemble_missing_preferred_group_count",
     ]
     component_cols = [
         column
@@ -415,6 +484,7 @@ def _build_from_backtest(
     backtest_csv: Path,
     history_path: Path,
     horizon: str,
+    spot_ohlcv_path: Path,
     fold_size: int,
     lookback_rows: Optional[int],
     lookback_hours: Optional[int],
@@ -433,6 +503,21 @@ def _build_from_backtest(
             horizon,
             include_reliability_snapshots=include_reliability_snapshots,
         )
+        backtest_hours = set(pd.to_datetime(labeled["ts"], utc=True, errors="coerce").dt.floor("h").dropna())
+        history_hours = set(pd.to_datetime(history_df["ts_hour"], utc=True, errors="coerce").dropna())
+        if backtest_hours.isdisjoint(history_hours):
+            fallback_labeled, fallback_meta = _build_from_history(
+                history_path=history_path,
+                horizon=horizon,
+                spot_ohlcv_path=spot_ohlcv_path,
+                fold_size=fold_size,
+                lookback_rows=lookback_rows,
+                lookback_hours=lookback_hours,
+                include_reliability_snapshots=include_reliability_snapshots,
+            )
+            fallback_meta["fallback_reason"] = "no_history_overlap"
+            fallback_meta["fallback_backtest_source_path"] = str(backtest_csv)
+            return fallback_labeled, fallback_meta
         labeled = _enrich_with_history_decision_features(labeled, history_df)
     except Exception:
         # Keep canonical backtest behavior even when history enrichment is unavailable.
@@ -660,6 +745,7 @@ def main() -> None:
                 backtest_csv,
                 history_path=args.history_path,
                 horizon=normalized_horizons[0],
+                spot_ohlcv_path=args.spot_ohlcv_path,
                 fold_size=args.fold_size,
                 lookback_rows=lookback_rows,
                 lookback_hours=lookback_hours,

@@ -97,6 +97,7 @@ feature_coverage_policy:
   max_imputed_zero_ratio: 0.2
   max_source_lag_hours: 6.0
   block_on_violation: true
+  ignored_sources: [funding, macro, onchain]
   ignored_columns:
     - funding_rate
     - fut_close
@@ -122,6 +123,22 @@ feature_coverage_policy:
     - macro_eurusd_zscore_30d
     - macro_eurusd_trend_5d
     - open_interest
+    - interaction_breakout_volume_8h
+    - interaction_imbalance_trend_6h
+    - interaction_momentum_volatility_4h
+    - price_distance_to_high_atr_24h
+    - price_distance_to_high_pct_rank_24h
+    - price_distance_to_low_atr_24h
+    - price_distance_to_low_pct_rank_24h
+    - range_compression_ratio_4h_24h
+    - range_compression_transition_8h
+    - trades_taker_imbalance_acceleration_3h
+    - trades_taker_imbalance_persistence_6h
+    - trend_directional_persistence_4h
+    - trend_directional_persistence_8h
+    - trend_path_efficiency_4h
+    - trend_path_efficiency_8h
+    - volume_regime_zscore_24h
 forecast_coherence_policy:
   enabled: true
   horizons: [1, 4, 8, 12]

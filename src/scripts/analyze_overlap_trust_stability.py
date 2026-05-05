@@ -90,6 +90,7 @@ def _read_walkforward(path: Path) -> Dict[str, Any]:
     payload = _load_json(path)
     folds_obj = payload.get("folds", [])
     folds = [row for row in folds_obj if isinstance(row, dict)] if isinstance(folds_obj, list) else []
+    detailed_output = payload.get("detailed_output")
     return {
         "path": str(path),
         "model_kind": payload.get("model_kind"),
@@ -97,6 +98,7 @@ def _read_walkforward(path: Path) -> Dict[str, Any]:
         "trade_count_total": int(payload.get("trade_count_total", 0) or 0),
         "auc_mean": float(payload.get("auc_mean", float("nan"))),
         "folds": folds,
+        "detailed_output": str(detailed_output) if detailed_output else None,
     }
 
 
@@ -139,11 +141,35 @@ def _bucketize(values: pd.Series, threshold: float) -> pd.Series:
     return pd.Series(np.where(numeric >= float(threshold), "high_vol", "low_vol"), index=values.index)
 
 
+def _resolve_column(df: pd.DataFrame, requested: str, aliases: List[str]) -> str:
+    candidates = [requested, *aliases]
+    seen: set[str] = set()
+    scored: List[tuple[int, str]] = []
+    for name in candidates:
+        column = str(name).strip()
+        if not column or column in seen:
+            continue
+        seen.add(column)
+        if column not in df.columns:
+            continue
+        present = int((~_missing_mask(df[column])).sum())
+        scored.append((present, column))
+    if scored:
+        scored.sort(key=lambda item: (item[0], item[1] == requested), reverse=True)
+        return scored[0][1]
+    raise KeyError(f"None of the candidate columns exist: {candidates}")
+
+
 def _group_summary(df: pd.DataFrame, group_col: str, return_col: str, signal_col: str) -> List[Dict[str, Any]]:
     if df.empty or group_col not in df.columns:
         return []
-    ret = pd.to_numeric(df[return_col], errors="coerce").fillna(0.0)
-    signal = pd.to_numeric(df[signal_col], errors="coerce").fillna(0.0)
+    try:
+        resolved_return_col = _resolve_column(df, return_col, ["ret_net", "ret_ensemble_net"])
+    except KeyError:
+        resolved_return_col = _resolve_column(df, return_col, ["ret_realized"])
+    resolved_signal_col = _resolve_column(df, signal_col, ["signal", "signal_ensemble", "signal_meta"])
+    ret = pd.to_numeric(df[resolved_return_col], errors="coerce").fillna(0.0)
+    signal = pd.to_numeric(df[resolved_signal_col], errors="coerce").fillna(0.0)
     working = df.copy()
     working["_ret"] = ret
     working["_signal"] = signal
@@ -192,6 +218,16 @@ def main() -> None:
     overlap = _read_walkforward(args.overlap_walkforward)
     overlap_ts = _load_overlap_timestamps(args.overlap_dataset)
 
+    auto_feature_sources: List[Path] = []
+    for item in (full, overlap):
+        detailed_output = item.get("detailed_output")
+        if not detailed_output:
+            continue
+        detailed_path = Path(str(detailed_output))
+        if detailed_path.exists() and detailed_path not in auto_feature_sources:
+            auto_feature_sources.append(detailed_path)
+    feature_sources = auto_feature_sources + [path for path in args.feature_source if path not in auto_feature_sources]
+
     labeled = pd.read_csv(args.labeled_csv)
     if args.ts_col not in labeled.columns:
         raise KeyError(f"Missing timestamp column '{args.ts_col}' in {args.labeled_csv}")
@@ -200,7 +236,11 @@ def main() -> None:
         dict.fromkeys(
             [
                 args.return_col,
+                "ret_net",
+                "ret_realized",
                 args.signal_col,
+                "signal",
+                "signal_meta",
                 args.regime_col,
                 args.volatility_col,
                 "volatility_ewm_24h",
@@ -210,7 +250,7 @@ def main() -> None:
             ]
         )
     )
-    labeled, source_stats = _enrich_from_sources(labeled, args.ts_col, list(args.feature_source), enrich_cols)
+    labeled, source_stats = _enrich_from_sources(labeled, args.ts_col, feature_sources, enrich_cols)
     labeled["_ts_norm"] = pd.to_datetime(labeled[args.ts_col], utc=True, errors="coerce").dt.floor("h")
     overlap_df = labeled.loc[labeled["_ts_norm"].isin(set(overlap_ts))].copy()
 
@@ -245,7 +285,7 @@ def main() -> None:
         },
         "overlap_slice_characteristics": {
             "labeled_csv": str(args.labeled_csv),
-            "feature_sources": [str(path) for path in args.feature_source],
+            "feature_sources": [str(path) for path in feature_sources],
             "feature_source_enrichment": source_stats,
             "overlap_dataset": str(args.overlap_dataset),
             "volatility_threshold_median": volatility_threshold,

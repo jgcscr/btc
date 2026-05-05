@@ -151,7 +151,7 @@ def _parse_threshold_map(raw: str) -> Dict[str, float]:
 
 def main() -> int:
     args = build_parser().parse_args()
-    frame = pd.read_csv(args.input)
+    frame = pd.read_csv(args.input, low_memory=False)
     if args.prob_col not in frame.columns:
         raise ValueError(f"Missing probability column: {args.prob_col}")
     label_col = _resolve_label_column(frame, args.label_col)

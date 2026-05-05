@@ -30,6 +30,20 @@ def _expected_calibration_error(y_true: np.ndarray, p: np.ndarray, bins: int = 1
     return float(ece)
 
 
+def _class_count(y: np.ndarray) -> int:
+    return int(len(np.unique(y.astype(int))))
+
+
+def _constant_probability(y: np.ndarray) -> float:
+    if y.size == 0:
+        return 0.5
+    return float(np.clip(np.mean(y.astype(float)), 1e-6, 1.0 - 1e-6))
+
+
+def _constant_probability_vector(y: np.ndarray, size: int) -> np.ndarray:
+    return np.full(int(size), _constant_probability(y), dtype=float)
+
+
 def _load_npz(path: Path, y_key: str) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
     data = np.load(path, allow_pickle=True)
     if "X_train" not in data or "X_val" not in data or "X_test" not in data:
@@ -62,6 +76,8 @@ def _load_npz(path: Path, y_key: str) -> tuple[np.ndarray, np.ndarray, np.ndarra
 
 
 def _fit_xgb(X_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
+    if _class_count(y_train) < 2:
+        raise ValueError("XGBoost requires at least two classes in the training slice")
     model = XGBClassifier(
         n_estimators=300,
         max_depth=5,
@@ -77,6 +93,8 @@ def _fit_xgb(X_train: np.ndarray, y_train: np.ndarray) -> XGBClassifier:
 
 
 def _fit_logit(X_train: np.ndarray, y_train: np.ndarray) -> LogisticRegression:
+    if _class_count(y_train) < 2:
+        raise ValueError("LogisticRegression requires at least two classes in the training slice")
     model = LogisticRegression(max_iter=2000, solver="lbfgs")
     model.fit(X_train, y_train)
     return model
@@ -96,13 +114,21 @@ def _predict_meta_stack(
     tscv = TimeSeriesSplit(n_splits=splits)
 
     for tr_idx, val_idx in tscv.split(X_train):
-        base_xgb = _fit_xgb(X_train[tr_idx], y_train[tr_idx])
-        base_logit = _fit_logit(X_train[tr_idx], y_train[tr_idx])
+        fold_y_train = y_train[tr_idx]
+        if _class_count(fold_y_train) < 2:
+            constant_p = _constant_probability_vector(fold_y_train, len(val_idx))
+            oof_1[val_idx] = constant_p
+            oof_2[val_idx] = constant_p
+            continue
+        base_xgb = _fit_xgb(X_train[tr_idx], fold_y_train)
+        base_logit = _fit_logit(X_train[tr_idx], fold_y_train)
         oof_1[val_idx] = base_xgb.predict_proba(X_train[val_idx])[:, 1]
         oof_2[val_idx] = base_logit.predict_proba(X_train[val_idx])[:, 1]
 
     valid = np.isfinite(oof_1) & np.isfinite(oof_2)
     if int(valid.sum()) < 50:
+        if _class_count(y_train) < 2:
+            return _constant_probability_vector(y_train, len(X_test))
         base_xgb = _fit_xgb(X_train, y_train)
         base_logit = _fit_logit(X_train, y_train)
         p1 = base_xgb.predict_proba(X_test)[:, 1]
@@ -118,8 +144,12 @@ def _predict_meta_stack(
         ]
     )
     meta_y_train = y_train[valid]
+    if _class_count(meta_y_train) < 2:
+        return _constant_probability_vector(meta_y_train, len(X_test))
     meta = _fit_logit(meta_X_train, meta_y_train)
 
+    if _class_count(y_train) < 2:
+        return _constant_probability_vector(y_train, len(X_test))
     base_xgb_full = _fit_xgb(X_train, y_train)
     base_logit_full = _fit_logit(X_train, y_train)
     p1_test = base_xgb_full.predict_proba(X_test)[:, 1]
@@ -142,6 +172,8 @@ def _predict_fold_probabilities(
     X_test: np.ndarray,
     meta_oof_splits: int,
 ) -> np.ndarray:
+    if _class_count(y_train) < 2:
+        return _constant_probability_vector(y_train, len(X_test))
     if model_kind == "meta_stack":
         return _predict_meta_stack(X_train, y_train, X_test, oof_splits=meta_oof_splits)
     if model_kind == "selector_simple":

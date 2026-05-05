@@ -2629,8 +2629,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--continue-on-promotion-fail",
         action="store_true",
         help=(
-            "Continue workflow when promotion gate returns exit 3 (promote=false). "
-            "Useful for keeping paper-live/shadow steps running while gate blocks promotion."
+            "Continue workflow when policy/promotion gates return expected nonzero exits "
+            "(for example directional objectives exit 2 or promotion gate exit 3). "
+            "Useful for keeping paper-live/shadow steps running while deploy gating blocks promotion."
         ),
     )
     parser.add_argument("--skip-paper-live", action="store_true", help="Skip paper-live refresh run (step 7).")
@@ -2931,6 +2932,8 @@ def execute_reliability_workflow(
     if not args.skip_ensemble:
         meta_component_frame_csv = search_cfg.get("meta_component_frame_csv")
         meta_component_columns = search_cfg.get("meta_component_columns")
+        meta_extra_feature_columns = search_cfg.get("meta_extra_feature_columns")
+        meta_signal_mode = str(search_cfg.get("meta_signal_mode", "gate_only"))
         meta_component_frame_source = search_cfg.get("meta_component_frame_source")
         default_meta_inputs = [
             Path("artifacts/backtests/historical_1h_pup060_full_simplified/backtest_signals.csv"),
@@ -2946,6 +2949,7 @@ def execute_reliability_workflow(
                     source_path=component_frame_source_path,
                     output_path=component_frame_path,
                     requested_columns=meta_component_columns if isinstance(meta_component_columns, Sequence) and not isinstance(meta_component_columns, (str, bytes)) else None,
+                    requested_extra_columns=meta_extra_feature_columns if isinstance(meta_extra_feature_columns, Sequence) and not isinstance(meta_extra_feature_columns, (str, bytes)) else None,
                 )
                 if not bool(component_frame_status.get("written", False)):
                     print(
@@ -3003,12 +3007,17 @@ def execute_reliability_workflow(
                 str(summary_dir / "meta_ensemble_config.json"),
                 "--weight-threshold",
                 str(search_cfg.get("meta_weight_threshold", 0.5)),
+                "--signal-mode",
+                meta_signal_mode,
             ]
             if has_component_frame and component_frame_path is not None:
                 meta_cmd.extend(["--component-frame-csv", str(component_frame_path)])
                 if isinstance(meta_component_columns, Sequence) and not isinstance(meta_component_columns, (str, bytes)):
                     for column in meta_component_columns:
                         meta_cmd.extend(["--component-column", str(column)])
+                if isinstance(meta_extra_feature_columns, Sequence) and not isinstance(meta_extra_feature_columns, (str, bytes)):
+                    for column in meta_extra_feature_columns:
+                        meta_cmd.extend(["--extra-feature-column", str(column)])
             if meta_component_weight_spec:
                 meta_cmd.extend(["--component-weight-spec", meta_component_weight_spec])
             results.append(_run_step("meta_ensemble_train", meta_cmd, logs_dir / "meta_ensemble_train.log", args.dry_run))
@@ -3019,10 +3028,17 @@ def execute_reliability_workflow(
                 )
 
     if not args.skip_quality_evals and bool(quality_cfg.get("enabled", False)):
-        quality_input = Path(quality_cfg.get("quality_input") or (summary_dir / "backtest_signals_meta_ensemble.csv"))
+        configured_quality_input = Path(
+            quality_cfg.get("quality_input") or (summary_dir / "backtest_signals_meta_ensemble.csv")
+        )
         labeled_snapshot_csv = summary_dir / "labeled_backtest.snapshot.csv"
         labeled_meta_output = summary_dir / "labeled_backtest_meta.json"
         labeled_snapshot_meta = summary_dir / "labeled_backtest_meta.snapshot.json"
+        quality_input = configured_quality_input
+        if bool(quality_cfg.get("build_labeled_dataset", True)) and bool(
+            quality_cfg.get("use_run_local_labeled_output", True)
+        ):
+            quality_input = labeled_snapshot_csv
         candidate_quality_input_cfg = quality_cfg.get("candidate_quality_input")
         candidate_quality_input = (
             Path(str(candidate_quality_input_cfg))
@@ -3112,6 +3128,11 @@ def execute_reliability_workflow(
             quality_backtest_csv_is_auto or quality_backtest_csv_points_to_missing_default
         ):
             resolved_quality_backtest_csv = candidate_quality_input
+        if resolved_quality_backtest_csv == quality_input:
+            if configured_quality_input != quality_input and configured_quality_input.exists():
+                resolved_quality_backtest_csv = configured_quality_input
+            else:
+                resolved_quality_backtest_csv = None
         pinned_labeled_csv_cfg = quality_cfg.get("pinned_labeled_csv_path")
         pinned_labeled_meta_cfg = quality_cfg.get("pinned_labeled_meta_path")
         pinned_labeled_csv = (
@@ -3253,6 +3274,8 @@ def execute_reliability_workflow(
                 labeled_cmd.append("--prefer-backtest")
             else:
                 labeled_cmd.append("--no-prefer-backtest")
+            if bool(quality_cfg.get("include_reliability_snapshots", False)):
+                labeled_cmd.append("--include-reliability-snapshots")
             results.append(
                 _run_step(
                     "build_labeled_dataset",
@@ -3286,6 +3309,121 @@ def execute_reliability_workflow(
             candidate_gate_input = candidate_quality_input
         if not args.dry_run and labeled_meta_output.exists() and labeled_meta_output != labeled_snapshot_meta:
             shutil.copyfile(labeled_meta_output, labeled_snapshot_meta)
+
+        if (
+            not args.skip_ensemble
+            and not args.dry_run
+            and bool(quality_cfg.get("build_labeled_dataset", True))
+            and bool(quality_cfg.get("use_run_local_labeled_output", True))
+            and quality_input.exists()
+            and quality_input == labeled_snapshot_csv
+            and not candidate_quality_input_cfg
+        ):
+            snapshot_component_frame_path = summary_dir / "meta_component_frame.snapshot.csv"
+            snapshot_component_frame_status: Dict[str, Any] | None = None
+            try:
+                snapshot_component_frame_status = _write_meta_component_frame(
+                    source_path=quality_input,
+                    output_path=snapshot_component_frame_path,
+                    requested_columns=(
+                        search_cfg.get("meta_component_columns")
+                        if isinstance(search_cfg.get("meta_component_columns"), Sequence)
+                        and not isinstance(search_cfg.get("meta_component_columns"), (str, bytes))
+                        else None
+                    ),
+                    requested_extra_columns=(
+                        search_cfg.get("meta_extra_feature_columns")
+                        if isinstance(search_cfg.get("meta_extra_feature_columns"), Sequence)
+                        and not isinstance(search_cfg.get("meta_extra_feature_columns"), (str, bytes))
+                        else None
+                    ),
+                )
+            except Exception as exc:
+                snapshot_component_frame_status = {
+                    "written": False,
+                    "reason": f"exception:{exc}",
+                    "source": str(quality_input),
+                    "output": str(snapshot_component_frame_path),
+                }
+                print(f"Warning: failed to derive snapshot meta component frame: {exc}", file=sys.stderr)
+
+            if snapshot_component_frame_status is not None:
+                (summary_dir / "meta_component_frame_snapshot_status.json").write_text(
+                    json.dumps(snapshot_component_frame_status, indent=2),
+                    encoding="utf-8",
+                )
+
+            if bool((snapshot_component_frame_status or {}).get("written", False)) and snapshot_component_frame_path.exists():
+                snapshot_meta_output = summary_dir / "backtest_signals_meta_ensemble.snapshot.csv"
+                snapshot_meta_config = summary_dir / "meta_ensemble_snapshot_config.json"
+                snapshot_meta_cmd = [
+                    python,
+                    "-m",
+                    "src.scripts.train_meta_ensemble",
+                    "--output-csv",
+                    str(snapshot_meta_output),
+                    "--config-path",
+                    str(snapshot_meta_config),
+                    "--weight-threshold",
+                    str(search_cfg.get("meta_weight_threshold", 0.5)),
+                    "--signal-mode",
+                    str(search_cfg.get("meta_signal_mode", "gate_only")),
+                    "--component-frame-csv",
+                    str(snapshot_component_frame_path),
+                ]
+                meta_component_columns_snapshot = search_cfg.get("meta_component_columns")
+                if isinstance(meta_component_columns_snapshot, Sequence) and not isinstance(
+                    meta_component_columns_snapshot, (str, bytes)
+                ):
+                    for column in meta_component_columns_snapshot:
+                        snapshot_meta_cmd.extend(["--component-column", str(column)])
+                meta_extra_feature_columns_snapshot = search_cfg.get("meta_extra_feature_columns")
+                if isinstance(meta_extra_feature_columns_snapshot, Sequence) and not isinstance(
+                    meta_extra_feature_columns_snapshot, (str, bytes)
+                ):
+                    for column in meta_extra_feature_columns_snapshot:
+                        snapshot_meta_cmd.extend(["--extra-feature-column", str(column)])
+                snapshot_meta_component_weight_spec = None
+                meta_component_weight_audit_path = search_cfg.get("meta_component_weights_from_audit_path")
+                if meta_component_weight_audit_path:
+                    audit_path = Path(str(meta_component_weight_audit_path))
+                    if audit_path.exists():
+                        try:
+                            snapshot_meta_component_weight_spec = _extract_audit_weight_spec(
+                                _load_json(audit_path),
+                                allowed_components=(
+                                    "transformer",
+                                    "transformer_large",
+                                    "lstm",
+                                    "bilstm",
+                                    "gru",
+                                    "cnn_lstm",
+                                    "cnn_bilstm",
+                                    "garch_lstm",
+                                    "xgb",
+                                    "lgbm",
+                                ),
+                            )
+                        except Exception as exc:
+                            print(
+                                f"Warning: failed to load snapshot meta component weights from audit {audit_path}: {exc}",
+                                file=sys.stderr,
+                            )
+                if snapshot_meta_component_weight_spec:
+                    snapshot_meta_cmd.extend(["--component-weight-spec", snapshot_meta_component_weight_spec])
+                results.append(
+                    _run_step(
+                        "meta_ensemble_train_snapshot",
+                        snapshot_meta_cmd,
+                        logs_dir / "meta_ensemble_train_snapshot.log",
+                        args.dry_run,
+                    )
+                )
+                if snapshot_meta_output.exists():
+                    candidate_quality_input = snapshot_meta_output
+                    candidate_gate_input = candidate_quality_input
+                    tuning_quality_input = candidate_quality_input
+                    decision_model_input = candidate_quality_input
 
         walkforward_horizon = int(quality_cfg.get("walkforward_horizon", 1))
         walkforward_dataset = Path(
@@ -3384,6 +3522,14 @@ def execute_reliability_workflow(
                 "--output-meta",
                 str(labeled_overlap_meta),
             ]
+            fallback_labeling_scheme = reconcile_cfg.get("fallback_labeling_scheme")
+            if fallback_labeling_scheme:
+                overlap_cmd.extend([
+                    "--fallback-labeling-scheme",
+                    str(fallback_labeling_scheme),
+                    "--fallback-min-coverage-ratio",
+                    str(float(reconcile_cfg.get("fallback_min_coverage_ratio", 0.0))),
+                ])
             results.append(
                 _run_step(
                     "walkforward_labeled_overlap_dataset",
@@ -5409,12 +5555,14 @@ def execute_reliability_workflow(
                     output_path=summary_dir / "directional_objectives.json",
                     directional_cfg=directional_objectives_cfg,
                 )
+                directional_allowed = [0, 2] if args.continue_on_promotion_fail else [0]
                 results.append(
                     _run_step(
                         "directional_objectives",
                         directional_cmd,
                         logs_dir / "directional_objectives.log",
                         args.dry_run,
+                        allowed_returncodes=directional_allowed,
                     )
                 )
 

@@ -98,8 +98,14 @@ def build_champion_gate_alignment_check(
 ) -> Dict[str, Any]:
     normalized_variant = str(official_shadow_variant or "none").strip().lower()
     configured_source = str(champion_gate_source or "labeled").strip().lower()
+    labeled_gate_path = summary_dir / "champion_challenger_gate.json"
+    policy_gate_path = policy_aligned_gate_path or (summary_dir / "champion_challenger_policy_aligned_companion.json")
     expected_source = "labeled"
-    if normalized_variant != "none" and configured_source in {"auto", "policy_aligned", "policy_aligned_official_shadow"}:
+    if (
+        normalized_variant != "none"
+        and configured_source in {"auto", "policy_aligned", "policy_aligned_official_shadow"}
+        and policy_gate_path.exists()
+    ):
         expected_source = "policy_aligned"
 
     selection_candidate: Dict[str, Any] | None = None
@@ -111,8 +117,6 @@ def build_champion_gate_alignment_check(
                 selection_candidate = candidate
                 break
 
-    labeled_gate_path = summary_dir / "champion_challenger_gate.json"
-    policy_gate_path = policy_aligned_gate_path or (summary_dir / "champion_challenger_policy_aligned_companion.json")
     expected_gate_path = policy_gate_path if expected_source == "policy_aligned" else labeled_gate_path
     selected_source = str(champion_gate_resolution.get("selected_source", "labeled")).strip().lower()
     errors: List[str] = []

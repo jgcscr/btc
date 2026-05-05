@@ -34,7 +34,7 @@ def write_calibrated_quality_input(
             "calibration": str(calibration_path),
         }
 
-    frame = pd.read_csv(source_path)
+    frame = pd.read_csv(source_path, low_memory=False)
     if "p_up" not in frame.columns:
         return {
             "written": False,
@@ -101,6 +101,7 @@ def write_meta_component_frame(
     source_path: Path,
     output_path: Path,
     requested_columns: Sequence[str] | None = None,
+    requested_extra_columns: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     from src.utils.component_diversity_support import (
         build_component_feature_frame,
@@ -115,7 +116,7 @@ def write_meta_component_frame(
             "output": str(output_path),
         }
 
-    frame = pd.read_csv(source_path)
+    frame = pd.read_csv(source_path, low_memory=False)
     ts_col = "ts" if "ts" in frame.columns else None
     if ts_col is None:
         return {
@@ -171,7 +172,16 @@ def write_meta_component_frame(
             "output": str(output_path),
         }
 
-    derived = frame[[ts_col, ret_col, *component_columns]].copy()
+    extra_columns: List[str] = []
+    if requested_extra_columns:
+        for raw_column in requested_extra_columns:
+            column = str(raw_column).strip()
+            if not column or column in {ts_col, ret_col} or column in component_columns:
+                continue
+            if column in frame.columns and column not in extra_columns:
+                extra_columns.append(column)
+
+    derived = frame[[ts_col, ret_col, *component_columns, *extra_columns]].copy()
     if ret_col != "ret_1h":
         derived = derived.rename(columns={ret_col: "ret_1h"})
     component_features = build_component_feature_frame(derived, component_columns)
@@ -185,5 +195,6 @@ def write_meta_component_frame(
         "output": str(output_path),
         "rows": int(len(derived)),
         "component_columns": component_columns,
+        "extra_columns": extra_columns,
         "component_diversity": summarize_component_history(derived, component_columns),
     }

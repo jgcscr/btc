@@ -19,8 +19,9 @@ search:
   max_drawdown: -0.08
   min_trades: 10
   meta_weight_threshold: 0.5
+  meta_signal_mode: meta_veto
   meta_component_frame_csv: artifacts/monitoring/meta_component_frame_1h.csv
-  meta_component_frame_source: artifacts/backtests/historical_1h_pup060_full/backtest_signals.csv
+  meta_component_frame_source: artifacts/monitoring/labeled_backtest_1h.csv
   meta_component_columns: [xgb, transformer, lstm]
   paper_live_config: configs/run_refresh_and_predict.default.yaml
   direction_output_shadow:
@@ -71,6 +72,8 @@ quality:
   backtest_csv: auto
   champion_gate_source: auto
   prefer_backtest: true
+  include_reliability_snapshots: true
+  use_run_local_labeled_output: true
   lookback_rows: 50000
   lookback_hours: 8760
   min_labeled_rows: 300
@@ -108,6 +111,8 @@ quality:
     use_as_primary: true
     ts_col: ts
     min_rows: 80
+    fallback_labeling_scheme: binary
+    fallback_min_coverage_ratio: 0.8
     min_overlap_cum_ret: -0.005
     require_non_negative_overlap_selected: true
     max_abs_cum_ret_gap: 0.03
@@ -204,6 +209,7 @@ quality:
   quality_input: artifacts/monitoring/labeled_backtest_1h.csv
   # Optional incumbent baseline; if provided, promotion gate will run.
   incumbent_quality_path: null
+  incumbent_backtest_csv: artifacts/monitoring/labeled_backtest_1h_incumbent.csv
   min_auc_delta: 0.002
   max_brier_increase: 0.0
   max_ece_increase: 0.01
@@ -306,6 +312,7 @@ quality:
     min_f1: 0.45
     min_rows_by_regime:
       chop: 40
+      trend_ignition: 40
     max_brier_by_regime:
       chop: 0.255
     min_f1_by_horizon:
@@ -380,7 +387,7 @@ quality:
     signal_col: signal_ensemble
     threshold: 0.55
     positive_oof_envelope_mode: populated_bin_sign
-    min_rows: 300
+    min_rows: 240
     min_candidate_rows: 60
     min_oof_rows: 40
     min_positive_oof_bins: 2

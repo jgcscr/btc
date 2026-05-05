@@ -196,7 +196,10 @@ def main() -> None:
                 errors="coerce",
             ).fillna(0.0)
             incumbent_signal = out["_ts_norm"].map(incumbent_map).fillna(0.0)
-            candidate_signal = pd.to_numeric(out.get("signal_ensemble", 0.0), errors="coerce").fillna(0.0)
+            candidate_signal = pd.to_numeric(
+                out["signal_ensemble"] if "signal_ensemble" in out.columns else pd.Series(0.0, index=out.index),
+                errors="coerce",
+            ).fillna(0.0)
             out["incumbent_signal_reference"] = incumbent_signal.astype(float)
             out["candidate_only_reference"] = ((candidate_signal > 0.0) & (incumbent_signal <= 0.0)).astype(float)
             out["candidate_incumbent_disagreement"] = ((candidate_signal > 0.0) != (incumbent_signal > 0.0)).astype(float)

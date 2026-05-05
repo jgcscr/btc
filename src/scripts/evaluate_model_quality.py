@@ -59,7 +59,7 @@ def main() -> None:
     if not args.input.exists():
         raise FileNotFoundError(args.input)
 
-    df = pd.read_csv(args.input)
+    df = pd.read_csv(args.input, low_memory=False)
     if args.p_col not in df.columns or args.y_col not in df.columns:
         raise ValueError(f"Input must contain {args.p_col} and {args.y_col}")
 

@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         help="Probability threshold to activate the meta-ensemble trade signal.",
     )
     parser.add_argument(
+        "--signal-mode",
+        choices=("gate_only", "meta_veto", "meta_only"),
+        default="gate_only",
+        help="How to turn p_up_gate and p_up_meta into signal_meta.",
+    )
+    parser.add_argument(
         "--oof-splits",
         type=int,
         default=5,
@@ -86,6 +92,12 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="Optional component column or alias to keep when using --component-frame-csv.",
+    )
+    parser.add_argument(
+        "--extra-feature-column",
+        action="append",
+        default=[],
+        help="Optional extra numeric feature column to keep when using --component-frame-csv.",
     )
     parser.add_argument(
         "--component-weight-spec",
@@ -192,7 +204,8 @@ def _component_aliases(columns: Sequence[str]) -> Dict[str, str]:
 def _normalize_component_frame(
     df: pd.DataFrame,
     component_columns: Sequence[str],
-) -> tuple[pd.DataFrame, List[str]]:
+    extra_feature_columns: Sequence[str] | None = None,
+) -> tuple[pd.DataFrame, List[str], List[str]]:
     out = df.copy()
     retained_columns: List[str] = []
     for column in component_columns:
@@ -213,10 +226,22 @@ def _normalize_component_frame(
     if out.empty:
         raise ValueError("Component frame has no rows after normalizing sparse component columns.")
 
-    return out[["ts", "ret_1h", *retained_columns]].copy(), retained_columns
+    retained_extra_columns: List[str] = []
+    for column in extra_feature_columns or []:
+        name = str(column)
+        if name not in out.columns:
+            continue
+        out[name] = pd.to_numeric(out[name], errors="coerce").fillna(0.0)
+        retained_extra_columns.append(name)
+
+    return out[["ts", "ret_1h", *retained_columns, *retained_extra_columns]].copy(), retained_columns, retained_extra_columns
 
 
-def load_component_frame(path: Path, requested_columns: Sequence[str] | None = None) -> tuple[pd.DataFrame, List[str]]:
+def load_component_frame(
+    path: Path,
+    requested_columns: Sequence[str] | None = None,
+    requested_extra_columns: Sequence[str] | None = None,
+) -> tuple[pd.DataFrame, List[str], List[str]]:
     if not path.exists():
         raise FileNotFoundError(f"Required component-frame CSV not found: {path}")
     df = pd.read_csv(path)
@@ -248,9 +273,24 @@ def load_component_frame(path: Path, requested_columns: Sequence[str] | None = N
     else:
         selected_columns = sorted(available_columns)
 
-    selected = df[["ts", "ret_1h", *selected_columns]].copy()
-    normalized, retained_columns = _normalize_component_frame(selected, selected_columns)
-    return normalized, retained_columns
+    selected_extra_columns: List[str] = []
+    if requested_extra_columns:
+        for raw_name in requested_extra_columns:
+            column = str(raw_name).strip()
+            if not column:
+                continue
+            if column not in df.columns:
+                raise ValueError(f"Unknown extra feature column '{raw_name}' for {path}.")
+            if column not in selected_extra_columns:
+                selected_extra_columns.append(column)
+
+    selected = df[["ts", "ret_1h", *selected_columns, *selected_extra_columns]].copy()
+    normalized, retained_columns, retained_extra_columns = _normalize_component_frame(
+        selected,
+        selected_columns,
+        selected_extra_columns,
+    )
+    return normalized, retained_columns, retained_extra_columns
 
 
 def validate_alignment(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
@@ -296,11 +336,21 @@ def build_meta_features(
     master: pd.DataFrame,
     *,
     base_cols: Sequence[str],
+    extra_feature_cols: Sequence[str] | None,
     add_regime_features: bool,
     component_weights: Dict[str, float],
 ) -> Tuple[pd.DataFrame, List[str]]:
     master = master.copy()
     feature_cols = list(base_cols)
+
+    retained_extra_feature_cols: List[str] = []
+    for column in extra_feature_cols or []:
+        name = str(column)
+        if name not in master.columns:
+            continue
+        master[name] = pd.to_numeric(master[name], errors="coerce").fillna(0.0)
+        retained_extra_feature_cols.append(name)
+    feature_cols.extend(retained_extra_feature_cols)
 
     if add_regime_features:
         p_stack = master[base_cols].astype(float)
@@ -409,11 +459,13 @@ def save_meta_config(
     intercept: float,
     coefficients: Sequence[float],
     threshold: float,
+    signal_mode: str,
     schedules: Sequence[Dict[str, float]],
     oof_metrics: Dict[str, float],
     trainval_metrics: Dict[str, float],
     oof_splits: int,
     component_columns: Sequence[str],
+    extra_feature_columns: Sequence[str],
     component_weights: Dict[str, float],
 ) -> None:
     payload = {
@@ -421,8 +473,10 @@ def save_meta_config(
         "intercept": float(intercept),
         "coefficients": [float(coef) for coef in coefficients],
         "threshold": float(threshold),
+        "signal_mode": str(signal_mode),
         "oof_splits": int(oof_splits),
         "component_columns": list(component_columns),
+        "extra_feature_columns": list(extra_feature_columns),
         "schedules": [
             {
                 "fee_bps": float(schedule["fee_bps"]),
@@ -445,7 +499,11 @@ def save_meta_config(
 def main() -> None:
     args = parse_args()
     if args.component_frame_csv is not None:
-        master, component_columns = load_component_frame(args.component_frame_csv, args.component_column)
+        master, component_columns, extra_feature_columns = load_component_frame(
+            args.component_frame_csv,
+            args.component_column,
+            args.extra_feature_column,
+        )
         ordered_component_names = [str(column).removeprefix("p_up_") for column in component_columns]
     else:
         component_sources = resolve_component_sources(args)
@@ -463,6 +521,7 @@ def main() -> None:
         for name in ordered_component_names[1:]:
             column = _component_column(name)
             master[column] = component_frames[name][column].values
+        extra_feature_columns = []
 
     component_weights = parse_component_weight_spec(args.component_weight_spec, component_columns)
 
@@ -470,6 +529,7 @@ def main() -> None:
     master, feature_cols = build_meta_features(
         master,
         base_cols=component_columns,
+        extra_feature_cols=extra_feature_columns,
         add_regime_features=not args.disable_regime_features,
         component_weights=component_weights,
     )
@@ -523,7 +583,16 @@ def main() -> None:
         component_columns,
         component_weights,
     )
-    full_backtest["signal_meta"] = (full_backtest["p_up_gate"] >= args.weight_threshold).astype(int)
+    gate_signal = full_backtest["p_up_gate"] >= args.weight_threshold
+    meta_signal = full_backtest["p_up_meta"] >= args.weight_threshold
+    if args.signal_mode == "meta_only":
+        signal_meta = meta_signal
+    elif args.signal_mode == "meta_veto":
+        signal_meta = gate_signal & meta_signal
+    else:
+        signal_meta = gate_signal
+    full_backtest["meta_veto_blocked"] = (gate_signal & ~meta_signal).astype(int)
+    full_backtest["signal_meta"] = signal_meta.astype(int)
     full_backtest["y_true"] = full_backtest["target"].astype(int)
     full_backtest["fold"] = (np.arange(len(full_backtest)) // max(int(n_val), 1)).astype(int)
     full_backtest["backtest_split"] = np.where(
@@ -571,6 +640,7 @@ def main() -> None:
         *feature_cols,
         "p_up_meta",
         "p_up_gate",
+        "meta_veto_blocked",
         "signal_meta",
         "y_true",
         "fold",
@@ -604,11 +674,13 @@ def main() -> None:
         final_model.intercept_[0],
         final_model.coef_[0],
         args.weight_threshold,
+        args.signal_mode,
         schedule_dicts,
         oof_metrics,
         trainval_metrics,
         args.oof_splits,
         component_columns,
+        extra_feature_columns,
         component_weights,
     )
 
