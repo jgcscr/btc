@@ -149,18 +149,24 @@ Important runtime modules for agents:
 - `src/runtime/refresh_pipeline.py`: top-level research/live orchestration and runtime telemetry
 - `src/runtime/market_preparation.py`: ingestion, local feature bundle assembly, replay override, and quality/coverage gating
 - `src/runtime/refresh_support.py`: config loading, threshold/platt resolution, dataset selection, prepared-data loading
+- `src/runtime/prediction_request_support.py`: packages the normalized runtime prediction request away from the legacy wrapper surface
+- `src/runtime/forecast_direction_support.py`: shared forecast-direction and probability-alignment helpers extracted from the refresh wrapper
+- `src/runtime/refresh_config_factory.py`: factory for the refresh config normalizer now reused by the legacy full-surface CLI wrapper
 - `src/runtime/prediction_execution.py`: runtime-owned prediction-dispatch adapter over the extracted prediction pipeline
 - `src/runtime/horizon_support.py`: horizon normalization, label formatting, and sort keys
 - `src/runtime/summary_support.py`: prompt summary, degradation monitoring, blocked-trade analytics, prediction payload writing
 - `src/runtime/output_support.py`: monitoring artifacts and meta-baseline refresh
 - `src/runtime/reliability_pipeline.py`: runtime telemetry wrapper around the reliability workflow
+- `src/runtime/reliability_step_support.py`: shared step runner and step-event emission for the reliability workflow
+- `src/runtime/reliability_*_command_builders.py`: shared command-family builders that now own most repeated reliability subcommand assembly
+- `src/runtime/reliability_shadow_policy_command_builders.py`: shared policy-aligned shadow candidate/companion/overlap bundle builder used across shadow veto and official-shadow variants
 - `src/runtime/prediction_dependency_support.py`: runtime-owned dependency wiring for the prediction pipeline; most normalization, policy resolution, horizon handling, and post-processing hooks now come from runtime modules rather than the legacy script
 
 Current deliberate legacy boundaries:
 
 - `src/scripts/run_refresh_and_predict.py` still owns `parse_args(...)` and remains the broad CLI/config compatibility surface
-- `src/scripts/run_refresh_and_predict.py` still supplies some model/execution-specific helper callbacks and constants to the runtime prediction dependency builder while those final helper slices are being drained
-- `src/scripts/run_reliability_workflow.py` still owns reliability workflow execution
+- `src/scripts/run_refresh_and_predict.py` still supplies some model/execution-specific callbacks, constants, and the dense prediction executor body, but direction/coherence helper slices and config normalization helpers now live under `src/runtime/`
+- `src/scripts/run_reliability_workflow.py` still owns reliability workflow execution, but most repeated command families and overlap/shadow reconciliation helpers now route through runtime support modules
 - `src/runtime/reliability_pipeline.py` now passes a scoped step-event callback directly into the legacy workflow entrypoint instead of mutating a global sink; the remaining legacy boundary is the workflow implementation itself
 
 ## Service API
@@ -171,6 +177,7 @@ Current stable endpoints:
 
 - `GET /health`
 - `GET /jobs`
+- `GET /job-runs/{job_id}`
 - `POST /jobs/{job_name}`
 - `POST /run-signal`
 - `POST /run-dataset-refresh`
@@ -191,6 +198,7 @@ Compatibility note:
 Service implementation note:
 
 - jobs are executed through a subprocess worker boundary via `src.service.worker_runner`, not in the FastAPI process
+- service job launches now persist a local state record under `artifacts/service_jobs/` and reject concurrent runs of the same registered job name
 
 ## Source Of Truth Artifacts
 
@@ -225,6 +233,10 @@ Read these first after a reliability run:
 
 ## Runtime Profiles In Current Use
 
+Config composition note:
+
+- runtime YAML configs can now declare `extends: <path>` or `extends: [<path>, ...]` to inherit and deep-merge base profiles before CLI normalization
+
 The important runtime configs are:
 
 - `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline; now ignores stale `funding`, `macro`, and `onchain` sources plus approved derived zero-impute columns in the feature coverage gate so fresh spot-driven research refreshes do not fail on auxiliary lag alone
@@ -248,6 +260,10 @@ Current config note:
 - the live conservative config still contains some legacy `8h` sizing and regime overrides, but the direct live wrapper does not emit `8h` because its default target set is `0.25,1,4,12`
 
 ## Cadence Operations
+
+Current execution note:
+
+- `scripts/run_cadence.sh` now delegates to the Python entrypoint `src.scripts.run_cadence`, which owns the cadence orchestration logic used by local shell execution
 
 The shell wrapper supports four cadences:
 

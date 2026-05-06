@@ -56,6 +56,7 @@ def load_cli_config(
     normalize_config_value: Callable[[str, Any], Any],
     yaml_safe_load: Callable[[str], Any],
     stderr_write: Callable[[str], None],
+    yaml_load_path: Callable[[Path], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not path:
         return {}
@@ -63,7 +64,7 @@ def load_cli_config(
     if not resolved.exists():
         raise FileNotFoundError(f"Config file not found: {resolved}")
     try:
-        raw_data = yaml_safe_load(resolved.read_text(encoding="utf-8"))
+        raw_data = yaml_load_path(resolved) if yaml_load_path is not None else yaml_safe_load(resolved.read_text(encoding="utf-8"))
     except Exception as exc:
         raise ValueError(f"Failed to parse config file {resolved}: {exc}") from exc
     if raw_data is None:

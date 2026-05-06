@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
 import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,24 +35,69 @@ from src.runtime.reliability_candidate_config_support import (
     derive_trade_decision_regime_midband_candidate as _derive_trade_decision_regime_midband_candidate_impl,
     write_trade_decision_midband_candidate_config as _write_trade_decision_midband_candidate_config_impl,
 )
+from src.runtime.reliability_calibration_command_builders import (
+    build_platt_calibration_command as _build_platt_calibration_command,
+    build_regime_weakness_command as _build_regime_weakness_command,
+)
 from src.runtime.reliability_champion_support import (
     build_champion_gate_alignment_check as _build_champion_gate_alignment_check,
     extract_trade_decision_reference_source as _extract_trade_decision_reference_source,
     resolve_effective_champion_gate as _resolve_effective_champion_gate,
     resolve_trade_decision_model_path_for_variant as _resolve_trade_decision_model_path_for_variant,
 )
+from src.runtime.reliability_champion_command_builders import (
+    build_champion_challenger_command as _build_champion_challenger_command,
+    build_paired_trigger_overlap_command as _build_paired_trigger_overlap_command,
+)
 from src.runtime.reliability_command_builders import (
     build_calibration_robustness_command as _build_calibration_robustness_command,
     build_directional_objectives_command as _build_directional_objectives_command,
     build_rolling_ab_command as _build_rolling_ab_command,
 )
+from src.runtime.reliability_dataset_command_builders import (
+    build_canonical_direction_dataset_command as _build_canonical_direction_dataset_command,
+    build_canonical_hourly_dataset_command as _build_canonical_hourly_dataset_command,
+    build_labeled_dataset_command as _build_labeled_dataset_command,
+)
+from src.runtime.reliability_diagnostic_command_builders import (
+    build_feature_reliability_command as _build_feature_reliability_command,
+    build_overlap_trust_stability_command as _build_overlap_trust_stability_command,
+)
 from src.runtime.reliability_model_shift_guard_support import (
     apply_trade_decision_model_shift_guard as _apply_trade_decision_model_shift_guard_impl,
     build_trade_decision_model_shift_guard as _build_trade_decision_model_shift_guard_impl,
 )
+from src.runtime.reliability_manifest_support import (
+    write_cadence_plan as _write_cadence_plan,
+    write_workflow_manifest as _write_workflow_manifest,
+)
+from src.runtime.reliability_meta_command_builders import (
+    build_meta_ensemble_command as _build_meta_ensemble_command,
+    resolve_meta_component_weight_spec as _resolve_meta_component_weight_spec,
+)
+from src.runtime.reliability_overlap_command_builders import (
+    build_direction_feature_snapshot_command as _build_direction_feature_snapshot_command,
+    build_labeled_overlap_dataset_command as _build_labeled_overlap_dataset_command,
+    build_overlap_feature_drift_guard_command as _build_overlap_feature_drift_guard_command,
+)
+from src.runtime.reliability_overlap_selection_support import (
+    apply_overlap_model_pruning as _apply_overlap_model_pruning,
+    apply_overlap_model_selection_override as _apply_overlap_model_selection_override,
+    selected_row as _selected_overlap_row,
+)
+from src.runtime.reliability_post_live_command_builders import (
+    build_default_vs_midband_live_comparison_command as _build_default_vs_midband_live_comparison_command,
+    build_default_vs_midband_longitudinal_command as _build_default_vs_midband_longitudinal_command,
+    build_default_vs_midband_watchlist_command as _build_default_vs_midband_watchlist_command,
+    build_live_prediction_snapshot_command as _build_live_prediction_snapshot_command,
+    build_prediction_coherence_command as _build_prediction_coherence_command,
+)
 from src.runtime.reliability_quality_support import (
     write_calibrated_quality_input as _write_calibrated_quality_input_impl,
     write_meta_component_frame as _write_meta_component_frame,
+)
+from src.runtime.reliability_reconciliation_support import (
+    assess_overlap_reconciliation as _assess_overlap_reconciliation,
 )
 from src.runtime.reliability_selection_guard_support import (
     augment_selection_guard_candidate_floors as _augment_selection_guard_candidate_floors_impl,
@@ -65,6 +108,10 @@ from src.runtime.reliability_selection_guard_support import (
 from src.runtime.reliability_regime_shadow_support import (
     build_regime_abs_ret_pred_floor_shadow as _build_regime_abs_ret_pred_floor_shadow,
     build_regime_max_p_up_shadow as _build_regime_max_p_up_shadow,
+)
+from src.runtime.reliability_step_support import run_step as _run_step
+from src.runtime.reliability_trade_decision_command_builders import (
+    build_trade_decision_policy_backtest_command as _build_trade_decision_policy_backtest_command,
 )
 from src.runtime.reliability_shadow_variant_support import (
     REFERENCE_FEATURE_ABLATION_THRESHOLD_VARIANT_PREFIX,
@@ -77,6 +124,18 @@ from src.runtime.reliability_shadow_variant_support import (
     shadow_variant_uses_reference_feature_ablation_model as _shadow_variant_uses_reference_feature_ablation_model,
     is_supported_official_shadow_variant as _is_supported_official_shadow_variant,
     official_shadow_overlap_triggered_trade_diag_path as _official_shadow_overlap_triggered_trade_diag_path,
+)
+from src.runtime.reliability_shadow_policy_command_builders import (
+    build_shadow_policy_command_bundle as _build_shadow_policy_command_bundle,
+)
+from src.runtime.reliability_validation_command_builders import (
+    build_cv_stress_sweep_command as _build_cv_stress_sweep_command,
+    build_label_ablation_command as _build_label_ablation_command,
+    build_point_in_time_audit_command as _build_point_in_time_audit_command,
+    build_walkforward_validation_command as _build_walkforward_validation_command,
+)
+from src.runtime.reliability_walkforward_command_builders import (
+    build_walkforward_model_compare_command as _build_walkforward_model_compare_command,
 )
 from src.scripts import run_refresh_and_predict as rrp
 
@@ -209,44 +268,6 @@ def _compute_feasible_walkforward(
     max_splits = 1 + max(0, (n_samples - base) // max(test, 1))
     resolved_folds = max(1, min(int(folds), int(max_splits)))
     return resolved_folds, train, val, test
-
-
-def _run_step(
-    name: str,
-    cmd: List[str],
-    log_path: Path,
-    dry_run: bool,
-    *,
-    allowed_returncodes: Sequence[int] | None = None,
-) -> StepResult:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = " ".join(shlex.quote(part) for part in cmd)
-    allowed = set(int(code) for code in (allowed_returncodes or [0]))
-    _emit_step_event(
-        name,
-        "started",
-        {"command": list(cmd), "log_path": str(log_path), "dry_run": bool(dry_run)},
-    )
-    if dry_run:
-        log_path.write_text(f"[dry-run] {rendered}\n", encoding="utf-8")
-        print(f"[dry-run] {name}: {rendered}")
-        _emit_step_event(name, "completed", {"returncode": 0, "dry_run": True, "log_path": str(log_path)})
-        return StepResult(name=name, command=cmd, returncode=0, log_path=log_path)
-
-    print(f"\n>>> {name}")
-    print(rendered)
-    with log_path.open("w", encoding="utf-8") as handle:
-        process = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, text=True)
-    if process.returncode not in allowed:
-        _emit_step_event(name, "failed", {"returncode": process.returncode, "log_path": str(log_path)})
-        raise RuntimeError(f"Step '{name}' failed (exit={process.returncode}). See {log_path}")
-    if process.returncode != 0:
-        print(
-            f"Warning: step '{name}' returned non-zero exit {process.returncode} but is configured as allowed.",
-            file=sys.stderr,
-        )
-    _emit_step_event(name, "completed", {"returncode": process.returncode, "log_path": str(log_path)})
-    return StepResult(name=name, command=cmd, returncode=process.returncode, log_path=log_path)
 
 
 def _walkforward_depth_metrics(path: Path) -> Dict[str, Any]:
@@ -2865,19 +2886,13 @@ def execute_reliability_workflow(
                 results.append(_run_step("transformer_dir_optuna_1h", transformer_cmd, logs_dir / "transformer_dir_optuna_1h.log", args.dry_run))
 
     if not args.skip_calibration:
-        calibr_cmd = [
-            python,
-            "-m",
-            "src.scripts.train_platt_calibration",
-            "--horizons",
-            *[str(h) for h in calibration_horizons],
-            "--output-path",
-            str(summary_dir / "platt_calibration.json"),
-            "--coverage-output-path",
-            str(summary_dir / "platt_calibration_coverage.json"),
-            "--method",
-            str(calibration_cfg.get("method", "platt")),
-        ]
+        calibr_cmd = _build_platt_calibration_command(
+            python=python,
+            horizons=calibration_horizons,
+            output_path=summary_dir / "platt_calibration.json",
+            coverage_output_path=summary_dir / "platt_calibration_coverage.json",
+            method=str(calibration_cfg.get("method", "platt")),
+        )
         results.append(_run_step("platt_calibration", calibr_cmd, logs_dir / "platt_calibration.log", args.dry_run))
 
     thresholds_path = summary_dir / "calibrated_thresholds.json"
@@ -2974,52 +2989,23 @@ def execute_reliability_workflow(
                 file=sys.stderr,
             )
         else:
-            meta_component_weight_spec = None
-            meta_component_weight_audit_path = search_cfg.get("meta_component_weights_from_audit_path")
-            if meta_component_weight_audit_path:
-                audit_path = Path(str(meta_component_weight_audit_path))
-                if audit_path.exists():
-                    try:
-                        meta_component_weight_spec = _extract_audit_weight_spec(
-                            _load_json(audit_path),
-                            allowed_components=(
-                                "transformer",
-                                "transformer_large",
-                                "lstm",
-                                "bilstm",
-                                "gru",
-                                "cnn_lstm",
-                                "cnn_bilstm",
-                                "garch_lstm",
-                                "xgb",
-                                "lgbm",
-                            ),
-                        )
-                    except Exception as exc:
-                        print(f"Warning: failed to load meta component weights from audit {audit_path}: {exc}", file=sys.stderr)
-            meta_cmd = [
-                python,
-                "-m",
-                "src.scripts.train_meta_ensemble",
-                "--output-csv",
-                str(summary_dir / "backtest_signals_meta_ensemble.csv"),
-                "--config-path",
-                str(summary_dir / "meta_ensemble_config.json"),
-                "--weight-threshold",
-                str(search_cfg.get("meta_weight_threshold", 0.5)),
-                "--signal-mode",
-                meta_signal_mode,
-            ]
-            if has_component_frame and component_frame_path is not None:
-                meta_cmd.extend(["--component-frame-csv", str(component_frame_path)])
-                if isinstance(meta_component_columns, Sequence) and not isinstance(meta_component_columns, (str, bytes)):
-                    for column in meta_component_columns:
-                        meta_cmd.extend(["--component-column", str(column)])
-                if isinstance(meta_extra_feature_columns, Sequence) and not isinstance(meta_extra_feature_columns, (str, bytes)):
-                    for column in meta_extra_feature_columns:
-                        meta_cmd.extend(["--extra-feature-column", str(column)])
-            if meta_component_weight_spec:
-                meta_cmd.extend(["--component-weight-spec", meta_component_weight_spec])
+            meta_component_weight_spec, audit_path, audit_error = _resolve_meta_component_weight_spec(
+                search_cfg=search_cfg,
+                load_json=_load_json,
+                extract_audit_weight_spec=_extract_audit_weight_spec,
+            )
+            if audit_error and audit_path is not None:
+                print(f"Warning: failed to load meta component weights from audit {audit_path}: {audit_error}", file=sys.stderr)
+            meta_cmd = _build_meta_ensemble_command(
+                python=python,
+                output_csv=summary_dir / "backtest_signals_meta_ensemble.csv",
+                config_path=summary_dir / "meta_ensemble_config.json",
+                search_cfg=search_cfg,
+                component_frame_path=component_frame_path if has_component_frame else None,
+                component_columns=meta_component_columns if has_component_frame else None,
+                extra_feature_columns=meta_extra_feature_columns if has_component_frame else None,
+                component_weight_spec=meta_component_weight_spec,
+            )
             results.append(_run_step("meta_ensemble_train", meta_cmd, logs_dir / "meta_ensemble_train.log", args.dry_run))
             if component_frame_status is not None:
                 (summary_dir / "meta_component_frame_status.json").write_text(
@@ -3183,13 +3169,10 @@ def execute_reliability_workflow(
                     f"quality.canonical_direction_dataset.labeling_scheme must be binary when enforce_binary_label_policy=true; got {label_policy}",
                 )
             if bool(canonical_cfg.get("rebuild_hourly", True)):
-                build_hourly_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.build_training_dataset",
-                    "--output-dir",
-                    str(canonical_cfg.get("output_dir", "artifacts/datasets")),
-                ]
+                build_hourly_cmd = _build_canonical_hourly_dataset_command(
+                    python=python,
+                    canonical_cfg=canonical_cfg,
+                )
                 results.append(
                     _run_step(
                         "build_canonical_hourly_dataset",
@@ -3199,31 +3182,11 @@ def execute_reliability_workflow(
                     )
                 )
 
-            build_direction_cmd = [
-                python,
-                "-m",
-                "src.scripts.build_training_dataset_direction",
-                "--output-dir",
-                str(canonical_cfg.get("output_dir", "artifacts/datasets")),
-                "--threshold",
-                str(float(canonical_cfg.get("threshold", 0.0))),
-                "--labeling-scheme",
-                label_policy,
-                "--no-trade-abs-ret",
-                str(float(canonical_cfg.get("no_trade_abs_ret", 0.0))),
-                "--no-trade-vol-mult",
-                str(float(canonical_cfg.get("no_trade_vol_mult", 0.0))),
-                "--meta-path",
-                str(canonical_cfg.get("meta_path", "artifacts/datasets/btc_features_1h_direction_meta.json")),
-                "--tb-horizon-steps",
-                str(int(canonical_cfg.get("tb_horizon_steps", 3))),
-                "--tb-vol-window",
-                str(int(canonical_cfg.get("tb_vol_window", 24))),
-                "--tb-upper-mult",
-                str(float(canonical_cfg.get("tb_upper_mult", 1.5))),
-                "--tb-lower-mult",
-                str(float(canonical_cfg.get("tb_lower_mult", 1.5))),
-            ]
+            build_direction_cmd = _build_canonical_direction_dataset_command(
+                python=python,
+                canonical_cfg=canonical_cfg,
+                label_policy=label_policy,
+            )
             results.append(
                 _run_step(
                     "build_canonical_direction_dataset",
@@ -3251,31 +3214,13 @@ def execute_reliability_workflow(
             candidate_gate_input = candidate_quality_input
             print(f"Using pinned labeled backtest CSV: {pinned_labeled_csv}", file=sys.stderr)
         elif bool(quality_cfg.get("build_labeled_dataset", True)):
-            labeled_cmd = [
-                python,
-                "-m",
-                "src.scripts.build_labeled_backtest_from_history",
-                "--output",
-                str(quality_input),
-                "--meta-output",
-                str(labeled_meta_output),
-                "--fold-size",
-                str(int(quality_cfg.get("fold_size", 12))),
-                "--lookback-rows",
-                str(int(quality_cfg.get("lookback_rows", 2000))),
-                "--lookback-hours",
-                str(int(quality_cfg.get("lookback_hours", 0))),
-                "--min-rows",
-                str(int(quality_cfg.get("min_labeled_rows", 200))),
-            ]
-            if resolved_quality_backtest_csv is not None:
-                labeled_cmd.extend(["--backtest-csv", str(resolved_quality_backtest_csv)])
-            if bool(quality_cfg.get("prefer_backtest", True)):
-                labeled_cmd.append("--prefer-backtest")
-            else:
-                labeled_cmd.append("--no-prefer-backtest")
-            if bool(quality_cfg.get("include_reliability_snapshots", False)):
-                labeled_cmd.append("--include-reliability-snapshots")
+            labeled_cmd = _build_labeled_dataset_command(
+                python=python,
+                quality_input=quality_input,
+                labeled_meta_output=labeled_meta_output,
+                quality_cfg=quality_cfg,
+                resolved_quality_backtest_csv=resolved_quality_backtest_csv,
+            )
             results.append(
                 _run_step(
                     "build_labeled_dataset",
@@ -3356,61 +3301,26 @@ def execute_reliability_workflow(
             if bool((snapshot_component_frame_status or {}).get("written", False)) and snapshot_component_frame_path.exists():
                 snapshot_meta_output = summary_dir / "backtest_signals_meta_ensemble.snapshot.csv"
                 snapshot_meta_config = summary_dir / "meta_ensemble_snapshot_config.json"
-                snapshot_meta_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.train_meta_ensemble",
-                    "--output-csv",
-                    str(snapshot_meta_output),
-                    "--config-path",
-                    str(snapshot_meta_config),
-                    "--weight-threshold",
-                    str(search_cfg.get("meta_weight_threshold", 0.5)),
-                    "--signal-mode",
-                    str(search_cfg.get("meta_signal_mode", "gate_only")),
-                    "--component-frame-csv",
-                    str(snapshot_component_frame_path),
-                ]
-                meta_component_columns_snapshot = search_cfg.get("meta_component_columns")
-                if isinstance(meta_component_columns_snapshot, Sequence) and not isinstance(
-                    meta_component_columns_snapshot, (str, bytes)
-                ):
-                    for column in meta_component_columns_snapshot:
-                        snapshot_meta_cmd.extend(["--component-column", str(column)])
-                meta_extra_feature_columns_snapshot = search_cfg.get("meta_extra_feature_columns")
-                if isinstance(meta_extra_feature_columns_snapshot, Sequence) and not isinstance(
-                    meta_extra_feature_columns_snapshot, (str, bytes)
-                ):
-                    for column in meta_extra_feature_columns_snapshot:
-                        snapshot_meta_cmd.extend(["--extra-feature-column", str(column)])
-                snapshot_meta_component_weight_spec = None
-                meta_component_weight_audit_path = search_cfg.get("meta_component_weights_from_audit_path")
-                if meta_component_weight_audit_path:
-                    audit_path = Path(str(meta_component_weight_audit_path))
-                    if audit_path.exists():
-                        try:
-                            snapshot_meta_component_weight_spec = _extract_audit_weight_spec(
-                                _load_json(audit_path),
-                                allowed_components=(
-                                    "transformer",
-                                    "transformer_large",
-                                    "lstm",
-                                    "bilstm",
-                                    "gru",
-                                    "cnn_lstm",
-                                    "cnn_bilstm",
-                                    "garch_lstm",
-                                    "xgb",
-                                    "lgbm",
-                                ),
-                            )
-                        except Exception as exc:
-                            print(
-                                f"Warning: failed to load snapshot meta component weights from audit {audit_path}: {exc}",
-                                file=sys.stderr,
-                            )
-                if snapshot_meta_component_weight_spec:
-                    snapshot_meta_cmd.extend(["--component-weight-spec", snapshot_meta_component_weight_spec])
+                snapshot_meta_component_weight_spec, audit_path, audit_error = _resolve_meta_component_weight_spec(
+                    search_cfg=search_cfg,
+                    load_json=_load_json,
+                    extract_audit_weight_spec=_extract_audit_weight_spec,
+                )
+                if audit_error and audit_path is not None:
+                    print(
+                        f"Warning: failed to load snapshot meta component weights from audit {audit_path}: {audit_error}",
+                        file=sys.stderr,
+                    )
+                snapshot_meta_cmd = _build_meta_ensemble_command(
+                    python=python,
+                    output_csv=snapshot_meta_output,
+                    config_path=snapshot_meta_config,
+                    search_cfg=search_cfg,
+                    component_frame_path=snapshot_component_frame_path,
+                    component_columns=search_cfg.get("meta_component_columns"),
+                    extra_feature_columns=search_cfg.get("meta_extra_feature_columns"),
+                    component_weight_spec=snapshot_meta_component_weight_spec,
+                )
                 results.append(
                     _run_step(
                         "meta_ensemble_train_snapshot",
@@ -3482,17 +3392,12 @@ def execute_reliability_workflow(
                     print(f"Warning: failed canonical dataset consistency check: {exc}", file=sys.stderr)
 
             if bool(raw_snapshot_cfg.get("enabled", True)) and (walkforward_dataset.exists() or args.dry_run):
-                raw_snapshot_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.export_direction_feature_snapshot",
-                    "--dataset",
-                    str(walkforward_dataset),
-                    "--output",
-                    str(raw_feature_snapshot_path),
-                    "--meta-output",
-                    str(raw_feature_snapshot_meta),
-                ]
+                raw_snapshot_cmd = _build_direction_feature_snapshot_command(
+                    python=python,
+                    dataset_path=walkforward_dataset,
+                    output_path=raw_feature_snapshot_path,
+                    meta_output_path=raw_feature_snapshot_meta,
+                )
                 results.append(
                     _run_step(
                         "direction_feature_snapshot",
@@ -3505,31 +3410,14 @@ def execute_reliability_workflow(
         if bool(reconcile_cfg.get("enabled", False)) and (quality_input.exists() or args.dry_run):
             labeled_overlap_dataset = summary_dir / "btc_features_1h_direction_splits.labeled_overlap.npz"
             labeled_overlap_meta = summary_dir / "walkforward_labeled_overlap_meta.json"
-            overlap_cmd = [
-                python,
-                "-m",
-                "src.scripts.slice_direction_dataset_by_timestamps",
-                "--dataset",
-                str(walkforward_dataset),
-                "--labeled-csv",
-                str(quality_input),
-                "--ts-col",
-                str(reconcile_cfg.get("ts_col", "ts")),
-                "--min-rows",
-                str(int(reconcile_cfg.get("min_rows", 120))),
-                "--output-dataset",
-                str(labeled_overlap_dataset),
-                "--output-meta",
-                str(labeled_overlap_meta),
-            ]
-            fallback_labeling_scheme = reconcile_cfg.get("fallback_labeling_scheme")
-            if fallback_labeling_scheme:
-                overlap_cmd.extend([
-                    "--fallback-labeling-scheme",
-                    str(fallback_labeling_scheme),
-                    "--fallback-min-coverage-ratio",
-                    str(float(reconcile_cfg.get("fallback_min_coverage_ratio", 0.0))),
-                ])
+            overlap_cmd = _build_labeled_overlap_dataset_command(
+                python=python,
+                walkforward_dataset=walkforward_dataset,
+                quality_input=quality_input,
+                reconcile_cfg=reconcile_cfg,
+                labeled_overlap_dataset=labeled_overlap_dataset,
+                labeled_overlap_meta=labeled_overlap_meta,
+            )
             results.append(
                 _run_step(
                     "walkforward_labeled_overlap_dataset",
@@ -3540,17 +3428,12 @@ def execute_reliability_workflow(
             )
 
             if bool(raw_snapshot_cfg.get("enabled", True)) and (labeled_overlap_dataset.exists() or args.dry_run):
-                raw_overlap_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.export_direction_feature_snapshot",
-                    "--dataset",
-                    str(labeled_overlap_dataset),
-                    "--output",
-                    str(raw_feature_overlap_snapshot_path),
-                    "--meta-output",
-                    str(raw_feature_overlap_snapshot_meta),
-                ]
+                raw_overlap_cmd = _build_direction_feature_snapshot_command(
+                    python=python,
+                    dataset_path=labeled_overlap_dataset,
+                    output_path=raw_feature_overlap_snapshot_path,
+                    meta_output_path=raw_feature_overlap_snapshot_meta,
+                )
                 results.append(
                     _run_step(
                         "direction_feature_overlap_snapshot",
@@ -3575,31 +3458,13 @@ def execute_reliability_workflow(
                 if latest_pack is not None:
                     _, baseline_pack_path = latest_pack
             if baseline_pack_path is not None and (baseline_pack_path.exists() or args.dry_run):
-                guard_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.analyze_overlap_feature_drift_guard",
-                    "--baseline-pack",
-                    str(baseline_pack_path),
-                    "--current-overlap-dataset",
-                    str(labeled_overlap_dataset),
-                    "--tail-rows",
-                    str(int(overlap_drift_guard_cfg.get("tail_rows", 24))),
-                    "--warn-abs-train-std-shift",
-                    str(float(overlap_drift_guard_cfg.get("warn_abs_train_std_shift", 1.5))),
-                    "--fail-abs-train-std-shift",
-                    str(float(overlap_drift_guard_cfg.get("fail_abs_train_std_shift", 2.5))),
-                    "--min-failed-features",
-                    str(int(overlap_drift_guard_cfg.get("min_failed_features", 2))),
-                    "--output",
-                    str(overlap_feature_drift_guard_path),
-                ]
-                for prefix in overlap_drift_guard_cfg.get("feature_prefixes", []):
-                    if str(prefix).strip():
-                        guard_cmd.extend(["--feature-prefix", str(prefix)])
-                for feature_name in overlap_drift_guard_cfg.get("feature_names", []):
-                    if str(feature_name).strip():
-                        guard_cmd.extend(["--feature-name", str(feature_name)])
+                guard_cmd = _build_overlap_feature_drift_guard_command(
+                    python=python,
+                    baseline_pack_path=baseline_pack_path,
+                    labeled_overlap_dataset=labeled_overlap_dataset,
+                    overlap_drift_guard_cfg=overlap_drift_guard_cfg,
+                    output_path=overlap_feature_drift_guard_path,
+                )
                 results.append(
                     _run_step(
                         "overlap_feature_drift_guard",
@@ -3631,23 +3496,12 @@ def execute_reliability_workflow(
             and (labeled_overlap_dataset.exists() or args.dry_run)
         ):
             overlap_feature_cfg = overlap_pre_tuning_cfg.get("feature_reliability", {})
-            overlap_feature_cmd = [
-                python,
-                "-m",
-                "src.scripts.evaluate_feature_reliability",
-                "--input",
-                str(labeled_overlap_dataset),
-                "--baseline-window",
-                str(int(overlap_feature_cfg.get("baseline_window", 80))),
-                "--recent-window",
-                str(int(overlap_feature_cfg.get("recent_window", 40))),
-                "--min-score",
-                str(float(overlap_feature_cfg.get("min_score", 0.55))),
-                "--max-features",
-                str(int(overlap_feature_cfg.get("max_features", 0))),
-                "--output",
-                str(overlap_feature_reliability_path),
-            ]
+            overlap_feature_cmd = _build_feature_reliability_command(
+                python=python,
+                input_path=labeled_overlap_dataset,
+                feature_cfg=overlap_feature_cfg,
+                output_path=overlap_feature_reliability_path,
+            )
             results.append(
                 _run_step(
                     "overlap_feature_reliability",
@@ -3663,55 +3517,26 @@ def execute_reliability_workflow(
                 full_min_train = int(compare_cfg.get("min_train_size", 30))
                 full_min_val = int(compare_cfg.get("min_val_size", 20))
                 full_min_test = int(compare_cfg.get("min_test_size", 20))
-                compare_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.compare_walkforward_models",
-                    "--dataset-path",
-                    str(walkforward_dataset),
-                    "--y-key",
-                    walkforward_target,
-                    "--folds",
-                    str(int(compare_cfg.get("folds", cv_folds))),
-                    "--train-size",
-                    str(int(compare_cfg.get("train_size", cv_train_size))),
-                    "--val-size",
-                    str(int(compare_cfg.get("val_size", cv_val_size))),
-                    "--test-size",
-                    str(int(compare_cfg.get("test_size", cv_test_size))),
-                    "--gap",
-                    str(int(compare_cfg.get("gap", cv_gap))),
-                    "--purge-size",
-                    str(int(compare_cfg.get("purge_size", cv_purge_size))),
-                    "--embargo-size",
-                    str(int(compare_cfg.get("embargo_size", cv_embargo_size))),
-                    "--mode",
-                    str(compare_cfg.get("mode", cv_mode)),
-                    "--min-train-size",
-                    str(int(full_min_train)),
-                    "--min-val-size",
-                    str(int(full_min_val)),
-                    "--min-test-size",
-                    str(int(full_min_test)),
-                    "--signal-threshold",
-                    str(float(compare_cfg.get("signal_threshold", quality_cfg.get("walkforward_signal_threshold", 0.5)))),
-                    "--fee-bps",
-                    str(float(compare_cfg.get("fee_bps", quality_cfg.get("walkforward_fee_bps", 2.0)))),
-                    "--slippage-bps",
-                    str(float(compare_cfg.get("slippage_bps", quality_cfg.get("walkforward_slippage_bps", 1.0)))),
-                    "--rolling-guard" if bool(compare_cfg.get("rolling_guard", True)) else "",
-                    "--meta-margin",
-                    str(float(compare_cfg.get("meta_margin", 0.0))),
-                    "--meta-min-rolling-trades",
-                    str(int(compare_cfg.get("meta_min_rolling_trades", 0))),
-                    "--selection-policy",
-                    str(compare_cfg.get("selection_policy", "incumbent_guarded")),
-                    "--min-auc",
-                    str(float(compare_cfg.get("min_auc", 0.5))),
-                    "--output",
-                    str(compare_output),
-                ]
-                compare_cmd = [part for part in compare_cmd if part != ""]
+                compare_cmd = _build_walkforward_model_compare_command(
+                    python=python,
+                    dataset_path=walkforward_dataset,
+                    walkforward_target=walkforward_target,
+                    compare_cfg=compare_cfg,
+                    quality_cfg=quality_cfg,
+                    cv_folds=cv_folds,
+                    cv_train_size=cv_train_size,
+                    cv_val_size=cv_val_size,
+                    cv_test_size=cv_test_size,
+                    cv_gap=cv_gap,
+                    cv_purge_size=cv_purge_size,
+                    cv_embargo_size=cv_embargo_size,
+                    cv_mode=cv_mode,
+                    default_min_train_size=full_min_train,
+                    default_min_val_size=full_min_val,
+                    default_min_test_size=full_min_test,
+                    default_selection_policy="incumbent_guarded",
+                    output_path=compare_output,
+                )
                 results.append(
                     _run_step(
                         "walkforward_model_compare",
@@ -3752,55 +3577,26 @@ def execute_reliability_workflow(
                     overlap_min_train = int(overlap_compare_cfg.get("min_train_size", 20))
                     overlap_min_val = int(overlap_compare_cfg.get("min_val_size", 10))
                     overlap_min_test = int(overlap_compare_cfg.get("min_test_size", 10))
-                    overlap_compare_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.compare_walkforward_models",
-                        "--dataset-path",
-                        str(labeled_overlap_dataset),
-                        "--y-key",
-                        walkforward_target,
-                        "--folds",
-                        str(int(overlap_folds)),
-                        "--train-size",
-                        str(int(overlap_train_size)),
-                        "--val-size",
-                        str(int(overlap_val_size)),
-                        "--test-size",
-                        str(int(overlap_test_size)),
-                        "--gap",
-                        str(int(overlap_gap)),
-                        "--purge-size",
-                        str(int(overlap_purge)),
-                        "--embargo-size",
-                        str(int(overlap_embargo)),
-                        "--mode",
-                        str(overlap_mode),
-                        "--min-train-size",
-                        str(int(overlap_min_train)),
-                        "--min-val-size",
-                        str(int(overlap_min_val)),
-                        "--min-test-size",
-                        str(int(overlap_min_test)),
-                        "--signal-threshold",
-                        str(float(compare_cfg.get("signal_threshold", quality_cfg.get("walkforward_signal_threshold", 0.5)))),
-                        "--fee-bps",
-                        str(float(compare_cfg.get("fee_bps", quality_cfg.get("walkforward_fee_bps", 2.0)))),
-                        "--slippage-bps",
-                        str(float(compare_cfg.get("slippage_bps", quality_cfg.get("walkforward_slippage_bps", 1.0)))),
-                        "--rolling-guard" if bool(compare_cfg.get("rolling_guard", True)) else "",
-                        "--meta-margin",
-                        str(float(compare_cfg.get("meta_margin", 0.0))),
-                        "--meta-min-rolling-trades",
-                        str(int(compare_cfg.get("meta_min_rolling_trades", 0))),
-                        "--selection-policy",
-                        str(overlap_compare_cfg.get("selection_policy", "best_cum_ret")),
-                        "--min-auc",
-                        str(float(overlap_compare_cfg.get("min_auc", compare_cfg.get("min_auc", 0.5)))),
-                        "--output",
-                        str(overlap_compare_output),
-                    ]
-                    overlap_compare_cmd = [part for part in overlap_compare_cmd if part != ""]
+                    overlap_compare_cmd = _build_walkforward_model_compare_command(
+                        python=python,
+                        dataset_path=labeled_overlap_dataset,
+                        walkforward_target=walkforward_target,
+                        compare_cfg=overlap_compare_cfg,
+                        quality_cfg=quality_cfg,
+                        cv_folds=overlap_folds,
+                        cv_train_size=overlap_train_size,
+                        cv_val_size=overlap_val_size,
+                        cv_test_size=overlap_test_size,
+                        cv_gap=overlap_gap,
+                        cv_purge_size=overlap_purge,
+                        cv_embargo_size=overlap_embargo,
+                        cv_mode=overlap_mode,
+                        default_min_train_size=overlap_min_train,
+                        default_min_val_size=overlap_min_val,
+                        default_min_test_size=overlap_min_test,
+                        default_selection_policy="best_cum_ret",
+                        output_path=overlap_compare_output,
+                    )
                     results.append(
                         _run_step(
                             "walkforward_model_compare_labeled_overlap",
@@ -3813,234 +3609,43 @@ def execute_reliability_workflow(
                     if not args.dry_run and compare_output.exists() and overlap_compare_output.exists():
                         full_payload = _load_json(compare_output)
                         overlap_payload = _load_json(overlap_compare_output)
-
-                        def _selected_row(payload: Dict[str, Any]) -> Dict[str, Any]:
-                            selected_kind = str(payload.get("selected_model_kind", ""))
-                            rows_obj = payload.get("rows", [])
-                            if not isinstance(rows_obj, list):
-                                return {}
-                            for item in rows_obj:
-                                if isinstance(item, dict) and str(item.get("model_kind", "")) == selected_kind:
-                                    return item
-                            return {}
-
-                        def _row_by_model_kind(payload: Dict[str, Any], model_kind: str) -> Dict[str, Any]:
-                            rows_obj = payload.get("rows", [])
-                            if not isinstance(rows_obj, list):
-                                return {}
-                            for item in rows_obj:
-                                if isinstance(item, dict) and str(item.get("model_kind", "")) == str(model_kind):
-                                    return item
-                            return {}
-
-                        overlap_selection_cfg_obj = reconcile_cfg.get("overlap_model_selection", {}) if isinstance(reconcile_cfg, dict) else {}
-                        overlap_selection_cfg = overlap_selection_cfg_obj if isinstance(overlap_selection_cfg_obj, dict) else {}
-                        overlap_selection_enabled = bool(overlap_selection_cfg.get("enabled", False))
-                        overlap_selection_primary = str(overlap_selection_cfg.get("primary_model", "xgb"))
-                        overlap_selection_fallback = str(overlap_selection_cfg.get("fallback_model", "meta_stack"))
-                        overlap_selection_min_ret_improvement = float(overlap_selection_cfg.get("min_ret_improvement", 0.0))
-                        overlap_selection_only_when_primary_negative = bool(
-                            overlap_selection_cfg.get("only_when_primary_negative", True)
+                        overlap_selection_override_payload = _apply_overlap_model_selection_override(
+                            overlap_payload=overlap_payload,
+                            reconcile_cfg=reconcile_cfg,
                         )
-                        overlap_selection_require_auc_non_worse = bool(
-                            overlap_selection_cfg.get("require_fallback_auc_non_worse", False)
+
+                        full_row = _selected_overlap_row(full_payload)
+                        pruning_result = _apply_overlap_model_pruning(
+                            overlap_payload=overlap_payload,
+                            overlap_compare_output=overlap_compare_output,
+                            overlap_pre_tuning_cfg=overlap_pre_tuning_cfg,
                         )
-                        overlap_selection_min_fallback_trades = int(overlap_selection_cfg.get("min_fallback_trades", 0))
-
-                        overlap_selection_override_payload: Dict[str, Any] | None = None
-                        if overlap_selection_enabled:
-                            primary_row = _row_by_model_kind(overlap_payload, overlap_selection_primary)
-                            fallback_row = _row_by_model_kind(overlap_payload, overlap_selection_fallback)
-                            if primary_row and fallback_row:
-                                primary_ret = float(primary_row.get("cum_ret_net_total", 0.0) or 0.0)
-                                fallback_ret = float(fallback_row.get("cum_ret_net_total", 0.0) or 0.0)
-                                primary_auc = float(primary_row.get("auc_mean", float("nan")))
-                                fallback_auc = float(fallback_row.get("auc_mean", float("nan")))
-                                fallback_trades = int(fallback_row.get("trade_count_total", 0) or 0)
-
-                                ret_improvement_ok = fallback_ret >= (primary_ret + overlap_selection_min_ret_improvement)
-                                primary_negative_ok = (primary_ret < 0.0) if overlap_selection_only_when_primary_negative else True
-                                auc_ok = (fallback_auc >= primary_auc) if overlap_selection_require_auc_non_worse else True
-                                trades_ok = fallback_trades >= overlap_selection_min_fallback_trades
-                                selected_override = bool(ret_improvement_ok and primary_negative_ok and auc_ok and trades_ok)
-
-                                if selected_override:
-                                    overlap_payload["selected_model_kind"] = overlap_selection_fallback
-
-                                overlap_selection_override_payload = {
-                                    "enabled": True,
-                                    "primary_model": overlap_selection_primary,
-                                    "fallback_model": overlap_selection_fallback,
-                                    "selected_override": bool(selected_override),
-                                    "constraints": {
-                                        "min_ret_improvement": overlap_selection_min_ret_improvement,
-                                        "only_when_primary_negative": overlap_selection_only_when_primary_negative,
-                                        "require_fallback_auc_non_worse": overlap_selection_require_auc_non_worse,
-                                        "min_fallback_trades": overlap_selection_min_fallback_trades,
-                                    },
-                                    "metrics": {
-                                        "primary_ret": primary_ret,
-                                        "fallback_ret": fallback_ret,
-                                        "primary_auc": primary_auc,
-                                        "fallback_auc": fallback_auc,
-                                        "fallback_trade_count": fallback_trades,
-                                    },
-                                    "checks": {
-                                        "ret_improvement_ok": bool(ret_improvement_ok),
-                                        "primary_negative_ok": bool(primary_negative_ok),
-                                        "auc_ok": bool(auc_ok),
-                                        "trades_ok": bool(trades_ok),
-                                    },
-                                }
-                            else:
-                                overlap_selection_override_payload = {
-                                    "enabled": True,
-                                    "primary_model": overlap_selection_primary,
-                                    "fallback_model": overlap_selection_fallback,
-                                    "selected_override": False,
-                                    "reason": "missing_model_rows",
-                                }
-
-                        full_row = _selected_row(full_payload)
-                        overlap_row = _selected_row(overlap_payload)
-                        overlap_rows_obj = overlap_payload.get("rows", [])
-                        overlap_rows = overlap_rows_obj if isinstance(overlap_rows_obj, list) else []
-
-                        overlap_pruning_cfg_obj = overlap_pre_tuning_cfg.get("model_pruning", {}) if isinstance(overlap_pre_tuning_cfg, dict) else {}
-                        overlap_pruning_cfg = overlap_pruning_cfg_obj if isinstance(overlap_pruning_cfg_obj, dict) else {}
-                        overlap_pruning_enabled = bool(overlap_pre_tuning_cfg.get("enabled", True)) and bool(
-                            overlap_pruning_cfg.get("enabled", True)
-                        )
-                        overlap_min_model_cum_ret = float(overlap_pruning_cfg.get("min_cum_ret", 0.0))
-                        overlap_min_model_trades = int(overlap_pruning_cfg.get("min_trade_count", 10))
-
-                        pruned_rows: List[Dict[str, Any]] = []
-                        rejected_rows: List[Dict[str, Any]] = []
-                        for row in overlap_rows:
-                            if not isinstance(row, dict):
-                                continue
-                            row_ret = float(row.get("cum_ret_net_total", float("nan")))
-                            row_trades = int(row.get("trade_count_total", 0) or 0)
-                            reasons: List[str] = []
-                            if row_ret < overlap_min_model_cum_ret:
-                                reasons.append("min_cum_ret")
-                            if row_trades < overlap_min_model_trades:
-                                reasons.append("min_trade_count")
-                            if reasons:
-                                rejected_rows.append(
-                                    {
-                                        "model_kind": row.get("model_kind"),
-                                        "cum_ret_net_total": row_ret,
-                                        "trade_count_total": row_trades,
-                                        "reasons": reasons,
-                                    }
-                                )
-                            else:
-                                pruned_rows.append(row)
-
-                        pruned_selected_model_kind = None
-                        pruned_selected_row: Dict[str, Any] | None = None
-                        if overlap_pruning_enabled and pruned_rows:
-                            pruned_rows_sorted = sorted(
-                                pruned_rows,
-                                key=lambda r: (
-                                    float(r.get("cum_ret_net_total", float("-inf"))),
-                                    int(r.get("trade_count_total", 0) or 0),
-                                    float(r.get("auc_mean", float("-inf"))),
-                                ),
-                                reverse=True,
-                            )
-                            pruned_selected_row = pruned_rows_sorted[0]
-                            pruned_selected_model_kind = str(pruned_selected_row.get("model_kind", ""))
-                            overlap_payload["selected_model_kind"] = pruned_selected_model_kind
-                            overlap_row = pruned_selected_row
-                        require_viable_for_tuning = bool(overlap_pruning_cfg.get("require_viable_model_for_tuning", True))
-                        overlap_pruning_allows_tuning = (not overlap_pruning_enabled) or bool(pruned_rows) or (not require_viable_for_tuning)
-
-                        overlap_pruning_payload = {
-                            "enabled": bool(overlap_pruning_enabled),
-                            "source_compare_path": str(overlap_compare_output),
-                            "constraints": {
-                                "min_cum_ret": overlap_min_model_cum_ret,
-                                "min_trade_count": overlap_min_model_trades,
-                                "require_viable_model_for_tuning": require_viable_for_tuning,
-                            },
-                            "selected_model_from_compare": overlap_payload.get("selected_model_kind"),
-                            "pruned_selected_model": pruned_selected_model_kind,
-                            "pruned_selected_row": pruned_selected_row,
-                            "viable_rows": pruned_rows,
-                            "rejected_rows": rejected_rows,
-                            "allows_tuning": bool(overlap_pruning_allows_tuning),
-                        }
+                        overlap_row = pruning_result.selected_row
+                        overlap_pruning_allows_tuning = pruning_result.allows_tuning
+                        overlap_pruning_payload = pruning_result.pruning_payload
                         overlap_model_pruning_path.write_text(
                             json.dumps(overlap_pruning_payload, indent=2),
                             encoding="utf-8",
                         )
 
-                        full_ret = float(full_row.get("cum_ret_net_total", 0.0) or 0.0)
-                        overlap_ret = float(overlap_row.get("cum_ret_net_total", 0.0) or 0.0)
                         full_depth = _walkforward_depth_metrics(Path(str(full_row.get("path", "")))) if full_row else {}
                         overlap_depth = _walkforward_depth_metrics(Path(str(overlap_row.get("path", "")))) if overlap_row else {}
-                        same_sign = bool((full_ret == 0.0 and overlap_ret == 0.0) or (full_ret * overlap_ret > 0.0))
-                        abs_gap = float(abs(full_ret - overlap_ret))
-                        min_overlap = float(reconcile_cfg.get("min_overlap_cum_ret", -0.005))
-                        require_non_negative_overlap = bool(reconcile_cfg.get("require_non_negative_overlap_selected", True))
-                        overlap_non_negative_ok = (overlap_ret >= 0.0) if require_non_negative_overlap else True
-                        max_abs_gap = float(reconcile_cfg.get("max_abs_cum_ret_gap", 0.03))
-                        min_overlap_folds = int(reconcile_cfg.get("min_overlap_folds", 2))
-                        min_overlap_test_rows = int(reconcile_cfg.get("min_overlap_test_rows", 40))
-                        overlap_folds_ok = int(overlap_depth.get("n_folds", 0) or 0) >= min_overlap_folds
-                        overlap_test_rows_ok = int(overlap_depth.get("test_rows_total", 0) or 0) >= min_overlap_test_rows
-                        overlap_depth_ok = bool(overlap_folds_ok and overlap_test_rows_ok)
-                        trustworthy = bool(
-                            same_sign
-                            and overlap_ret >= min_overlap
-                            and overlap_non_negative_ok
-                            and abs_gap <= max_abs_gap
-                            and overlap_depth_ok
+                        reconciliation_assessment = _assess_overlap_reconciliation(
+                            compare_output=compare_output,
+                            overlap_compare_output=overlap_compare_output,
+                            labeled_overlap_meta=labeled_overlap_meta,
+                            overlap_model_pruning_path=overlap_model_pruning_path,
+                            overlap_selection_override_payload=overlap_selection_override_payload,
+                            full_payload=full_payload,
+                            overlap_payload=overlap_payload,
+                            full_row=full_row,
+                            overlap_row=overlap_row,
+                            full_depth=full_depth,
+                            overlap_depth=overlap_depth,
+                            reconcile_cfg=reconcile_cfg,
                         )
-                        failed_checks = []
-                        if not same_sign:
-                            failed_checks.append("same_return_sign")
-                        if overlap_ret < min_overlap:
-                            failed_checks.append("min_overlap_cum_ret")
-                        if not overlap_non_negative_ok:
-                            failed_checks.append("overlap_selected_non_negative")
-                        if abs_gap > max_abs_gap:
-                            failed_checks.append("max_abs_cum_ret_gap")
-                        if not overlap_folds_ok:
-                            failed_checks.append("min_overlap_folds")
-                        if not overlap_test_rows_ok:
-                            failed_checks.append("min_overlap_test_rows")
-
-                        reconciliation_payload = {
-                            "full_compare_path": str(compare_output),
-                            "labeled_overlap_compare_path": str(overlap_compare_output),
-                            "labeled_overlap_meta_path": str(labeled_overlap_meta) if labeled_overlap_meta else None,
-                            "overlap_model_pruning_path": str(overlap_model_pruning_path),
-                            "overlap_model_selection_override": overlap_selection_override_payload,
-                            "full_selected_model": full_payload.get("selected_model_kind"),
-                            "overlap_selected_model": overlap_payload.get("selected_model_kind"),
-                            "full_selected_row": full_row,
-                            "overlap_selected_row": overlap_row,
-                            "full_depth": full_depth,
-                            "overlap_depth": overlap_depth,
-                            "agreement": {
-                                "same_return_sign": same_sign,
-                                "abs_cum_ret_gap": abs_gap,
-                                "min_overlap_cum_ret": min_overlap,
-                                "require_non_negative_overlap_selected": bool(require_non_negative_overlap),
-                                "overlap_non_negative_ok": bool(overlap_non_negative_ok),
-                                "max_abs_cum_ret_gap": max_abs_gap,
-                                "min_overlap_folds": int(min_overlap_folds),
-                                "min_overlap_test_rows": int(min_overlap_test_rows),
-                                "overlap_folds_ok": bool(overlap_folds_ok),
-                                "overlap_test_rows_ok": bool(overlap_test_rows_ok),
-                                "overlap_depth_ok": bool(overlap_depth_ok),
-                                "edge_trustworthy": trustworthy,
-                                "failed_checks": failed_checks,
-                            },
-                        }
+                        trustworthy = reconciliation_assessment.trustworthy
+                        reconciliation_payload = reconciliation_assessment.reconciliation_payload
                         (summary_dir / "walkforward_labeled_reconciliation.json").write_text(
                             json.dumps(reconciliation_payload, indent=2),
                             encoding="utf-8",
@@ -4059,31 +3664,18 @@ def execute_reliability_workflow(
                         ):
                             overlap_feature_sources = [summary_dir / "backtest_signals_meta_ensemble_decision_aligned.csv"]
                             overlap_feature_sources.append(quality_input)
-                            overlap_diag_cmd = [
-                                python,
-                                "-m",
-                                "src.scripts.analyze_overlap_trust_stability",
-                                "--full-walkforward",
-                                str(full_selected_path),
-                                "--overlap-walkforward",
-                                str(overlap_selected_path),
-                                "--overlap-dataset",
-                                str(labeled_overlap_dataset),
-                                "--labeled-csv",
-                                str(quality_input),
-                                "--feature-source",
-                                str(overlap_feature_sources[0]),
-                                "--feature-source",
-                                str(overlap_feature_sources[1]),
-                                "--ts-col",
-                                str(reconcile_cfg.get("ts_col", "ts")),
-                                "--return-col",
-                                str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                                "--signal-col",
-                                str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                                "--output",
-                                str(overlap_stability_output),
-                            ]
+                            overlap_diag_cmd = _build_overlap_trust_stability_command(
+                                python=python,
+                                full_selected_path=full_selected_path,
+                                overlap_selected_path=overlap_selected_path,
+                                labeled_overlap_dataset=labeled_overlap_dataset,
+                                quality_input=quality_input,
+                                feature_sources=overlap_feature_sources,
+                                reconcile_cfg=reconcile_cfg,
+                                champ_cfg=champ_cfg,
+                                trade_decision_cfg=trade_decision_cfg,
+                                output_path=overlap_stability_output,
+                            )
                             results.append(
                                 _run_step(
                                     "overlap_trust_stability",
@@ -4163,85 +3755,27 @@ def execute_reliability_workflow(
                                     break
                             walkforward_dataset = labeled_overlap_dataset
             else:
-                walkforward_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.run_walkforward_validation",
-                    "--dataset-path",
-                    str(walkforward_dataset),
-                    "--y-key",
-                    walkforward_target,
-                    "--folds",
-                    str(cv_folds),
-                    "--train-size",
-                    str(cv_train_size),
-                    "--val-size",
-                    str(cv_val_size),
-                    "--test-size",
-                    str(cv_test_size),
-                    "--gap",
-                    str(cv_gap),
-                    "--purge-size",
-                    str(cv_purge_size),
-                    "--embargo-size",
-                    str(cv_embargo_size),
-                    "--mode",
-                    cv_mode,
-                    "--model-kind",
-                    selected_model_kind,
-                    "--signal-threshold",
-                    str(float(quality_cfg.get("walkforward_signal_threshold", 0.5))),
-                    "--fee-bps",
-                    str(float(quality_cfg.get("walkforward_fee_bps", 2.0))),
-                    "--slippage-bps",
-                    str(float(quality_cfg.get("walkforward_slippage_bps", 1.0))),
-                    "--output",
-                    str(walkforward_output),
-                ]
+                walkforward_cmd = _build_walkforward_validation_command(
+                    python=python,
+                    dataset_path=walkforward_dataset,
+                    walkforward_target=walkforward_target,
+                    folds=cv_folds,
+                    train_size=cv_train_size,
+                    val_size=cv_val_size,
+                    test_size=cv_test_size,
+                    gap=cv_gap,
+                    purge_size=cv_purge_size,
+                    embargo_size=cv_embargo_size,
+                    mode=cv_mode,
+                    model_kind=selected_model_kind,
+                    signal_threshold=float(quality_cfg.get("walkforward_signal_threshold", 0.5)),
+                    fee_bps=float(quality_cfg.get("walkforward_fee_bps", 2.0)),
+                    slippage_bps=float(quality_cfg.get("walkforward_slippage_bps", 1.0)),
+                    output_path=walkforward_output,
+                )
                 results.append(_run_step("walkforward_validation", walkforward_cmd, logs_dir / "walkforward_validation.log", args.dry_run))
 
         if bool(label_ablation_cfg.get("enabled", False)):
-            label_ablation_cmd = [
-                python,
-                "-m",
-                "src.scripts.run_label_ablation",
-                "--output-dir",
-                str(summary_dir / "label_ablation"),
-                "--threshold",
-                str(float(label_ablation_cfg.get("threshold", 0.0))),
-                "--walkforward-folds",
-                str(int(label_ablation_cfg.get("folds", cv_folds))),
-                "--walkforward-train-size",
-                str(int(label_ablation_cfg.get("train_size", cv_train_size))),
-                "--walkforward-val-size",
-                str(int(label_ablation_cfg.get("val_size", cv_val_size))),
-                "--walkforward-test-size",
-                str(int(label_ablation_cfg.get("test_size", cv_test_size))),
-                "--walkforward-gap",
-                str(int(label_ablation_cfg.get("gap", cv_gap))),
-                "--walkforward-purge",
-                str(int(label_ablation_cfg.get("purge_size", cv_purge_size))),
-                "--walkforward-embargo",
-                str(int(label_ablation_cfg.get("embargo_size", cv_embargo_size))),
-                "--walkforward-mode",
-                str(label_ablation_cfg.get("mode", cv_mode)),
-                "--model-kind",
-                str(label_ablation_cfg.get("model_kind", selected_model_kind)),
-                "--signal-threshold",
-                str(float(label_ablation_cfg.get("signal_threshold", quality_cfg.get("walkforward_signal_threshold", 0.5)))),
-                "--fee-bps",
-                str(float(label_ablation_cfg.get("fee_bps", quality_cfg.get("walkforward_fee_bps", 2.0)))),
-                "--slippage-bps",
-                str(float(label_ablation_cfg.get("slippage_bps", quality_cfg.get("walkforward_slippage_bps", 1.0)))),
-                "--economics-min-trades",
-                str(float(label_ablation_cfg.get("economics_min_trades", quality_cfg.get("min_trade_count", 10)))),
-                "--economics-min-cum-ret",
-                str(float(label_ablation_cfg.get("economics_min_cum_ret", quality_cfg.get("min_net_return", 0.0)))),
-                "--economics-turnover-penalty",
-                str(float(label_ablation_cfg.get("economics_turnover_penalty", 0.002))),
-                "--economics-downside-penalty",
-                str(float(label_ablation_cfg.get("economics_downside_penalty", 2.0))),
-            ]
             feature_rel_json = label_ablation_cfg.get("feature_reliability_json")
             if (
                 not feature_rel_json
@@ -4250,21 +3784,30 @@ def execute_reliability_workflow(
                 and overlap_feature_reliability_path.exists()
             ):
                 feature_rel_json = overlap_feature_reliability_path
-            if feature_rel_json:
-                label_ablation_cmd.extend(["--feature-reliability-json", str(feature_rel_json)])
-                label_ablation_cmd.extend(
-                    [
-                        "--feature-reliability-min-score",
-                        str(
-                            float(
-                                label_ablation_cfg.get(
-                                    "feature_reliability_min_score",
-                                    overlap_pre_tuning_cfg.get("feature_reliability", {}).get("min_score", 0.55),
-                                )
-                            )
-                        ),
-                    ]
+            label_ablation_cmd = _build_label_ablation_command(
+                python=python,
+                summary_dir=summary_dir,
+                label_ablation_cfg=label_ablation_cfg,
+                quality_cfg=quality_cfg,
+                selected_model_kind=selected_model_kind,
+                cv_folds=cv_folds,
+                cv_train_size=cv_train_size,
+                cv_val_size=cv_val_size,
+                cv_test_size=cv_test_size,
+                cv_gap=cv_gap,
+                cv_purge_size=cv_purge_size,
+                cv_embargo_size=cv_embargo_size,
+                cv_mode=cv_mode,
+                feature_reliability_json=feature_rel_json,
+                feature_reliability_min_score=float(
+                    label_ablation_cfg.get(
+                        "feature_reliability_min_score",
+                        overlap_pre_tuning_cfg.get("feature_reliability", {}).get("min_score", 0.55),
+                    )
                 )
+                if feature_rel_json
+                else None,
+            )
             results.append(
                 _run_step(
                     "label_ablation",
@@ -4275,19 +3818,13 @@ def execute_reliability_workflow(
             )
 
         if bool(leakage_cfg.get("enabled", True)):
-            leakage_cmd = [
-                python,
-                "-m",
-                "src.scripts.audit_point_in_time_integrity",
-                "--dataset-path",
-                str(walkforward_dataset),
-                "--y-key",
-                str(leakage_cfg.get("y_key", walkforward_target)),
-                "--leakage-corr-alert",
-                str(float(leakage_cfg.get("corr_alert", 0.98))),
-                "--output",
-                str(summary_dir / "point_in_time_audit.json"),
-            ]
+            leakage_cmd = _build_point_in_time_audit_command(
+                python=python,
+                walkforward_dataset=walkforward_dataset,
+                walkforward_target=walkforward_target,
+                leakage_cfg=leakage_cfg,
+                output_path=summary_dir / "point_in_time_audit.json",
+            )
             results.append(_run_step("point_in_time_audit", leakage_cmd, logs_dir / "point_in_time_audit.log", args.dry_run))
 
         if bool(cv_stress_cfg.get("enabled", True)):
@@ -4317,33 +3854,19 @@ def execute_reliability_workflow(
                     file=sys.stderr,
                 )
             else:
-                cv_stress_cmd = [
-                python,
-                "-m",
-                "src.scripts.run_cv_stress_sweep",
-                "--dataset-path",
-                str(walkforward_dataset),
-                "--y-key",
-                str(cv_stress_cfg.get("y_key", walkforward_target)),
-                "--folds",
-                str(int(cv_stress_folds)),
-                "--train-size",
-                str(int(cv_stress_train)),
-                "--val-size",
-                str(int(cv_stress_val)),
-                "--test-size",
-                str(int(cv_stress_test)),
-                "--gap",
-                str(int(cv_stress_cfg.get("gap", cv_gap))),
-                "--purge-list",
-                str(cv_stress_cfg.get("purge_list", "0,12,24")),
-                "--embargo-list",
-                str(cv_stress_cfg.get("embargo_list", "0,12,24")),
-                "--mode",
-                str(cv_stress_cfg.get("mode", cv_mode)),
-                "--output",
-                str(summary_dir / "cv_stress_sweep.json"),
-                ]
+                cv_stress_cmd = _build_cv_stress_sweep_command(
+                    python=python,
+                    walkforward_dataset=walkforward_dataset,
+                    walkforward_target=walkforward_target,
+                    cv_stress_cfg=cv_stress_cfg,
+                    folds=cv_stress_folds,
+                    train_size=cv_stress_train,
+                    val_size=cv_stress_val,
+                    test_size=cv_stress_test,
+                    cv_gap=cv_gap,
+                    cv_mode=cv_mode,
+                    output_path=summary_dir / "cv_stress_sweep.json",
+                )
                 results.append(_run_step("cv_stress_sweep", cv_stress_cmd, logs_dir / "cv_stress_sweep.log", args.dry_run))
 
         if candidate_quality_input.exists() or args.dry_run:
@@ -4786,19 +4309,13 @@ def execute_reliability_workflow(
                             ["--policy-midband-regime-states", ",".join(direct_midband_policy_regime_states)]
                         )
 
-                    align_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(decision_model_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(aligned_candidate_input),
-                        "--meta-output",
-                        str(summary_dir / "backtest_signals_meta_ensemble_decision_aligned_meta.json"),
-                    ]
+                    align_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=decision_model_input,
+                        model_path=trade_decision_model_path,
+                        output_path=aligned_candidate_input,
+                        meta_output_path=summary_dir / "backtest_signals_meta_ensemble_decision_aligned_meta.json",
+                    )
                     align_cmd.extend(common_align_args)
                     if quality_input.exists() or args.dry_run:
                         align_cmd.extend(["--feature-source", str(quality_input)])
@@ -4847,22 +4364,15 @@ def execute_reliability_workflow(
                         )
                     )
 
-                    raw_candidate_diag_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(decision_model_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(summary_dir / "backtest_signals_meta_ensemble_policy_diagnostics_candidate_raw.csv"),
-                        "--diagnostics-output",
-                        str(summary_dir / "trade_decision_diagnostics_candidate_raw.json"),
-                        "--meta-output",
-                        str(summary_dir / "trade_decision_diagnostics_candidate_raw_meta.json"),
-                        "--diagnostics-only",
-                    ]
+                    raw_candidate_diag_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=decision_model_input,
+                        model_path=trade_decision_model_path,
+                        output_path=summary_dir / "backtest_signals_meta_ensemble_policy_diagnostics_candidate_raw.csv",
+                        diagnostics_output_path=summary_dir / "trade_decision_diagnostics_candidate_raw.json",
+                        meta_output_path=summary_dir / "trade_decision_diagnostics_candidate_raw_meta.json",
+                        diagnostics_only=True,
+                    )
                     raw_candidate_diag_cmd.extend(common_align_args)
                     if quality_input.exists() or args.dry_run:
                         raw_candidate_diag_cmd.extend(["--feature-source", str(quality_input)])
@@ -5183,76 +4693,42 @@ def execute_reliability_workflow(
                                 sweep_name = str(threshold).replace(".", "p")
                                 sweep_output = summary_dir / f"overlap_threshold_sweep_{sweep_name}.json"
                                 full_sweep_output = summary_dir / f"full_threshold_sweep_{sweep_name}.json"
-                                sweep_cmd = [
-                                    python,
-                                    "-m",
-                                    "src.scripts.run_walkforward_validation",
-                                    "--dataset-path",
-                                    str(labeled_overlap_dataset),
-                                    "--y-key",
-                                    str(walkforward_target),
-                                    "--folds",
-                                    str(int(folds_sweep)),
-                                    "--train-size",
-                                    str(int(train_sweep)),
-                                    "--val-size",
-                                    str(int(val_sweep)),
-                                    "--test-size",
-                                    str(int(test_sweep)),
-                                    "--gap",
-                                    str(int(gap_sweep)),
-                                    "--purge-size",
-                                    str(int(purge_sweep)),
-                                    "--embargo-size",
-                                    str(int(embargo_sweep)),
-                                    "--mode",
-                                    str(mode_sweep),
-                                    "--model-kind",
-                                    str(overlap_selected_model),
-                                    "--signal-threshold",
-                                    str(float(threshold)),
-                                    "--fee-bps",
-                                    str(float(compare_cfg.get("fee_bps", quality_cfg.get("walkforward_fee_bps", 2.0)))),
-                                    "--slippage-bps",
-                                    str(float(compare_cfg.get("slippage_bps", quality_cfg.get("walkforward_slippage_bps", 1.0)))),
-                                    "--output",
-                                    str(sweep_output),
-                                ]
-                                full_sweep_cmd = [
-                                    python,
-                                    "-m",
-                                    "src.scripts.run_walkforward_validation",
-                                    "--dataset-path",
-                                    str(walkforward_dataset),
-                                    "--y-key",
-                                    str(walkforward_target),
-                                    "--folds",
-                                    str(int(compare_cfg.get("folds", cv_folds))),
-                                    "--train-size",
-                                    str(int(compare_cfg.get("train_size", cv_train_size))),
-                                    "--val-size",
-                                    str(int(compare_cfg.get("val_size", cv_val_size))),
-                                    "--test-size",
-                                    str(int(compare_cfg.get("test_size", cv_test_size))),
-                                    "--gap",
-                                    str(int(compare_cfg.get("gap", cv_gap))),
-                                    "--purge-size",
-                                    str(int(compare_cfg.get("purge_size", cv_purge_size))),
-                                    "--embargo-size",
-                                    str(int(compare_cfg.get("embargo_size", cv_embargo_size))),
-                                    "--mode",
-                                    str(compare_cfg.get("mode", cv_mode)),
-                                    "--model-kind",
-                                    str(overlap_selected_model),
-                                    "--signal-threshold",
-                                    str(float(threshold)),
-                                    "--fee-bps",
-                                    str(float(compare_cfg.get("fee_bps", quality_cfg.get("walkforward_fee_bps", 2.0)))),
-                                    "--slippage-bps",
-                                    str(float(compare_cfg.get("slippage_bps", quality_cfg.get("walkforward_slippage_bps", 1.0)))),
-                                    "--output",
-                                    str(full_sweep_output),
-                                ]
+                                sweep_cmd = _build_walkforward_validation_command(
+                                    python=python,
+                                    dataset_path=labeled_overlap_dataset,
+                                    walkforward_target=walkforward_target,
+                                    folds=folds_sweep,
+                                    train_size=train_sweep,
+                                    val_size=val_sweep,
+                                    test_size=test_sweep,
+                                    gap=gap_sweep,
+                                    purge_size=purge_sweep,
+                                    embargo_size=embargo_sweep,
+                                    mode=mode_sweep,
+                                    model_kind=overlap_selected_model,
+                                    signal_threshold=float(threshold),
+                                    fee_bps=float(compare_cfg.get("fee_bps", quality_cfg.get("walkforward_fee_bps", 2.0))),
+                                    slippage_bps=float(compare_cfg.get("slippage_bps", quality_cfg.get("walkforward_slippage_bps", 1.0))),
+                                    output_path=sweep_output,
+                                )
+                                full_sweep_cmd = _build_walkforward_validation_command(
+                                    python=python,
+                                    dataset_path=walkforward_dataset,
+                                    walkforward_target=walkforward_target,
+                                    folds=int(compare_cfg.get("folds", cv_folds)),
+                                    train_size=int(compare_cfg.get("train_size", cv_train_size)),
+                                    val_size=int(compare_cfg.get("val_size", cv_val_size)),
+                                    test_size=int(compare_cfg.get("test_size", cv_test_size)),
+                                    gap=int(compare_cfg.get("gap", cv_gap)),
+                                    purge_size=int(compare_cfg.get("purge_size", cv_purge_size)),
+                                    embargo_size=int(compare_cfg.get("embargo_size", cv_embargo_size)),
+                                    mode=str(compare_cfg.get("mode", cv_mode)),
+                                    model_kind=overlap_selected_model,
+                                    signal_threshold=float(threshold),
+                                    fee_bps=float(compare_cfg.get("fee_bps", quality_cfg.get("walkforward_fee_bps", 2.0))),
+                                    slippage_bps=float(compare_cfg.get("slippage_bps", quality_cfg.get("walkforward_slippage_bps", 1.0))),
+                                    output_path=full_sweep_output,
+                                )
                                 results.append(
                                     _run_step(
                                         f"overlap_threshold_sweep_{sweep_name}",
@@ -5384,23 +4860,12 @@ def execute_reliability_workflow(
 
             if bool(feature_rel_cfg.get("enabled", True)):
                 feature_rel_input = Path(feature_rel_cfg.get("input") or str(walkforward_dataset))
-                feature_rel_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.evaluate_feature_reliability",
-                    "--input",
-                    str(feature_rel_input),
-                    "--baseline-window",
-                    str(int(feature_rel_cfg.get("baseline_window", 240))),
-                    "--recent-window",
-                    str(int(feature_rel_cfg.get("recent_window", 120))),
-                    "--min-score",
-                    str(float(feature_rel_cfg.get("min_score", 0.55))),
-                    "--max-features",
-                    str(int(feature_rel_cfg.get("max_features", 0))),
-                    "--output",
-                    str(summary_dir / "feature_reliability.json"),
-                ]
+                feature_rel_cmd = _build_feature_reliability_command(
+                    python=python,
+                    input_path=feature_rel_input,
+                    feature_cfg=feature_rel_cfg,
+                    output_path=summary_dir / "feature_reliability.json",
+                )
                 results.append(
                     _run_step(
                         "feature_reliability",
@@ -5413,29 +4878,20 @@ def execute_reliability_workflow(
             if bool(calibration_cfg.get("enabled", True)):
                 calibration_horizon_key = str(quality_cfg.get("calibration_horizon", "1h"))
                 if bool(calibration_cfg.get("regime_aware", True)):
-                    regime_calib_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.train_platt_calibration",
-                        "--horizons",
-                        *[str(h) for h in calibration_horizons],
-                        "--output-path",
-                        str(summary_dir / "platt_calibration.json"),
-                        "--coverage-output-path",
-                        str(summary_dir / "platt_calibration_coverage.json"),
-                        "--method",
-                        str(calibration_cfg.get("method", "platt")),
-                        "--labeled-input",
-                        str(quality_input),
-                        "--regime-col",
-                        str(calibration_cfg.get("regime_col", "regime_state")),
-                        "--min-regime-rows",
-                        str(int(calibration_cfg.get("min_regime_rows", 100))),
-                    ]
-                    if bool(calibration_cfg.get("fit_base_horizons_from_labeled_input", True)):
-                        regime_calib_cmd.append("--fit-base-horizons-from-labeled-input")
-                    if bool(calibration_cfg.get("skip_model_fit_when_labeled_input", True)):
-                        regime_calib_cmd.append("--skip-model-fit")
+                    regime_calib_cmd = _build_platt_calibration_command(
+                        python=python,
+                        horizons=calibration_horizons,
+                        output_path=summary_dir / "platt_calibration.json",
+                        coverage_output_path=summary_dir / "platt_calibration_coverage.json",
+                        method=str(calibration_cfg.get("method", "platt")),
+                        labeled_input=quality_input,
+                        fit_base_horizons_from_labeled_input=bool(
+                            calibration_cfg.get("fit_base_horizons_from_labeled_input", True)
+                        ),
+                        skip_model_fit=bool(calibration_cfg.get("skip_model_fit_when_labeled_input", True)),
+                        regime_col=str(calibration_cfg.get("regime_col", "regime_state")),
+                        min_regime_rows=int(calibration_cfg.get("min_regime_rows", 100)),
+                    )
                     results.append(
                         _run_step(
                             "platt_calibration_regime_aware",
@@ -5447,7 +4903,7 @@ def execute_reliability_workflow(
 
                 calibration_quality_input = quality_input
                 if bool(calibration_cfg.get("use_calibrated_input", True)):
-                    calibration_calibrated_input_path = summary_dir / "labeled_backtest.calibrated.csv"
+                    calibration_calibrated_input_path = summary_dir / "labeled_backtest.calibration_calibrated.csv"
                     calibration_input_status: Dict[str, Any] | None = None
                     if not args.dry_run and quality_input.exists() and (summary_dir / "platt_calibration.json").exists():
                         try:
@@ -5569,25 +5025,16 @@ def execute_reliability_workflow(
             if bool(regime_weakness_cfg.get("enabled", True)):
                 calibration_path = summary_dir / "calibration_robustness.json"
                 if (calibration_path.exists() and walkforward_output.exists()) or args.dry_run:
-                    regime_weakness_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_regime_weakness",
-                        "--calibration",
-                        str(calibration_path),
-                        "--walkforward",
-                        str(walkforward_output),
-                        "--horizon",
-                        str(calibration_horizon_key),
-                        "--max-ece-drift",
-                        str(float(regime_weakness_cfg.get("max_ece_drift", calibration_cfg.get("max_ece_drift", 0.02)))),
-                        "--min-recent-auc",
-                        str(float(quality_cfg.get("min_recent_auc", 0.0))),
-                        "--min-net-return",
-                        str(float(regime_weakness_cfg.get("min_net_return", 0.0))),
-                        "--output",
-                        str(summary_dir / "regime_weakness.json"),
-                    ]
+                    regime_weakness_cmd = _build_regime_weakness_command(
+                        python=python,
+                        calibration_path=calibration_path,
+                        walkforward_path=walkforward_output,
+                        horizon_key=calibration_horizon_key,
+                        regime_weakness_cfg=regime_weakness_cfg,
+                        calibration_cfg=calibration_cfg,
+                        quality_cfg=quality_cfg,
+                        output_path=summary_dir / "regime_weakness.json",
+                    )
                     results.append(
                         _run_step(
                             "regime_weakness",
@@ -5744,62 +5191,57 @@ def execute_reliability_workflow(
                                 file=sys.stderr,
                             )
 
-                    baseline_diag_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(baseline_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(summary_dir / "backtest_signals_baseline_policy_diagnostics.csv"),
-                        "--diagnostics-output",
-                        str(summary_dir / "trade_decision_diagnostics_baseline.json"),
-                        "--meta-output",
-                        str(summary_dir / "trade_decision_diagnostics_baseline_meta.json"),
-                        "--diagnostics-only",
-                        "--threshold",
-                        str(resolved_trade_decision_threshold),
-                        "--fee-bps",
-                        str(float(quality_cfg.get("walkforward_fee_bps", 2.0))),
-                        "--slippage-bps",
-                        str(float(quality_cfg.get("walkforward_slippage_bps", 1.0))),
-                        "--replace-threshold-rule",
-                        "1" if bool(trade_policy_cfg.get("replace_threshold_rule", True)) else "0",
-                        "--require-direction-ret-alignment",
-                        "1" if bool(trade_policy_cfg.get("require_direction_ret_alignment", True)) else "0",
-                        "--use-oof-expected-value",
-                        "1" if bool(trade_policy_cfg.get("use_oof_expected_value", True)) else "0",
-                        "--oof-expected-value-mode",
-                        str(trade_policy_cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")),
-                        "--enforce-positive-oof-envelope",
-                        "1" if bool(trade_policy_cfg.get("enforce_positive_oof_envelope", False)) else "0",
-                        "--positive-oof-envelope-mode",
-                        str(trade_policy_cfg.get("positive_oof_envelope_mode", "strict_positive_bin")),
-                        "--block-when-no-positive-oof-bin",
-                        "1" if bool(trade_policy_cfg.get("block_when_no_positive_oof_bin", True)) else "0",
-                        "--positive-oof-min-samples",
-                        str(int(trade_policy_cfg.get("positive_oof_min_samples", 4))),
-                        "--allow-raw-ev-fallback-when-no-positive-oof-bin",
-                        "1" if bool(trade_policy_cfg.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False)) else "0",
-                        "--raw-ev-fallback-quantile",
-                        str(float(trade_policy_cfg.get("raw_ev_fallback_quantile", 0.9))),
-                        "--raw-ev-fallback-min-edge-over-fee",
-                        str(float(trade_policy_cfg.get("raw_ev_fallback_min_edge_over_fee", 0.0))),
-                        "--min-expected-net",
-                        str(float(trade_policy_cfg.get("min_expected_net", 0.0))),
-                        "--min-edge-over-fee",
-                        str(float(trade_policy_cfg.get("min_edge_over_fee", 0.0))),
-                        "--policy-midband-veto",
-                        "1" if direct_midband_policy_enabled else "0",
-                        "--policy-midband-pup-low",
-                        str(direct_midband_policy_low),
-                        "--policy-midband-pup-high",
-                        str(direct_midband_policy_high),
-                        "--policy-midband-high-inclusive",
-                        "1" if direct_midband_policy_high_inclusive else "0",
-                    ]
+                    baseline_diag_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=baseline_input,
+                        model_path=trade_decision_model_path,
+                        output_path=summary_dir / "backtest_signals_baseline_policy_diagnostics.csv",
+                        diagnostics_output_path=summary_dir / "trade_decision_diagnostics_baseline.json",
+                        meta_output_path=summary_dir / "trade_decision_diagnostics_baseline_meta.json",
+                        diagnostics_only=True,
+                        extra_args=[
+                            "--threshold",
+                            str(resolved_trade_decision_threshold),
+                            "--fee-bps",
+                            str(float(quality_cfg.get("walkforward_fee_bps", 2.0))),
+                            "--slippage-bps",
+                            str(float(quality_cfg.get("walkforward_slippage_bps", 1.0))),
+                            "--replace-threshold-rule",
+                            "1" if bool(trade_policy_cfg.get("replace_threshold_rule", True)) else "0",
+                            "--require-direction-ret-alignment",
+                            "1" if bool(trade_policy_cfg.get("require_direction_ret_alignment", True)) else "0",
+                            "--use-oof-expected-value",
+                            "1" if bool(trade_policy_cfg.get("use_oof_expected_value", True)) else "0",
+                            "--oof-expected-value-mode",
+                            str(trade_policy_cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")),
+                            "--enforce-positive-oof-envelope",
+                            "1" if bool(trade_policy_cfg.get("enforce_positive_oof_envelope", False)) else "0",
+                            "--positive-oof-envelope-mode",
+                            str(trade_policy_cfg.get("positive_oof_envelope_mode", "strict_positive_bin")),
+                            "--block-when-no-positive-oof-bin",
+                            "1" if bool(trade_policy_cfg.get("block_when_no_positive_oof_bin", True)) else "0",
+                            "--positive-oof-min-samples",
+                            str(int(trade_policy_cfg.get("positive_oof_min_samples", 4))),
+                            "--allow-raw-ev-fallback-when-no-positive-oof-bin",
+                            "1" if bool(trade_policy_cfg.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False)) else "0",
+                            "--raw-ev-fallback-quantile",
+                            str(float(trade_policy_cfg.get("raw_ev_fallback_quantile", 0.9))),
+                            "--raw-ev-fallback-min-edge-over-fee",
+                            str(float(trade_policy_cfg.get("raw_ev_fallback_min_edge_over_fee", 0.0))),
+                            "--min-expected-net",
+                            str(float(trade_policy_cfg.get("min_expected_net", 0.0))),
+                            "--min-edge-over-fee",
+                            str(float(trade_policy_cfg.get("min_edge_over_fee", 0.0))),
+                            "--policy-midband-veto",
+                            "1" if direct_midband_policy_enabled else "0",
+                            "--policy-midband-pup-low",
+                            str(direct_midband_policy_low),
+                            "--policy-midband-pup-high",
+                            str(direct_midband_policy_high),
+                            "--policy-midband-high-inclusive",
+                            "1" if direct_midband_policy_high_inclusive else "0",
+                        ],
+                    )
                     if direct_midband_policy_min_abs_ret_pred is not None:
                         baseline_diag_cmd.extend(
                             ["--policy-midband-min-abs-ret-pred", str(float(direct_midband_policy_min_abs_ret_pred))]
@@ -5829,59 +5271,55 @@ def execute_reliability_workflow(
 
                     # Build a policy-aligned incumbent artifact for informational (non-gating) companion analysis.
                     incumbent_aligned_path = summary_dir / "backtest_signals_incumbent_decision_aligned.csv"
-                    incumbent_aligned_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(baseline_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(incumbent_aligned_path),
-                        "--meta-output",
-                        str(summary_dir / "backtest_signals_incumbent_decision_aligned_meta.json"),
-                        "--threshold",
-                        str(resolved_trade_decision_threshold),
-                        "--fee-bps",
-                        str(float(quality_cfg.get("walkforward_fee_bps", 2.0))),
-                        "--slippage-bps",
-                        str(float(quality_cfg.get("walkforward_slippage_bps", 1.0))),
-                        "--replace-threshold-rule",
-                        "1" if bool(trade_policy_cfg.get("replace_threshold_rule", True)) else "0",
-                        "--require-direction-ret-alignment",
-                        "1" if bool(trade_policy_cfg.get("require_direction_ret_alignment", True)) else "0",
-                        "--use-oof-expected-value",
-                        "1" if bool(trade_policy_cfg.get("use_oof_expected_value", True)) else "0",
-                        "--oof-expected-value-mode",
-                        str(trade_policy_cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")),
-                        "--enforce-positive-oof-envelope",
-                        "1" if bool(trade_policy_cfg.get("enforce_positive_oof_envelope", False)) else "0",
-                        "--positive-oof-envelope-mode",
-                        str(trade_policy_cfg.get("positive_oof_envelope_mode", "strict_positive_bin")),
-                        "--block-when-no-positive-oof-bin",
-                        "1" if bool(trade_policy_cfg.get("block_when_no_positive_oof_bin", True)) else "0",
-                        "--positive-oof-min-samples",
-                        str(int(trade_policy_cfg.get("positive_oof_min_samples", 4))),
-                        "--allow-raw-ev-fallback-when-no-positive-oof-bin",
-                        "1" if bool(trade_policy_cfg.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False)) else "0",
-                        "--raw-ev-fallback-quantile",
-                        str(float(trade_policy_cfg.get("raw_ev_fallback_quantile", 0.9))),
-                        "--raw-ev-fallback-min-edge-over-fee",
-                        str(float(trade_policy_cfg.get("raw_ev_fallback_min_edge_over_fee", 0.0))),
-                        "--min-expected-net",
-                        str(float(trade_policy_cfg.get("min_expected_net", 0.0))),
-                        "--min-edge-over-fee",
-                        str(float(trade_policy_cfg.get("min_edge_over_fee", 0.0))),
-                        "--policy-midband-veto",
-                        "1" if direct_midband_policy_enabled else "0",
-                        "--policy-midband-pup-low",
-                        str(direct_midband_policy_low),
-                        "--policy-midband-pup-high",
-                        str(direct_midband_policy_high),
-                        "--policy-midband-high-inclusive",
-                        "1" if direct_midband_policy_high_inclusive else "0",
-                    ]
+                    incumbent_aligned_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=baseline_input,
+                        model_path=trade_decision_model_path,
+                        output_path=incumbent_aligned_path,
+                        meta_output_path=summary_dir / "backtest_signals_incumbent_decision_aligned_meta.json",
+                        extra_args=[
+                            "--threshold",
+                            str(resolved_trade_decision_threshold),
+                            "--fee-bps",
+                            str(float(quality_cfg.get("walkforward_fee_bps", 2.0))),
+                            "--slippage-bps",
+                            str(float(quality_cfg.get("walkforward_slippage_bps", 1.0))),
+                            "--replace-threshold-rule",
+                            "1" if bool(trade_policy_cfg.get("replace_threshold_rule", True)) else "0",
+                            "--require-direction-ret-alignment",
+                            "1" if bool(trade_policy_cfg.get("require_direction_ret_alignment", True)) else "0",
+                            "--use-oof-expected-value",
+                            "1" if bool(trade_policy_cfg.get("use_oof_expected_value", True)) else "0",
+                            "--oof-expected-value-mode",
+                            str(trade_policy_cfg.get("oof_expected_value_mode", "max_with_raw_calibrated")),
+                            "--enforce-positive-oof-envelope",
+                            "1" if bool(trade_policy_cfg.get("enforce_positive_oof_envelope", False)) else "0",
+                            "--positive-oof-envelope-mode",
+                            str(trade_policy_cfg.get("positive_oof_envelope_mode", "strict_positive_bin")),
+                            "--block-when-no-positive-oof-bin",
+                            "1" if bool(trade_policy_cfg.get("block_when_no_positive_oof_bin", True)) else "0",
+                            "--positive-oof-min-samples",
+                            str(int(trade_policy_cfg.get("positive_oof_min_samples", 4))),
+                            "--allow-raw-ev-fallback-when-no-positive-oof-bin",
+                            "1" if bool(trade_policy_cfg.get("allow_raw_ev_fallback_when_no_positive_oof_bin", False)) else "0",
+                            "--raw-ev-fallback-quantile",
+                            str(float(trade_policy_cfg.get("raw_ev_fallback_quantile", 0.9))),
+                            "--raw-ev-fallback-min-edge-over-fee",
+                            str(float(trade_policy_cfg.get("raw_ev_fallback_min_edge_over_fee", 0.0))),
+                            "--min-expected-net",
+                            str(float(trade_policy_cfg.get("min_expected_net", 0.0))),
+                            "--min-edge-over-fee",
+                            str(float(trade_policy_cfg.get("min_edge_over_fee", 0.0))),
+                            "--policy-midband-veto",
+                            "1" if direct_midband_policy_enabled else "0",
+                            "--policy-midband-pup-low",
+                            str(direct_midband_policy_low),
+                            "--policy-midband-pup-high",
+                            str(direct_midband_policy_high),
+                            "--policy-midband-high-inclusive",
+                            "1" if direct_midband_policy_high_inclusive else "0",
+                        ],
+                    )
                     if direct_midband_policy_min_abs_ret_pred is not None:
                         incumbent_aligned_cmd.extend(
                             ["--policy-midband-min-abs-ret-pred", str(float(direct_midband_policy_min_abs_ret_pred))]
@@ -5912,27 +5350,17 @@ def execute_reliability_workflow(
                     companion_candidate_input = str(candidate_input)
                     companion_baseline_input = str(incumbent_aligned_path)
                     official_profile_summary_path = summary_dir / "official_profile_policy_metrics.json"
-                    companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(companion_candidate_input),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_companion.json"),
-                    ]
+                    companion_cmd = _build_champion_challenger_command(
+                        python=python,
+                        baseline_path=companion_baseline_input,
+                        candidate_path=companion_candidate_input,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        output_path=summary_dir / "champion_challenger_policy_aligned_companion.json",
+                    )
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_companion",
@@ -6004,23 +5432,15 @@ def execute_reliability_workflow(
                             )
                         )
 
-                    paired_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(companion_candidate_input),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned.json"),
-                    ]
+                    paired_overlap_cmd = _build_paired_trigger_overlap_command(
+                        python=python,
+                        candidate_path=companion_candidate_input,
+                        incumbent_path=companion_baseline_input,
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        incumbent_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        output_path=summary_dir / "paired_trigger_overlap_policy_aligned.json",
+                    )
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned",
@@ -6141,28 +5561,28 @@ def execute_reliability_workflow(
                     if volatility_only_veto_min_volatility_cfg is not None:
                         volatility_only_min_volatility = float(volatility_only_veto_min_volatility_cfg)
 
-                    broad_shadow_candidate_path = summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_veto.csv"
-                    broad_shadow_meta_path = summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_veto_meta.json"
-                    broad_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(broad_shadow_candidate_path),
-                        "--meta-output",
-                        str(broad_shadow_meta_path),
-                    ]
-                    broad_shadow_build_cmd.extend(common_align_args)
+                    shadow_feature_sources: List[Path] = []
                     if quality_input.exists() or args.dry_run:
-                        broad_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
+                        shadow_feature_sources.append(quality_input)
                     if incumbent_backtest_for_features:
-                        broad_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    broad_shadow_build_cmd.extend(
-                        [
+                        shadow_feature_sources.append(incumbent_backtest_for_features)
+
+                    broad_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
                             "--weak-band-candidate-only-veto",
                             "1",
                             "--weak-band-pup-low",
@@ -6173,95 +5593,53 @@ def execute_reliability_workflow(
                             "1" if weak_veto_high_inclusive else "0",
                             "--weak-band-incumbent-reference",
                             str(companion_baseline_input),
-                        ]
+                        ],
                     )
+                    broad_shadow_candidate_path = broad_shadow_bundle.candidate_path
+                    broad_shadow_meta_path = broad_shadow_bundle.meta_output_path
                     results.append(
                         _run_step(
                             "build_shadow_veto_candidate_band",
-                            broad_shadow_build_cmd,
+                            broad_shadow_bundle.build_command,
                             logs_dir / "build_shadow_veto_candidate_band.log",
                             args.dry_run,
                         )
                     )
 
-                    broad_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(broad_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_veto_companion",
-                            broad_shadow_companion_cmd,
+                            broad_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_veto_companion.log",
                             args.dry_run,
                         )
                     )
 
-                    broad_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(broad_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_veto",
-                            broad_shadow_overlap_cmd,
+                            broad_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_veto.log",
                             args.dry_run,
                         )
                     )
 
-                    refined_shadow_candidate_path = summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_refined_veto.csv"
-                    refined_shadow_meta_path = summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_refined_veto_meta.json"
-                    refined_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(refined_shadow_candidate_path),
-                        "--meta-output",
-                        str(refined_shadow_meta_path),
-                    ]
-                    refined_shadow_build_cmd.extend(common_align_args)
-                    if quality_input.exists() or args.dry_run:
-                        refined_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
-                    if incumbent_backtest_for_features:
-                        refined_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    refined_shadow_build_cmd.extend(
-                        [
+                    refined_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="refined_veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
                             "--refined-candidate-only-veto",
                             "1",
                             "--refined-pup-low",
@@ -6274,95 +5652,52 @@ def execute_reliability_workflow(
                             str(refined_veto_min_abs_ret_pred),
                             "--refined-incumbent-reference",
                             str(refined_veto_reference_path_cfg or companion_baseline_input),
-                        ]
+                        ],
                     )
+                    refined_shadow_candidate_path = refined_shadow_bundle.candidate_path
                     results.append(
                         _run_step(
                             "build_shadow_refined_veto_candidate_band",
-                            refined_shadow_build_cmd,
+                            refined_shadow_bundle.build_command,
                             logs_dir / "build_shadow_refined_veto_candidate_band.log",
                             args.dry_run,
                         )
                     )
 
-                    refined_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(refined_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_refined_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_refined_veto_companion",
-                            refined_shadow_companion_cmd,
+                            refined_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_refined_veto_companion.log",
                             args.dry_run,
                         )
                     )
 
-                    refined_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(refined_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_refined_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_refined_veto",
-                            refined_shadow_overlap_cmd,
+                            refined_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_refined_veto.log",
                             args.dry_run,
                         )
                     )
 
-                    midband_shadow_candidate_path = summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_midband_veto.csv"
-                    midband_shadow_meta_path = summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_midband_veto_meta.json"
-                    midband_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(midband_shadow_candidate_path),
-                        "--meta-output",
-                        str(midband_shadow_meta_path),
-                    ]
-                    midband_shadow_build_cmd.extend(common_align_args)
-                    if quality_input.exists() or args.dry_run:
-                        midband_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
-                    if incumbent_backtest_for_features:
-                        midband_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    midband_shadow_build_cmd.extend(
-                        [
+                    midband_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="midband_veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
                             "--midband-candidate-only-veto",
                             "1",
                             "--midband-pup-low",
@@ -6377,95 +5712,53 @@ def execute_reliability_workflow(
                             str(midband_veto_max_abs_ret_pred),
                             "--midband-incumbent-reference",
                             str(midband_veto_reference_path_cfg or companion_baseline_input),
-                        ]
+                        ],
                     )
+                    midband_shadow_candidate_path = midband_shadow_bundle.candidate_path
+                    midband_shadow_meta_path = midband_shadow_bundle.meta_output_path
                     results.append(
                         _run_step(
                             "build_shadow_midband_veto_candidate_band",
-                            midband_shadow_build_cmd,
+                            midband_shadow_bundle.build_command,
                             logs_dir / "build_shadow_midband_veto_candidate_band.log",
                             args.dry_run,
                         )
                     )
 
-                    midband_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(midband_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_midband_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_midband_veto_companion",
-                            midband_shadow_companion_cmd,
+                            midband_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_midband_veto_companion.log",
                             args.dry_run,
                         )
                     )
 
-                    midband_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(midband_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_midband_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_midband_veto",
-                            midband_shadow_overlap_cmd,
+                            midband_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_midband_veto.log",
                             args.dry_run,
                         )
                     )
 
-                    raw_ev_shadow_candidate_path = summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_raw_ev_veto.csv"
-                    raw_ev_shadow_meta_path = summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_raw_ev_veto_meta.json"
-                    raw_ev_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(raw_ev_shadow_candidate_path),
-                        "--meta-output",
-                        str(raw_ev_shadow_meta_path),
-                    ]
-                    raw_ev_shadow_build_cmd.extend(common_align_args)
-                    if quality_input.exists() or args.dry_run:
-                        raw_ev_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
-                    if incumbent_backtest_for_features:
-                        raw_ev_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    raw_ev_shadow_build_cmd.extend(
-                        [
+                    raw_ev_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="raw_ev_veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
                             "--raw-ev-sign-candidate-only-veto",
                             "1",
                             "--raw-ev-sign-pup-low",
@@ -6478,68 +5771,31 @@ def execute_reliability_workflow(
                             str(raw_ev_veto_max),
                             "--raw-ev-sign-incumbent-reference",
                             str(raw_ev_veto_reference_path_cfg or companion_baseline_input),
-                        ]
+                        ],
                     )
+                    raw_ev_shadow_candidate_path = raw_ev_shadow_bundle.candidate_path
                     results.append(
                         _run_step(
                             "build_shadow_raw_ev_veto_candidate_band",
-                            raw_ev_shadow_build_cmd,
+                            raw_ev_shadow_bundle.build_command,
                             logs_dir / "build_shadow_raw_ev_veto_candidate_band.log",
                             args.dry_run,
                         )
                     )
 
-                    raw_ev_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(raw_ev_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_raw_ev_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_raw_ev_veto_companion",
-                            raw_ev_shadow_companion_cmd,
+                            raw_ev_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_raw_ev_veto_companion.log",
                             args.dry_run,
                         )
                     )
 
-                    raw_ev_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(raw_ev_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_raw_ev_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_raw_ev_veto",
-                            raw_ev_shadow_overlap_cmd,
+                            raw_ev_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_raw_ev_veto.log",
                             args.dry_run,
                         )
@@ -6551,26 +5807,34 @@ def execute_reliability_workflow(
                     direction_align_shadow_meta_path = (
                         summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_direction_align_veto_meta.json"
                     )
-                    direction_align_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(direction_align_shadow_candidate_path),
-                        "--meta-output",
-                        str(direction_align_shadow_meta_path),
-                    ]
+                    direction_align_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        output_path=direction_align_shadow_candidate_path,
+                        meta_output_path=direction_align_shadow_meta_path,
+                    )
                     direction_align_shadow_build_cmd.extend(common_align_args)
                     if quality_input.exists() or args.dry_run:
                         direction_align_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
                     if incumbent_backtest_for_features:
                         direction_align_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    direction_align_shadow_build_cmd.extend(
-                        [
+                    direction_align_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="direction_align_veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
                             "--direction-align-candidate-only-veto",
                             "1",
                             "--direction-align-pup-low",
@@ -6589,68 +5853,29 @@ def execute_reliability_workflow(
                             str(direction_align_veto_max_abs_ret_pred),
                             "--direction-align-incumbent-reference",
                             str(direction_align_veto_reference_path_cfg or companion_baseline_input),
-                        ]
+                        ],
                     )
+                    direction_align_shadow_candidate_path = direction_align_shadow_bundle.candidate_path
                     results.append(
                         _run_step(
                             "build_shadow_direction_align_veto_candidate_band",
-                            direction_align_shadow_build_cmd,
+                            direction_align_shadow_bundle.build_command,
                             logs_dir / "build_shadow_direction_align_veto_candidate_band.log",
                             args.dry_run,
                         )
                     )
-
-                    direction_align_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(direction_align_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_direction_align_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_direction_align_veto_companion",
-                            direction_align_shadow_companion_cmd,
+                            direction_align_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_direction_align_veto_companion.log",
                             args.dry_run,
                         )
                     )
-
-                    direction_align_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(direction_align_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_direction_align_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_direction_align_veto",
-                            direction_align_shadow_overlap_cmd,
+                            direction_align_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_direction_align_veto.log",
                             args.dry_run,
                         )
@@ -6662,26 +5887,34 @@ def execute_reliability_workflow(
                     joint_direction_midband_shadow_meta_path = (
                         summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_joint_direction_midband_veto_meta.json"
                     )
-                    joint_direction_midband_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(joint_direction_midband_shadow_candidate_path),
-                        "--meta-output",
-                        str(joint_direction_midband_shadow_meta_path),
-                    ]
+                    joint_direction_midband_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        output_path=joint_direction_midband_shadow_candidate_path,
+                        meta_output_path=joint_direction_midband_shadow_meta_path,
+                    )
                     joint_direction_midband_shadow_build_cmd.extend(common_align_args)
                     if quality_input.exists() or args.dry_run:
                         joint_direction_midband_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
                     if incumbent_backtest_for_features:
                         joint_direction_midband_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    joint_direction_midband_shadow_build_cmd.extend(
-                        [
+                    joint_direction_midband_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="joint_direction_midband_veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
                             "--joint-direction-midband-candidate-only-veto",
                             "1",
                             "--joint-direction-midband-pup-low",
@@ -6698,68 +5931,29 @@ def execute_reliability_workflow(
                             str(joint_direction_midband_veto_max_abs_ret_pred),
                             "--joint-direction-midband-incumbent-reference",
                             str(joint_direction_midband_veto_reference_path_cfg or companion_baseline_input),
-                        ]
+                        ],
                     )
+                    joint_direction_midband_shadow_candidate_path = joint_direction_midband_shadow_bundle.candidate_path
                     results.append(
                         _run_step(
                             "build_shadow_joint_direction_midband_veto_candidate_band",
-                            joint_direction_midband_shadow_build_cmd,
+                            joint_direction_midband_shadow_bundle.build_command,
                             logs_dir / "build_shadow_joint_direction_midband_veto_candidate_band.log",
                             args.dry_run,
                         )
                     )
-
-                    joint_direction_midband_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(joint_direction_midband_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_joint_direction_midband_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_joint_direction_midband_veto_companion",
-                            joint_direction_midband_shadow_companion_cmd,
+                            joint_direction_midband_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_joint_direction_midband_veto_companion.log",
                             args.dry_run,
                         )
                     )
-
-                    joint_direction_midband_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(joint_direction_midband_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_joint_direction_midband_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_joint_direction_midband_veto",
-                            joint_direction_midband_shadow_overlap_cmd,
+                            joint_direction_midband_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_joint_direction_midband_veto.log",
                             args.dry_run,
                         )
@@ -6771,26 +5965,34 @@ def execute_reliability_workflow(
                     regime_state_shadow_meta_path = (
                         summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_regime_state_veto_meta.json"
                     )
-                    regime_state_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(regime_state_shadow_candidate_path),
-                        "--meta-output",
-                        str(regime_state_shadow_meta_path),
-                    ]
+                    regime_state_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        output_path=regime_state_shadow_candidate_path,
+                        meta_output_path=regime_state_shadow_meta_path,
+                    )
                     regime_state_shadow_build_cmd.extend(common_align_args)
                     if quality_input.exists() or args.dry_run:
                         regime_state_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
                     if incumbent_backtest_for_features:
                         regime_state_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    regime_state_shadow_build_cmd.extend(
-                        [
+                    regime_state_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="regime_state_veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
                             "--regime-state-candidate-only-veto",
                             "1",
                             "--regime-state-pup-low",
@@ -6809,68 +6011,29 @@ def execute_reliability_workflow(
                             str(regime_state_veto_max_abs_ret_pred),
                             "--regime-state-incumbent-reference",
                             str(regime_state_veto_reference_path_cfg or companion_baseline_input),
-                        ]
+                        ],
                     )
+                    regime_state_shadow_candidate_path = regime_state_shadow_bundle.candidate_path
                     results.append(
                         _run_step(
                             "build_shadow_regime_state_veto_candidate_band",
-                            regime_state_shadow_build_cmd,
+                            regime_state_shadow_bundle.build_command,
                             logs_dir / "build_shadow_regime_state_veto_candidate_band.log",
                             args.dry_run,
                         )
                     )
-
-                    regime_state_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(regime_state_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_regime_state_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_regime_state_veto_companion",
-                            regime_state_shadow_companion_cmd,
+                            regime_state_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_regime_state_veto_companion.log",
                             args.dry_run,
                         )
                     )
-
-                    regime_state_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(regime_state_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_regime_state_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_regime_state_veto",
-                            regime_state_shadow_overlap_cmd,
+                            regime_state_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_regime_state_veto.log",
                             args.dry_run,
                         )
@@ -6882,19 +6045,13 @@ def execute_reliability_workflow(
                     chop_high_vol_shadow_meta_path = (
                         summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_chop_high_vol_veto_meta.json"
                     )
-                    chop_high_vol_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(chop_high_vol_shadow_candidate_path),
-                        "--meta-output",
-                        str(chop_high_vol_shadow_meta_path),
-                    ]
+                    chop_high_vol_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        output_path=chop_high_vol_shadow_candidate_path,
+                        meta_output_path=chop_high_vol_shadow_meta_path,
+                    )
                     chop_high_vol_shadow_build_cmd.extend(common_align_args)
                     if quality_input.exists() or args.dry_run:
                         chop_high_vol_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
@@ -6926,66 +6083,67 @@ def execute_reliability_workflow(
                             str(chop_high_vol_veto_reference_path_cfg or companion_baseline_input),
                         ]
                     )
+                    chop_high_vol_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="chop_high_vol_veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
+                            "--chop-high-vol-candidate-only-veto",
+                            "1",
+                            "--chop-high-vol-pup-low",
+                            str(chop_high_vol_veto_low),
+                            "--chop-high-vol-pup-high",
+                            str(chop_high_vol_veto_high),
+                            "--chop-high-vol-high-inclusive",
+                            "1" if chop_high_vol_veto_high_inclusive else "0",
+                            "--chop-high-vol-regime-state",
+                            str(chop_high_vol_veto_regime_state),
+                            "--chop-high-vol-volatility-col",
+                            str(chop_high_vol_veto_volatility_col),
+                            "--chop-high-vol-min-volatility",
+                            str(selected_high_volatility_threshold if selected_high_volatility_threshold is not None else "nan"),
+                            "--chop-high-vol-use-midband-slice",
+                            "1" if chop_high_vol_veto_use_midband_slice else "0",
+                            "--chop-high-vol-min-abs-ret-pred",
+                            str(chop_high_vol_veto_min_abs_ret_pred),
+                            "--chop-high-vol-max-abs-ret-pred",
+                            str(chop_high_vol_veto_max_abs_ret_pred),
+                            "--chop-high-vol-incumbent-reference",
+                            str(chop_high_vol_veto_reference_path_cfg or companion_baseline_input),
+                        ],
+                    )
+                    chop_high_vol_shadow_candidate_path = chop_high_vol_shadow_bundle.candidate_path
                     results.append(
                         _run_step(
                             "build_shadow_chop_high_vol_veto_candidate_band",
-                            chop_high_vol_shadow_build_cmd,
+                            chop_high_vol_shadow_bundle.build_command,
                             logs_dir / "build_shadow_chop_high_vol_veto_candidate_band.log",
                             args.dry_run,
                         )
                     )
-
-                    chop_high_vol_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(chop_high_vol_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_chop_high_vol_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_chop_high_vol_veto_companion",
-                            chop_high_vol_shadow_companion_cmd,
+                            chop_high_vol_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_chop_high_vol_veto_companion.log",
                             args.dry_run,
                         )
                     )
-
-                    chop_high_vol_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(chop_high_vol_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_chop_high_vol_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_chop_high_vol_veto",
-                            chop_high_vol_shadow_overlap_cmd,
+                            chop_high_vol_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_chop_high_vol_veto.log",
                             args.dry_run,
                         )
@@ -6997,26 +6155,34 @@ def execute_reliability_workflow(
                     volatility_only_shadow_meta_path = (
                         summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_volatility_only_veto_meta.json"
                     )
-                    volatility_only_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(volatility_only_shadow_candidate_path),
-                        "--meta-output",
-                        str(volatility_only_shadow_meta_path),
-                    ]
+                    volatility_only_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        output_path=volatility_only_shadow_candidate_path,
+                        meta_output_path=volatility_only_shadow_meta_path,
+                    )
                     volatility_only_shadow_build_cmd.extend(common_align_args)
                     if quality_input.exists() or args.dry_run:
                         volatility_only_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
                     if incumbent_backtest_for_features:
                         volatility_only_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    volatility_only_shadow_build_cmd.extend(
-                        [
+                    volatility_only_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="volatility_only_veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
                             "--volatility-only-candidate-only-veto",
                             "1",
                             "--volatility-only-pup-low",
@@ -7037,68 +6203,29 @@ def execute_reliability_workflow(
                             str(volatility_only_veto_max_abs_ret_pred),
                             "--volatility-only-incumbent-reference",
                             str(volatility_only_veto_reference_path_cfg or companion_baseline_input),
-                        ]
+                        ],
                     )
+                    volatility_only_shadow_candidate_path = volatility_only_shadow_bundle.candidate_path
                     results.append(
                         _run_step(
                             "build_shadow_volatility_only_veto_candidate_band",
-                            volatility_only_shadow_build_cmd,
+                            volatility_only_shadow_bundle.build_command,
                             logs_dir / "build_shadow_volatility_only_veto_candidate_band.log",
                             args.dry_run,
                         )
                     )
-
-                    volatility_only_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(volatility_only_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_volatility_only_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_volatility_only_veto_companion",
-                            volatility_only_shadow_companion_cmd,
+                            volatility_only_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_volatility_only_veto_companion.log",
                             args.dry_run,
                         )
                     )
-
-                    volatility_only_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(volatility_only_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_volatility_only_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_volatility_only_veto",
-                            volatility_only_shadow_overlap_cmd,
+                            volatility_only_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_volatility_only_veto.log",
                             args.dry_run,
                         )
@@ -7217,26 +6344,22 @@ def execute_reliability_workflow(
                         summary_dir
                         / "backtest_signals_meta_ensemble_decision_aligned_shadow_triggered_regime_volatility_veto_meta.json"
                     )
-                    triggered_regime_volatility_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(triggered_regime_volatility_shadow_candidate_path),
-                        "--meta-output",
-                        str(triggered_regime_volatility_shadow_meta_path),
-                    ]
-                    triggered_regime_volatility_shadow_build_cmd.extend(common_align_args)
-                    if quality_input.exists() or args.dry_run:
-                        triggered_regime_volatility_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
-                    if incumbent_backtest_for_features:
-                        triggered_regime_volatility_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    triggered_regime_volatility_shadow_build_cmd.extend(
-                        [
+                    triggered_regime_volatility_shadow_bundle = _build_shadow_policy_command_bundle(
+                        python=python,
+                        variant_name="triggered_regime_volatility_veto",
+                        candidate_input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        companion_baseline_path=companion_baseline_input,
+                        summary_dir=summary_dir,
+                        common_align_args=common_align_args,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        feature_sources=shadow_feature_sources,
+                        extra_policy_args=[
                             "--triggered-regime-volatility-veto",
                             "1",
                             "--triggered-regime-volatility-regimes",
@@ -7247,68 +6370,29 @@ def execute_reliability_workflow(
                             str(recent_triggered_rule.get("volatility_col", "volatility_realized_24h")),
                             "--triggered-regime-volatility-min-volatility",
                             str(recent_triggered_rule.get("min_volatility")),
-                        ]
+                        ],
                     )
+                    triggered_regime_volatility_shadow_candidate_path = triggered_regime_volatility_shadow_bundle.candidate_path
                     results.append(
                         _run_step(
                             "build_shadow_triggered_regime_volatility_veto",
-                            triggered_regime_volatility_shadow_build_cmd,
+                            triggered_regime_volatility_shadow_bundle.build_command,
                             logs_dir / "build_shadow_triggered_regime_volatility_veto.log",
                             args.dry_run,
                         )
                     )
-
-                    triggered_regime_volatility_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(triggered_regime_volatility_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_triggered_regime_volatility_veto_companion.json"),
-                    ]
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_triggered_regime_volatility_veto_companion",
-                            triggered_regime_volatility_shadow_companion_cmd,
+                            triggered_regime_volatility_shadow_bundle.companion_command,
                             logs_dir / "champion_challenger_policy_aligned_shadow_triggered_regime_volatility_veto_companion.log",
                             args.dry_run,
                         )
                     )
-
-                    triggered_regime_volatility_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(triggered_regime_volatility_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_triggered_regime_volatility_veto.json"),
-                    ]
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_triggered_regime_volatility_veto",
-                            triggered_regime_volatility_shadow_overlap_cmd,
+                            triggered_regime_volatility_shadow_bundle.overlap_command,
                             logs_dir / "paired_trigger_overlap_policy_aligned_shadow_triggered_regime_volatility_veto.log",
                             args.dry_run,
                         )
@@ -7715,27 +6799,17 @@ def execute_reliability_workflow(
                         rules=selection_guard_rules,
                     )
                 if selection_guard_enabled and selection_guard_rules and (selection_guard_candidate_path.exists() or args.dry_run):
-                    selection_guard_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(selection_guard_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / "champion_challenger_policy_aligned_shadow_selection_calibration_guard_companion.json"),
-                    ]
+                    selection_guard_companion_cmd = _build_champion_challenger_command(
+                        python=python,
+                        baseline_path=companion_baseline_input,
+                        candidate_path=selection_guard_candidate_path,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        output_path=summary_dir / "champion_challenger_policy_aligned_shadow_selection_calibration_guard_companion.json",
+                    )
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_selection_calibration_guard_companion",
@@ -7744,23 +6818,15 @@ def execute_reliability_workflow(
                             args.dry_run,
                         )
                     )
-                    selection_guard_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(selection_guard_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_selection_calibration_guard.json"),
-                    ]
+                    selection_guard_overlap_cmd = _build_paired_trigger_overlap_command(
+                        python=python,
+                        candidate_path=selection_guard_candidate_path,
+                        incumbent_path=companion_baseline_input,
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        incumbent_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        output_path=summary_dir / "paired_trigger_overlap_policy_aligned_shadow_selection_calibration_guard.json",
+                    )
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_selection_calibration_guard",
@@ -7799,19 +6865,13 @@ def execute_reliability_workflow(
                     threshold_shadow_meta_path = (
                         summary_dir / f"backtest_signals_meta_ensemble_decision_aligned_shadow_{variant_name}_meta.json"
                     )
-                    threshold_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_model_path),
-                        "--output",
-                        str(threshold_shadow_candidate_path),
-                        "--meta-output",
-                        str(threshold_shadow_meta_path),
-                    ]
+                    threshold_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=companion_candidate_input,
+                        model_path=trade_decision_model_path,
+                        output_path=threshold_shadow_candidate_path,
+                        meta_output_path=threshold_shadow_meta_path,
+                    )
                     threshold_shadow_build_cmd.extend(
                         _override_cli_arg(common_align_args, "--threshold", str(float(threshold_variant)))
                     )
@@ -7828,27 +6888,17 @@ def execute_reliability_workflow(
                         )
                     )
 
-                    threshold_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(threshold_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(summary_dir / f"champion_challenger_policy_aligned_shadow_{variant_name}_companion.json"),
-                    ]
+                    threshold_shadow_companion_cmd = _build_champion_challenger_command(
+                        python=python,
+                        baseline_path=companion_baseline_input,
+                        candidate_path=threshold_shadow_candidate_path,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        output_path=summary_dir / f"champion_challenger_policy_aligned_shadow_{variant_name}_companion.json",
+                    )
                     results.append(
                         _run_step(
                             f"champion_challenger_policy_aligned_shadow_{variant_name}_companion",
@@ -7858,23 +6908,15 @@ def execute_reliability_workflow(
                         )
                     )
 
-                    threshold_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(threshold_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{variant_name}.json"),
-                    ]
+                    threshold_shadow_overlap_cmd = _build_paired_trigger_overlap_command(
+                        python=python,
+                        candidate_path=threshold_shadow_candidate_path,
+                        incumbent_path=companion_baseline_input,
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        incumbent_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        output_path=summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{variant_name}.json",
+                    )
                     results.append(
                         _run_step(
                             f"paired_trigger_overlap_policy_aligned_shadow_{variant_name}",
@@ -7902,19 +6944,13 @@ def execute_reliability_workflow(
                     / "champion_challenger_policy_aligned_shadow_reference_feature_ablation_companion.json"
                 )
                 if trade_decision_ablation_model_path.exists() or args.dry_run:
-                    reference_feature_ablation_shadow_build_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.apply_trade_decision_policy_to_backtest",
-                        "--input",
-                        str(companion_candidate_input),
-                        "--model",
-                        str(trade_decision_ablation_model_path),
-                        "--output",
-                        str(reference_feature_ablation_shadow_candidate_path),
-                        "--meta-output",
-                        str(reference_feature_ablation_shadow_meta_path),
-                    ]
+                    reference_feature_ablation_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                        python=python,
+                        input_path=companion_candidate_input,
+                        model_path=trade_decision_ablation_model_path,
+                        output_path=reference_feature_ablation_shadow_candidate_path,
+                        meta_output_path=reference_feature_ablation_shadow_meta_path,
+                    )
                     reference_feature_ablation_shadow_build_cmd.extend(common_align_args)
                     if quality_input.exists() or args.dry_run:
                         reference_feature_ablation_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
@@ -7929,27 +6965,17 @@ def execute_reliability_workflow(
                         )
                     )
 
-                    reference_feature_ablation_shadow_companion_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.evaluate_champion_challenger",
-                        "--baseline",
-                        str(companion_baseline_input),
-                        "--candidate",
-                        str(reference_feature_ablation_shadow_candidate_path),
-                        "--baseline-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--n-boot",
-                        str(int(champ_cfg.get("n_boot", 2000))),
-                        "--alpha",
-                        str(float(champ_cfg.get("alpha", 0.05))),
-                        "--seed",
-                        str(int(champ_cfg.get("seed", 42))),
-                        "--output",
-                        str(reference_feature_ablation_shadow_companion_path),
-                    ]
+                    reference_feature_ablation_shadow_companion_cmd = _build_champion_challenger_command(
+                        python=python,
+                        baseline_path=companion_baseline_input,
+                        candidate_path=reference_feature_ablation_shadow_candidate_path,
+                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        n_boot=int(champ_cfg.get("n_boot", 2000)),
+                        alpha=float(champ_cfg.get("alpha", 0.05)),
+                        seed=int(champ_cfg.get("seed", 42)),
+                        output_path=reference_feature_ablation_shadow_companion_path,
+                    )
                     results.append(
                         _run_step(
                             "champion_challenger_policy_aligned_shadow_reference_feature_ablation_companion",
@@ -7959,23 +6985,15 @@ def execute_reliability_workflow(
                         )
                     )
 
-                    reference_feature_ablation_shadow_overlap_cmd = [
-                        python,
-                        "-m",
-                        "src.scripts.analyze_paired_trigger_overlap",
-                        "--candidate",
-                        str(reference_feature_ablation_shadow_candidate_path),
-                        "--incumbent",
-                        str(companion_baseline_input),
-                        "--candidate-col",
-                        str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        "--incumbent-col",
-                        str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        "--signal-col",
-                        str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        "--output",
-                        str(summary_dir / "paired_trigger_overlap_policy_aligned_shadow_reference_feature_ablation.json"),
-                    ]
+                    reference_feature_ablation_shadow_overlap_cmd = _build_paired_trigger_overlap_command(
+                        python=python,
+                        candidate_path=reference_feature_ablation_shadow_candidate_path,
+                        incumbent_path=companion_baseline_input,
+                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                        incumbent_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                        output_path=summary_dir / "paired_trigger_overlap_policy_aligned_shadow_reference_feature_ablation.json",
+                    )
                     results.append(
                         _run_step(
                             "paired_trigger_overlap_policy_aligned_shadow_reference_feature_ablation",
@@ -8023,19 +7041,13 @@ def execute_reliability_workflow(
                         summary_dir / f"backtest_signals_meta_ensemble_decision_aligned_shadow_{variant_name}_meta.json"
                     )
                     if trade_decision_ablation_model_path.exists() or args.dry_run:
-                        threshold_shadow_build_cmd = [
-                            python,
-                            "-m",
-                            "src.scripts.apply_trade_decision_policy_to_backtest",
-                            "--input",
-                            str(companion_candidate_input),
-                            "--model",
-                            str(trade_decision_ablation_model_path),
-                            "--output",
-                            str(threshold_shadow_candidate_path),
-                            "--meta-output",
-                            str(threshold_shadow_meta_path),
-                        ]
+                        threshold_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                            python=python,
+                            input_path=companion_candidate_input,
+                            model_path=trade_decision_ablation_model_path,
+                            output_path=threshold_shadow_candidate_path,
+                            meta_output_path=threshold_shadow_meta_path,
+                        )
                         threshold_shadow_build_cmd.extend(
                             _override_cli_arg(common_align_args, "--threshold", str(float(threshold_variant)))
                         )
@@ -8055,27 +7067,17 @@ def execute_reliability_workflow(
                         threshold_shadow_companion_path = (
                             summary_dir / f"champion_challenger_policy_aligned_shadow_{variant_name}_companion.json"
                         )
-                        threshold_shadow_companion_cmd = [
-                            python,
-                            "-m",
-                            "src.scripts.evaluate_champion_challenger",
-                            "--baseline",
-                            str(companion_baseline_input),
-                            "--candidate",
-                            str(threshold_shadow_candidate_path),
-                            "--baseline-col",
-                            str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                            "--candidate-col",
-                            str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                            "--n-boot",
-                            str(int(champ_cfg.get("n_boot", 2000))),
-                            "--alpha",
-                            str(float(champ_cfg.get("alpha", 0.05))),
-                            "--seed",
-                            str(int(champ_cfg.get("seed", 42))),
-                            "--output",
-                            str(threshold_shadow_companion_path),
-                        ]
+                        threshold_shadow_companion_cmd = _build_champion_challenger_command(
+                            python=python,
+                            baseline_path=companion_baseline_input,
+                            candidate_path=threshold_shadow_candidate_path,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            output_path=threshold_shadow_companion_path,
+                        )
                         results.append(
                             _run_step(
                                 f"champion_challenger_policy_aligned_shadow_{variant_name}_companion",
@@ -8085,23 +7087,15 @@ def execute_reliability_workflow(
                             )
                         )
 
-                        threshold_shadow_overlap_cmd = [
-                            python,
-                            "-m",
-                            "src.scripts.analyze_paired_trigger_overlap",
-                            "--candidate",
-                            str(threshold_shadow_candidate_path),
-                            "--incumbent",
-                            str(companion_baseline_input),
-                            "--candidate-col",
-                            str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                            "--incumbent-col",
-                            str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                            "--signal-col",
-                            str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                            "--output",
-                            str(summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{variant_name}.json"),
-                        ]
+                        threshold_shadow_overlap_cmd = _build_paired_trigger_overlap_command(
+                            python=python,
+                            candidate_path=threshold_shadow_candidate_path,
+                            incumbent_path=companion_baseline_input,
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            incumbent_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            output_path=summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{variant_name}.json",
+                        )
                         results.append(
                             _run_step(
                                 f"paired_trigger_overlap_policy_aligned_shadow_{variant_name}",
@@ -8189,27 +7183,17 @@ def execute_reliability_workflow(
                                         ),
                                         rules=selection_guard_rules,
                                     )
-                                reference_feature_ablation_selection_guard_companion_cmd = [
-                                    python,
-                                    "-m",
-                                    "src.scripts.evaluate_champion_challenger",
-                                    "--baseline",
-                                    str(companion_baseline_input),
-                                    "--candidate",
-                                    str(selection_guard_candidate_path),
-                                    "--baseline-col",
-                                    str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                                    "--candidate-col",
-                                    str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                                    "--n-boot",
-                                    str(int(champ_cfg.get("n_boot", 2000))),
-                                    "--alpha",
-                                    str(float(champ_cfg.get("alpha", 0.05))),
-                                    "--seed",
-                                    str(int(champ_cfg.get("seed", 42))),
-                                    "--output",
-                                    str(selection_guard_companion_path),
-                                ]
+                                reference_feature_ablation_selection_guard_companion_cmd = _build_champion_challenger_command(
+                                    python=python,
+                                    baseline_path=companion_baseline_input,
+                                    candidate_path=selection_guard_candidate_path,
+                                    baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                                    candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                                    n_boot=int(champ_cfg.get("n_boot", 2000)),
+                                    alpha=float(champ_cfg.get("alpha", 0.05)),
+                                    seed=int(champ_cfg.get("seed", 42)),
+                                    output_path=selection_guard_companion_path,
+                                )
                                 results.append(
                                     _run_step(
                                         f"champion_challenger_policy_aligned_shadow_{selection_guard_variant_name}_companion",
@@ -8220,23 +7204,15 @@ def execute_reliability_workflow(
                                     )
                                 )
 
-                                reference_feature_ablation_selection_guard_overlap_cmd = [
-                                    python,
-                                    "-m",
-                                    "src.scripts.analyze_paired_trigger_overlap",
-                                    "--candidate",
-                                    str(selection_guard_candidate_path),
-                                    "--incumbent",
-                                    str(companion_baseline_input),
-                                    "--candidate-col",
-                                    str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                                    "--incumbent-col",
-                                    str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                                    "--signal-col",
-                                    str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                                    "--output",
-                                    str(summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{selection_guard_variant_name}.json"),
-                                ]
+                                reference_feature_ablation_selection_guard_overlap_cmd = _build_paired_trigger_overlap_command(
+                                    python=python,
+                                    candidate_path=selection_guard_candidate_path,
+                                    incumbent_path=companion_baseline_input,
+                                    candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                                    incumbent_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                                    signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                                    output_path=summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{selection_guard_variant_name}.json",
+                                )
                                 results.append(
                                     _run_step(
                                         f"paired_trigger_overlap_policy_aligned_shadow_{selection_guard_variant_name}",
@@ -8311,27 +7287,17 @@ def execute_reliability_workflow(
                                         regime_state=str(reference_feature_ablation_ranking_cfg.get("regime_state", "neutral")),
                                         min_abs_ret_pred=float(min_abs_ret_pred),
                                     )
-                                ranking_companion_cmd = [
-                                    python,
-                                    "-m",
-                                    "src.scripts.evaluate_champion_challenger",
-                                    "--baseline",
-                                    str(companion_baseline_input),
-                                    "--candidate",
-                                    str(ranking_candidate_path),
-                                    "--baseline-col",
-                                    str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                                    "--candidate-col",
-                                    str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                                    "--n-boot",
-                                    str(int(champ_cfg.get("n_boot", 2000))),
-                                    "--alpha",
-                                    str(float(champ_cfg.get("alpha", 0.05))),
-                                    "--seed",
-                                    str(int(champ_cfg.get("seed", 42))),
-                                    "--output",
-                                    str(ranking_companion_path),
-                                ]
+                                ranking_companion_cmd = _build_champion_challenger_command(
+                                    python=python,
+                                    baseline_path=companion_baseline_input,
+                                    candidate_path=ranking_candidate_path,
+                                    baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                                    candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                                    n_boot=int(champ_cfg.get("n_boot", 2000)),
+                                    alpha=float(champ_cfg.get("alpha", 0.05)),
+                                    seed=int(champ_cfg.get("seed", 42)),
+                                    output_path=ranking_companion_path,
+                                )
                                 results.append(
                                     _run_step(
                                         f"champion_challenger_policy_aligned_shadow_{ranking_variant_name}_companion",
@@ -8340,23 +7306,15 @@ def execute_reliability_workflow(
                                         args.dry_run,
                                     )
                                 )
-                                ranking_overlap_cmd = [
-                                    python,
-                                    "-m",
-                                    "src.scripts.analyze_paired_trigger_overlap",
-                                    "--candidate",
-                                    str(ranking_candidate_path),
-                                    "--incumbent",
-                                    str(companion_baseline_input),
-                                    "--candidate-col",
-                                    str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                                    "--incumbent-col",
-                                    str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                                    "--signal-col",
-                                    str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                                    "--output",
-                                    str(summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{ranking_variant_name}.json"),
-                                ]
+                                ranking_overlap_cmd = _build_paired_trigger_overlap_command(
+                                    python=python,
+                                    candidate_path=ranking_candidate_path,
+                                    incumbent_path=companion_baseline_input,
+                                    candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                                    incumbent_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                                    signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                                    output_path=summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{ranking_variant_name}.json",
+                                )
                                 results.append(
                                     _run_step(
                                         f"paired_trigger_overlap_policy_aligned_shadow_{ranking_variant_name}",
@@ -8436,27 +7394,17 @@ def execute_reliability_workflow(
                                         regime_state=str(reference_feature_ablation_neutral_p_up_cap_cfg.get("regime_state", "neutral")),
                                         max_p_up_exclusive=float(max_p_up_exclusive),
                                     )
-                                neutral_p_up_cap_companion_cmd = [
-                                    python,
-                                    "-m",
-                                    "src.scripts.evaluate_champion_challenger",
-                                    "--baseline",
-                                    str(companion_baseline_input),
-                                    "--candidate",
-                                    str(neutral_p_up_cap_candidate_path),
-                                    "--baseline-col",
-                                    str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                                    "--candidate-col",
-                                    str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                                    "--n-boot",
-                                    str(int(champ_cfg.get("n_boot", 2000))),
-                                    "--alpha",
-                                    str(float(champ_cfg.get("alpha", 0.05))),
-                                    "--seed",
-                                    str(int(champ_cfg.get("seed", 42))),
-                                    "--output",
-                                    str(neutral_p_up_cap_companion_path),
-                                ]
+                                neutral_p_up_cap_companion_cmd = _build_champion_challenger_command(
+                                    python=python,
+                                    baseline_path=companion_baseline_input,
+                                    candidate_path=neutral_p_up_cap_candidate_path,
+                                    baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                                    candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                                    n_boot=int(champ_cfg.get("n_boot", 2000)),
+                                    alpha=float(champ_cfg.get("alpha", 0.05)),
+                                    seed=int(champ_cfg.get("seed", 42)),
+                                    output_path=neutral_p_up_cap_companion_path,
+                                )
                                 results.append(
                                     _run_step(
                                         f"champion_challenger_policy_aligned_shadow_{neutral_p_up_cap_variant_name}_companion",
@@ -8465,23 +7413,15 @@ def execute_reliability_workflow(
                                         args.dry_run,
                                     )
                                 )
-                                neutral_p_up_cap_overlap_cmd = [
-                                    python,
-                                    "-m",
-                                    "src.scripts.analyze_paired_trigger_overlap",
-                                    "--candidate",
-                                    str(neutral_p_up_cap_candidate_path),
-                                    "--incumbent",
-                                    str(companion_baseline_input),
-                                    "--candidate-col",
-                                    str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                                    "--incumbent-col",
-                                    str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                                    "--signal-col",
-                                    str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                                    "--output",
-                                    str(summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{neutral_p_up_cap_variant_name}.json"),
-                                ]
+                                neutral_p_up_cap_overlap_cmd = _build_paired_trigger_overlap_command(
+                                    python=python,
+                                    candidate_path=neutral_p_up_cap_candidate_path,
+                                    incumbent_path=companion_baseline_input,
+                                    candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                                    incumbent_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                                    signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                                    output_path=summary_dir / f"paired_trigger_overlap_policy_aligned_shadow_{neutral_p_up_cap_variant_name}.json",
+                                )
                                 results.append(
                                     _run_step(
                                         f"paired_trigger_overlap_policy_aligned_shadow_{neutral_p_up_cap_variant_name}",
@@ -9047,27 +7987,17 @@ def execute_reliability_workflow(
                             if selected_shadow_companion_path is not None
                             else summary_dir / "champion_challenger_policy_aligned_companion.json"
                         )
-                        companion_cmd = [
-                            python,
-                            "-m",
-                            "src.scripts.evaluate_champion_challenger",
-                            "--baseline",
-                            str(companion_baseline_input),
-                            "--candidate",
-                            str(selected_shadow_path),
-                            "--baseline-col",
-                            str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                            "--candidate-col",
-                            str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                            "--n-boot",
-                            str(int(champ_cfg.get("n_boot", 2000))),
-                            "--alpha",
-                            str(float(champ_cfg.get("alpha", 0.05))),
-                            "--seed",
-                            str(int(champ_cfg.get("seed", 42))),
-                            "--output",
-                            str(selected_policy_aligned_companion_path),
-                        ]
+                        companion_cmd = _build_champion_challenger_command(
+                            python=python,
+                            baseline_path=companion_baseline_input,
+                            candidate_path=selected_shadow_path,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            output_path=selected_policy_aligned_companion_path,
+                        )
                         results.append(
                             _run_step(
                                 "champion_challenger_policy_aligned_companion_official_shadow",
@@ -9125,23 +8055,15 @@ def execute_reliability_workflow(
                             )
                         )
 
-                        paired_overlap_cmd = [
-                            python,
-                            "-m",
-                            "src.scripts.analyze_paired_trigger_overlap",
-                            "--candidate",
-                            str(selected_shadow_path),
-                            "--incumbent",
-                            str(companion_baseline_input),
-                            "--candidate-col",
-                            str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                            "--incumbent-col",
-                            str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                            "--signal-col",
-                            str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                            "--output",
-                            str(summary_dir / "paired_trigger_overlap_policy_aligned.json"),
-                        ]
+                        paired_overlap_cmd = _build_paired_trigger_overlap_command(
+                            python=python,
+                            candidate_path=selected_shadow_path,
+                            incumbent_path=companion_baseline_input,
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            incumbent_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            output_path=summary_dir / "paired_trigger_overlap_policy_aligned.json",
+                        )
                         results.append(
                             _run_step(
                                 "paired_trigger_overlap_policy_aligned_official_shadow",
@@ -9275,29 +8197,20 @@ def execute_reliability_workflow(
                                 if policy_regime_labeled_path.exists() or args.dry_run:
                                     policy_regime_labeled_input = policy_regime_labeled_path
 
-                            policy_regime_calib_cmd = [
-                                python,
-                                "-m",
-                                "src.scripts.train_platt_calibration",
-                                "--horizons",
-                                *[str(h) for h in calibration_horizons],
-                                "--output-path",
-                                str(summary_dir / "platt_calibration.json"),
-                                "--coverage-output-path",
-                                str(summary_dir / "platt_calibration_coverage.json"),
-                                "--method",
-                                str(calibration_cfg.get("method", "platt")),
-                                "--labeled-input",
-                                str(policy_regime_labeled_input),
-                                "--regime-col",
-                                str(calibration_cfg.get("regime_col", "regime_state")),
-                                "--min-regime-rows",
-                                str(int(calibration_cfg.get("min_regime_rows", 100))),
-                            ]
-                            if bool(calibration_cfg.get("fit_base_horizons_from_labeled_input", True)):
-                                policy_regime_calib_cmd.append("--fit-base-horizons-from-labeled-input")
-                            if bool(calibration_cfg.get("skip_model_fit_when_labeled_input", True)):
-                                policy_regime_calib_cmd.append("--skip-model-fit")
+                            policy_regime_calib_cmd = _build_platt_calibration_command(
+                                python=python,
+                                horizons=calibration_horizons,
+                                output_path=summary_dir / "platt_calibration.json",
+                                coverage_output_path=summary_dir / "platt_calibration_coverage.json",
+                                method=str(calibration_cfg.get("method", "platt")),
+                                labeled_input=policy_regime_labeled_input,
+                                fit_base_horizons_from_labeled_input=bool(
+                                    calibration_cfg.get("fit_base_horizons_from_labeled_input", True)
+                                ),
+                                skip_model_fit=bool(calibration_cfg.get("skip_model_fit_when_labeled_input", True)),
+                                regime_col=str(calibration_cfg.get("regime_col", "regime_state")),
+                                min_regime_rows=int(calibration_cfg.get("min_regime_rows", 100)),
+                            )
                             results.append(
                                 _run_step(
                                     "platt_calibration_regime_aware_policy_aligned_official",
@@ -9310,25 +8223,16 @@ def execute_reliability_workflow(
                     if bool(regime_weakness_cfg.get("enabled", True)):
                         calibration_path = summary_dir / "calibration_robustness.json"
                         if (calibration_path.exists() and walkforward_output.exists()) or args.dry_run:
-                            regime_weakness_cmd = [
-                                python,
-                                "-m",
-                                "src.scripts.evaluate_regime_weakness",
-                                "--calibration",
-                                str(calibration_path),
-                                "--walkforward",
-                                str(walkforward_output),
-                                "--horizon",
-                                str(calibration_horizon_key),
-                                "--max-ece-drift",
-                                str(float(regime_weakness_cfg.get("max_ece_drift", calibration_cfg.get("max_ece_drift", 0.02)))),
-                                "--min-recent-auc",
-                                str(float(quality_cfg.get("min_recent_auc", 0.0))),
-                                "--min-net-return",
-                                str(float(regime_weakness_cfg.get("min_net_return", 0.0))),
-                                "--output",
-                                str(summary_dir / "regime_weakness.json"),
-                            ]
+                            regime_weakness_cmd = _build_regime_weakness_command(
+                                python=python,
+                                calibration_path=calibration_path,
+                                walkforward_path=walkforward_output,
+                                horizon_key=calibration_horizon_key,
+                                regime_weakness_cfg=regime_weakness_cfg,
+                                calibration_cfg=calibration_cfg,
+                                quality_cfg=quality_cfg,
+                                output_path=summary_dir / "regime_weakness.json",
+                            )
                             results.append(
                                 _run_step(
                                     "regime_weakness_policy_aligned_official",
@@ -9338,27 +8242,17 @@ def execute_reliability_workflow(
                                 )
                             )
 
-                champ_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.evaluate_champion_challenger",
-                    "--baseline",
-                    str(baseline_input),
-                    "--candidate",
-                    str(candidate_input),
-                    "--baseline-col",
-                    str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                    "--candidate-col",
-                    str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                    "--n-boot",
-                    str(int(champ_cfg.get("n_boot", 2000))),
-                    "--alpha",
-                    str(float(champ_cfg.get("alpha", 0.05))),
-                    "--seed",
-                    str(int(champ_cfg.get("seed", 42))),
-                    "--output",
-                    str(summary_dir / "champion_challenger_gate.json"),
-                ]
+                champ_cmd = _build_champion_challenger_command(
+                    python=python,
+                    baseline_path=baseline_input,
+                    candidate_path=candidate_input,
+                    baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                    candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                    n_boot=int(champ_cfg.get("n_boot", 2000)),
+                    alpha=float(champ_cfg.get("alpha", 0.05)),
+                    seed=int(champ_cfg.get("seed", 42)),
+                    output_path=summary_dir / "champion_challenger_gate.json",
+                )
                 results.append(
                     _run_step(
                         "champion_challenger_gate",
@@ -10049,55 +8943,20 @@ def execute_reliability_workflow(
                 latest_audit_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(summary_dir / "direction_model_audit.json", latest_audit_path)
 
-        prediction_coherence_cmd = [
-            python,
-            "-m",
-            "src.scripts.analyze_prediction_coherence",
-            "--history-path",
-            "artifacts/predictions/history.json",
-            "--output",
-            str(summary_dir / "prediction_coherence.json"),
-        ]
-        results.append(
-            _run_step(
-                "prediction_coherence",
-                prediction_coherence_cmd,
-                logs_dir / "prediction_coherence.log",
-                args.dry_run,
-            )
-        )
-        if not args.dry_run:
-            latest_prediction_coherence_path = Path("artifacts/analysis/prediction_coherence_latest.json")
-            latest_prediction_coherence_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(summary_dir / "prediction_coherence.json", latest_prediction_coherence_path)
-
-        # Mark monitoring artifact with no-trade/fallback regime diagnostics.
-        regime_path = summary_dir / "regime_diagnostics.json"
-        if regime_path.exists() and not args.dry_run:
-            try:
-                regime_payload = _load_json(regime_path)
-                _annotate_monitoring_with_regime(Path("artifacts/monitoring/latest.json"), regime_payload)
-            except Exception as exc:  # pragma: no cover - best effort annotation
-                print(f"Warning: failed to annotate monitoring latest with regime diagnostics: {exc}", file=sys.stderr)
+        try:
+            regime_payload = _load_json(regime_path)
+            _annotate_monitoring_with_regime(Path("artifacts/monitoring/latest.json"), regime_payload)
+        except Exception as exc:
+            print(f"Warning: failed to annotate monitoring latest with regime diagnostics: {exc}", file=sys.stderr)
 
         live_snapshot_path = summary_dir / "live_predictions_snapshot.json"
-        live_snapshot_cmd = [
-            python,
-            "-m",
-            "src.scripts.snapshot_live_predictions",
-            "--run-id",
-            str(run_dir.name),
-            "--profile-id",
-            str(run_profile_id),
-            "--profile-name",
-            str(run_profile_name),
-            "--predictions-latest",
-            "artifacts/predictions/latest.json",
-            "--monitoring-latest",
-            "artifacts/monitoring/latest.json",
-            "--output",
-            str(live_snapshot_path),
-        ]
+        live_snapshot_cmd = _build_live_prediction_snapshot_command(
+            python=python,
+            run_id=str(run_dir.name),
+            run_profile_id=str(run_profile_id),
+            run_profile_name=str(run_profile_name),
+            live_snapshot_path=live_snapshot_path,
+        )
         results.append(
             _run_step(
                 "live_prediction_snapshot",
@@ -10120,17 +8979,12 @@ def execute_reliability_workflow(
                 )
             else:
                 _, default_snapshot_path = default_snapshot
-                live_comparison_cmd = [
-                    python,
-                    "-m",
-                    "src.scripts.compare_default_vs_midband_paper_live_snapshots",
-                    "--default-snapshot",
-                    str(default_snapshot_path),
-                    "--midband-snapshot",
-                    str(live_snapshot_path),
-                    "--output",
-                    str(summary_dir / "default_vs_midband_paper_live_comparison.json"),
-                ]
+                live_comparison_cmd = _build_default_vs_midband_live_comparison_command(
+                    python=python,
+                    default_snapshot_path=default_snapshot_path,
+                    live_snapshot_path=live_snapshot_path,
+                    summary_dir=summary_dir,
+                )
                 results.append(
                     _run_step(
                         "default_vs_midband_paper_live_comparison",
@@ -10140,23 +8994,15 @@ def execute_reliability_workflow(
                     )
                 )
 
-            longitudinal_live_cmd = [
-                python,
-                "-m",
-                "src.scripts.build_default_vs_midband_paper_live_longitudinal",
-                "--run-root",
-                str(args.run_root),
-                "--include-run-id",
-                str(run_dir.name),
-                "--include-profile-id",
-                str(run_profile_id),
-                "--include-profile-name",
-                str(run_profile_name),
-                "--include-snapshot",
-                str(live_snapshot_path),
-                "--output",
-                str(summary_dir / "default_vs_midband_paper_live_longitudinal.json"),
-            ]
+            longitudinal_live_cmd = _build_default_vs_midband_longitudinal_command(
+                python=python,
+                run_root=args.run_root,
+                run_id=str(run_dir.name),
+                run_profile_id=str(run_profile_id),
+                run_profile_name=str(run_profile_name),
+                live_snapshot_path=live_snapshot_path,
+                summary_dir=summary_dir,
+            )
             results.append(
                 _run_step(
                     "default_vs_midband_paper_live_longitudinal",
@@ -10167,21 +9013,11 @@ def execute_reliability_workflow(
             )
 
             watchlist_output = summary_dir / "default_vs_midband_paper_live_watchlist.json"
-            watchlist_cmd = [
-                python,
-                "-m",
-                "src.scripts.build_default_vs_midband_paper_live_watchlist",
-                "--longitudinal-input",
-                str(summary_dir / "default_vs_midband_paper_live_longitudinal.json"),
-                "--output",
-                str(watchlist_output),
-                "--target-matched-pairs",
-                "8",
-                "--early-operational-streak",
-                "2",
-                "--early-actionable-asymmetry-streak",
-                "2",
-            ]
+            watchlist_cmd = _build_default_vs_midband_watchlist_command(
+                python=python,
+                longitudinal_input=summary_dir / "default_vs_midband_paper_live_longitudinal.json",
+                output_path=watchlist_output,
+            )
             results.append(
                 _run_step(
                     "default_vs_midband_paper_live_watchlist",
@@ -10191,21 +9027,11 @@ def execute_reliability_workflow(
                 )
             )
 
-            canonical_watchlist_cmd = [
-                python,
-                "-m",
-                "src.scripts.build_default_vs_midband_paper_live_watchlist",
-                "--longitudinal-input",
-                str(summary_dir / "default_vs_midband_paper_live_longitudinal.json"),
-                "--output",
-                str(args.run_root / "default_vs_midband_paper_live_watchlist.json"),
-                "--target-matched-pairs",
-                "8",
-                "--early-operational-streak",
-                "2",
-                "--early-actionable-asymmetry-streak",
-                "2",
-            ]
+            canonical_watchlist_cmd = _build_default_vs_midband_watchlist_command(
+                python=python,
+                longitudinal_input=summary_dir / "default_vs_midband_paper_live_longitudinal.json",
+                output_path=args.run_root / "default_vs_midband_paper_live_watchlist.json",
+            )
             results.append(
                 _run_step(
                     "default_vs_midband_paper_live_watchlist_canonical",
@@ -10215,37 +9041,18 @@ def execute_reliability_workflow(
                 )
             )
 
-    cadence_payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "monthly_retrain_day": int(cadence_cfg.get("monthly_retrain_day", 1)),
-        "weekly_recalibration_weekday": str(cadence_cfg.get("weekly_recalibration_weekday", "mon")),
-        "trigger_file": str(summary_dir / "reliability_triggers.json"),
-        "notes": "Trigger immediate retrain when reliability_triggers.global_trigger = true.",
-    }
-    cadence_path = summary_dir / "cadence_plan.json"
-    cadence_path.write_text(json.dumps(cadence_payload, indent=2), encoding="utf-8")
+    cadence_path = _write_cadence_plan(cadence_cfg=cadence_cfg, summary_dir=summary_dir)
 
-    manifest = {
-        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "config": str(args.config),
-        "profile": {
-            "id": run_profile_id,
-            "name": run_profile_name,
-        },
-        "run_dir": str(run_dir),
-        "steps": [
-            {
-                "name": step.name,
-                "returncode": step.returncode,
-                "log": str(step.log_path),
-                "command": step.command,
-            }
-            for step in results
-        ],
-        "cadence_plan": str(cadence_path),
-    }
-    manifest_path = summary_dir / "workflow_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest_path = _write_workflow_manifest(
+        summary_dir=summary_dir,
+        config_path=str(args.config),
+        run_dir=run_dir,
+        run_profile_id=run_profile_id,
+        run_profile_name=run_profile_name,
+        steps=results,
+        cadence_path=cadence_path,
+    )
+    manifest = _load_json(manifest_path)
 
     print(f"\nReliability workflow finished. Manifest: {manifest_path}")
     return manifest

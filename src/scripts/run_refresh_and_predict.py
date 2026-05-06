@@ -80,6 +80,15 @@ from src.runtime.forecast_coherence_support import (
     forecast_coherence_excluded as runtime_forecast_coherence_excluded,
     resolve_forecast_coherence_policy as runtime_resolve_forecast_coherence_policy,
 )
+from src.runtime.forecast_direction_support import (
+    coerce_result_horizon as runtime_coerce_result_horizon,
+    derive_probability_alignment_features as runtime_derive_probability_alignment_features,
+    direction_from_probability as runtime_direction_from_probability,
+    direction_from_projected_price as runtime_direction_from_projected_price,
+    direction_from_ret_pred as runtime_direction_from_ret_pred,
+    direction_vote as runtime_direction_vote,
+    resolve_direction_signal_for_horizon as runtime_resolve_direction_signal_for_horizon,
+)
 from src.runtime.dataset_profile_support import DatasetCandidate, DatasetProfile
 from src.runtime.gate_trace_support import append_gate_trace as runtime_append_gate_trace
 from src.runtime.local_feature_defaults import LOCAL_FEATURE_OPTIONAL_PATHS, LOCAL_FEATURE_REQUIRED_COLUMNS
@@ -236,28 +245,10 @@ from src.runtime.policy_support import (
     scope_direction_ensemble_policy as runtime_scope_direction_ensemble_policy,
 )
 from src.runtime.config_normalization_support import (
-    normalize_abstention_policy_block as runtime_normalize_abstention_policy_block,
-    normalize_adaptive_thresholds_block as runtime_normalize_adaptive_thresholds_block,
-    normalize_confluence_policy_block as runtime_normalize_confluence_policy_block,
     normalize_config_value as runtime_normalize_config_value,
-    normalize_data_quality_block as runtime_normalize_data_quality_block,
-    normalize_degradation_monitoring_block as runtime_normalize_degradation_monitoring_block,
-    normalize_direction_ensemble_policy_block as runtime_normalize_direction_ensemble_policy_block,
-    normalize_direction_fallback_block as runtime_normalize_direction_fallback_block,
-    normalize_direction_output_policy_block as runtime_normalize_direction_output_policy_block,
-    normalize_execution_policy_block as runtime_normalize_execution_policy_block,
-    normalize_feature_coverage_policy_block as runtime_normalize_feature_coverage_policy_block,
-    normalize_forecast_coherence_policy_block as runtime_normalize_forecast_coherence_policy_block,
-    normalize_intrabar_aggregation_block as runtime_normalize_intrabar_aggregation_block,
-    normalize_regression_model_dirs_block as runtime_normalize_regression_model_dirs_block,
-    normalize_regime_model_dirs_block as runtime_normalize_regime_model_dirs_block,
-    normalize_regime_model_weights_block as runtime_normalize_regime_model_weights_block,
-    normalize_target_range_block as runtime_normalize_target_range_block,
-    normalize_trade_decision_policy_block as runtime_normalize_trade_decision_policy_block,
-    normalize_trust_hardening_policy_block as runtime_normalize_trust_hardening_policy_block,
-    normalize_trend_ignition_block as runtime_normalize_trend_ignition_block,
-    normalize_uncertainty_policy_block as runtime_normalize_uncertainty_policy_block,
 )
+from src.runtime.config_composition import load_composed_yaml
+from src.runtime.refresh_config_factory import build_refresh_config_value_normalizer
 from src.runtime.post_prediction_pipeline import apply_post_prediction_policies as runtime_apply_post_prediction_policies
 from src.runtime.trust_hardening_support import (
     apply_trust_hardening as runtime_apply_trust_hardening,
@@ -451,156 +442,8 @@ def _format_horizon_label(value: float) -> str:
     return f"{minutes:g}m"
 
 
-def _normalize_trend_ignition_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_trend_ignition_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_direction_fallback_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_direction_fallback_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_adaptive_thresholds_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_adaptive_thresholds_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_target_range_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_target_range_block(
-        value,
-        normalize_horizon_value=_normalize_horizon_value,
-        stderr_write=sys.stderr.write,
-    )
-
-
-def _normalize_data_quality_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_data_quality_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_abstention_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_abstention_policy_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_regime_model_weights_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_regime_model_weights_block(
-        value,
-        regimes=(REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP),
-        stderr_write=sys.stderr.write,
-    )
-
-
-def _normalize_uncertainty_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_uncertainty_policy_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_trade_decision_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_trade_decision_policy_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_regime_model_dirs_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_regime_model_dirs_block(
-        value,
-        regimes=(REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP),
-        stderr_write=sys.stderr.write,
-    )
-
-
-def _normalize_regression_model_dirs_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_regression_model_dirs_block(
-        value,
-        stderr_write=sys.stderr.write,
-    )
-
-
-def _normalize_intrabar_aggregation_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_intrabar_aggregation_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_feature_coverage_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_feature_coverage_policy_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_confluence_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_confluence_policy_block(
-        value,
-        parse_targets=parse_targets,
-        normalize_horizon_value=_normalize_horizon_value,
-        stderr_write=sys.stderr.write,
-    )
-
-
-def _normalize_execution_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_execution_policy_block(
-        value,
-        normalize_horizon_value=_normalize_horizon_value,
-        stderr_write=sys.stderr.write,
-    )
-
-
-def _normalize_degradation_monitoring_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_degradation_monitoring_block(value, stderr_write=sys.stderr.write)
-
-
-def _normalize_forecast_coherence_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_forecast_coherence_policy_block(
-        value,
-        parse_targets=parse_targets,
-        normalize_horizon_value=_normalize_horizon_value,
-        stderr_write=sys.stderr.write,
-    )
-
-
-def _normalize_direction_output_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_direction_output_policy_block(
-        value,
-        parse_targets=parse_targets,
-        normalize_horizon_value=_normalize_horizon_value,
-        stderr_write=sys.stderr.write,
-    )
-
-
-def _normalize_direction_ensemble_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_direction_ensemble_policy_block(
-        value,
-        parse_targets=parse_targets,
-        normalize_horizon_value=_normalize_horizon_value,
-        stderr_write=sys.stderr.write,
-    )
-
-
-def _normalize_trust_hardening_policy_block(value: Mapping[str, Any]) -> Dict[str, Any]:
-    return runtime_normalize_trust_hardening_policy_block(
-        value,
-        parse_targets=parse_targets,
-        normalize_horizon_value=_normalize_horizon_value,
-        stderr_write=sys.stderr.write,
-    )
-
-
 def _normalize_config_value(name: str, value: Any) -> Any:
-    return runtime_normalize_config_value(
-        name,
-        value,
-        default_targets=DEFAULT_TARGETS,
-        config_int_fields=tuple(CONFIG_INT_FIELDS),
-        config_float_fields=tuple(CONFIG_FLOAT_FIELDS),
-        config_bool_fields=tuple(CONFIG_BOOL_FIELDS),
-        config_path_fields=tuple(CONFIG_PATH_FIELDS),
-        config_allowed_keys=tuple(CONFIG_ALLOWED_KEYS),
-        regimes=(REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP),
-        bool_env=_bool_env,
-        parse_targets=parse_targets,
-        normalize_horizon_value=_normalize_horizon_value,
-        normalize_horizon_float_map=lambda raw, minimum=0.0, maximum=None: _normalize_horizon_float_map(
-            raw,
-            minimum=minimum,
-            maximum=maximum,
-        ),
-        normalize_horizon_regime_float_map=lambda raw, minimum=0.0, maximum=None: _normalize_horizon_regime_float_map(
-            raw,
-            minimum=minimum,
-            maximum=maximum,
-        ),
-        stderr_write=sys.stderr.write,
-    )
+    return _REFRESH_CONFIG_VALUE_NORMALIZER(name, value)
 
 
 def _load_cli_config(path: str | None) -> Dict[str, Any]:
@@ -610,6 +453,7 @@ def _load_cli_config(path: str | None) -> Dict[str, Any]:
         normalize_config_value=_normalize_config_value,
         yaml_safe_load=yaml.safe_load,
         stderr_write=sys.stderr.write,
+        yaml_load_path=load_composed_yaml,
     )
 
 
@@ -717,6 +561,31 @@ def _normalize_horizon_regime_float_map(
         minimum=minimum,
         maximum=maximum,
     )
+
+
+_REFRESH_CONFIG_VALUE_NORMALIZER = build_refresh_config_value_normalizer(
+    default_targets=DEFAULT_TARGETS,
+    config_int_fields=tuple(CONFIG_INT_FIELDS),
+    config_float_fields=tuple(CONFIG_FLOAT_FIELDS),
+    config_bool_fields=tuple(CONFIG_BOOL_FIELDS),
+    config_path_fields=tuple(CONFIG_PATH_FIELDS),
+    config_allowed_keys=tuple(CONFIG_ALLOWED_KEYS),
+    regimes=(REGIME_TREND, REGIME_NEUTRAL, REGIME_CHOP),
+    bool_env=_bool_env,
+    parse_targets=parse_targets,
+    normalize_horizon_value=_normalize_horizon_value,
+    normalize_horizon_float_map=lambda raw, minimum=0.0, maximum=None: _normalize_horizon_float_map(
+        raw,
+        minimum=minimum,
+        maximum=maximum,
+    ),
+    normalize_horizon_regime_float_map=lambda raw, minimum=0.0, maximum=None: _normalize_horizon_regime_float_map(
+        raw,
+        minimum=minimum,
+        maximum=maximum,
+    ),
+    stderr_write=sys.stderr.write,
+)
 
 
 def _resolve_confidence_min_for_horizon(
@@ -991,51 +860,7 @@ def _evaluate_feature_coverage(metadata: Mapping[str, Any], policy: Mapping[str,
 
 
 def _coerce_result_horizon(value: Any) -> float | None:
-    try:
-        return _normalize_horizon_value(value)
-    except ValueError:
-        return None
-
-
-def _direction_vote(entry: Mapping[str, Any]) -> str:
-    return "up" if str(entry.get("direction_next", "down")).lower() == "up" else "down"
-
-
-def _direction_from_ret_pred(value: Any) -> str:
-    numeric = _finite_float_or_none(value)
-    if numeric is None:
-        return "neutral"
-    if numeric > 0.0:
-        return "up"
-    if numeric < 0.0:
-        return "down"
-    return "neutral"
-
-
-def _direction_from_projected_price(close: Any, projected_price: Any) -> str:
-    close_value = _finite_float_or_none(close)
-    projected_value = _finite_float_or_none(projected_price)
-    if close_value is None or projected_value is None:
-        return "neutral"
-    if close_value <= 0.0 or projected_value <= 0.0:
-        return "neutral"
-
-    if projected_value > close_value:
-        return "up"
-    if projected_value < close_value:
-        return "down"
-    return "neutral"
-
-
-def _direction_from_probability(value: Any, *, neutral_band: float = 0.0) -> str:
-    numeric = _finite_float_or_none(value)
-    if numeric is None:
-        return "neutral"
-    if numeric >= 0.5 + neutral_band:
-        return "up"
-    if numeric <= 0.5 - neutral_band:
-        return "down"
-    return "neutral"
+    return runtime_coerce_result_horizon(value, normalize_horizon_value=_normalize_horizon_value)
 
 
 def _resolve_direction_threshold_for_horizon(
@@ -1066,79 +891,12 @@ def _compute_directional_stop_take_prices(
     return _project_price(close, stop_return), _project_price(close, take_return)
 
 
-def _resolve_direction_signal_for_horizon(
-    *,
-    raw_probability: float,
-    calibrated_probability: float,
-    threshold: float,
-    close: float,
-    projected_price: float,
-    ret_pred: float,
-    calibration_key: str | None,
-    calibration_used_regime_key: bool,
-) -> int:
-    directional_threshold = max(float(threshold), 0.5)
-    calibrated_signal = int(float(calibrated_probability) >= directional_threshold)
-    raw_signal = int(float(raw_probability) >= directional_threshold)
-    raw_side = "up" if raw_signal == 1 else "down"
-    calibrated_side = "up" if calibrated_signal == 1 else "down"
-    ret_side = _direction_from_ret_pred(ret_pred)
-    projected_side = _direction_from_projected_price(close, projected_price)
-
-    if ret_side == projected_side and ret_side in {"up", "down"}:
-        forecast_consensus_signal = 1 if ret_side == "up" else 0
-        if calibrated_side != ret_side:
-            return forecast_consensus_signal
-
-    if raw_signal == calibrated_signal:
-        return calibrated_signal
-
-    if ret_side == raw_side and projected_side == raw_side:
-        return raw_signal
-    if ret_side == calibrated_side and projected_side == calibrated_side:
-        return calibrated_signal
-
-    if calibration_key is None or calibration_used_regime_key:
-        return calibrated_signal
-    return calibrated_signal
-
-
-def _derive_probability_alignment_features(
-    *,
-    close: float,
-    projected_price: float,
-    ret_pred: float,
-    raw_probability: float,
-    resolved_probability: float,
-    direction: str,
-    neutral_band: float,
-    probability_guard: Mapping[str, Any] | None,
-    calibration_used_regime_key: bool,
-) -> Dict[str, float | str]:
-    direction_side = str(direction).strip().lower()
-    ret_side = _direction_from_ret_pred(ret_pred)
-    projected_side = _direction_from_projected_price(close, projected_price)
-    raw_side = _direction_from_probability(raw_probability, neutral_band=neutral_band)
-    resolved_side = _direction_from_probability(resolved_probability, neutral_band=neutral_band)
-    consensus_side = ret_side if ret_side == projected_side and ret_side in {"up", "down"} else "neutral"
-    raw_gap = float(resolved_probability) - float(raw_probability)
-    return {
-        "raw_p_up": float(raw_probability),
-        "raw_calibrated_probability_gap": float(raw_gap),
-        "probability_alignment_gap": float(abs(raw_gap)),
-        "raw_p_up_side": raw_side,
-        "resolved_p_up_side": resolved_side,
-        "ret_pred_side": ret_side,
-        "projected_price_side": projected_side,
-        "forecast_consensus_side": consensus_side,
-        "raw_p_up_ret_mismatch": float(raw_side in {"up", "down"} and ret_side in {"up", "down"} and raw_side != ret_side),
-        "p_up_ret_mismatch": float(resolved_side in {"up", "down"} and ret_side in {"up", "down"} and resolved_side != ret_side),
-        "raw_p_up_direction_mismatch": float(raw_side in {"up", "down"} and direction_side in {"up", "down"} and raw_side != direction_side),
-        "p_up_direction_mismatch": float(resolved_side in {"up", "down"} and direction_side in {"up", "down"} and resolved_side != direction_side),
-        "ret_projected_price_consensus": float(consensus_side in {"up", "down"}),
-        "probability_calibration_guard_applied": float(bool(isinstance(probability_guard, Mapping) and probability_guard.get("applied"))),
-        "probability_calibration_used_regime_key": float(bool(calibration_used_regime_key)),
-    }
+_direction_vote = runtime_direction_vote
+_direction_from_ret_pred = runtime_direction_from_ret_pred
+_direction_from_projected_price = runtime_direction_from_projected_price
+_direction_from_probability = runtime_direction_from_probability
+_resolve_direction_signal_for_horizon = runtime_resolve_direction_signal_for_horizon
+_derive_probability_alignment_features = runtime_derive_probability_alignment_features
 
 
 def _apply_forecast_coherence_policy(
@@ -1449,33 +1207,6 @@ def _resolve_uncertainty_settings(
         regime_state=regime_state,
         normalize_horizon_value=_normalize_horizon_value,
     )
-
-
-def _compute_recent_candle_expansion(
-    frame: pd.DataFrame,
-    *,
-    index: int,
-    window: int,
-) -> float:
-    if frame.empty:
-        return 1.0
-    start = max(0, index - max(window, 2) + 1)
-    history = frame.iloc[start : index + 1].copy()
-    if history.empty:
-        return 1.0
-    if {"high", "low"}.issubset(history.columns):
-        ranges = (pd.to_numeric(history["high"], errors="coerce") - pd.to_numeric(history["low"], errors="coerce")).abs()
-    else:
-        closes = pd.to_numeric(history.get("close"), errors="coerce")
-        ranges = closes.diff().abs()
-    clean = ranges.replace([np.inf, -np.inf], np.nan).dropna()
-    if clean.empty:
-        return 1.0
-    latest = float(clean.iloc[-1])
-    baseline = float(clean.iloc[:-1].median()) if clean.size > 1 else float(clean.median())
-    if baseline <= 0.0:
-        return 1.0
-    return float(latest / baseline)
 
 
 def _compute_pullback_quality_score(

@@ -14,6 +14,8 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from typing import Callable, Iterable, List
 
+from src.service.job_state import ServiceJobStateStore
+
 
 @dataclass(frozen=True)
 class JobSpec:
@@ -30,6 +32,7 @@ class JobRunResult:
     stdout: str
     stderr: str
     job_name: str
+    job_id: str | None = None
     run_id: str | None = None
 
 
@@ -70,37 +73,55 @@ def run_job(name: str, args: Iterable[str] | None = None) -> JobRunResult:
     if spec is None:
         raise KeyError(name)
     argv = list(args or [])
+    state_store = ServiceJobStateStore()
+    job_record = state_store.start_job(spec.name, argv)
     start = time.perf_counter()
 
-    with tempfile.TemporaryDirectory(prefix="btc-service-job-") as tmpdir:
-        metadata_path = Path(tmpdir) / "result.json"
-        command = [
-            sys.executable,
-            "-m",
-            "src.service.worker_runner",
-            "--job",
-            spec.name,
-            "--metadata-path",
-            str(metadata_path),
-            "--",
-            *argv,
-        ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            env=_build_worker_env(),
-            check=False,
+    completed = None
+    metadata: dict[str, object] = {}
+    error_text: str | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="btc-service-job-") as tmpdir:
+            metadata_path = Path(tmpdir) / "result.json"
+            command = [
+                sys.executable,
+                "-m",
+                "src.service.worker_runner",
+                "--job",
+                spec.name,
+                "--metadata-path",
+                str(metadata_path),
+                "--",
+                *argv,
+            ]
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env=_build_worker_env(),
+                check=False,
+            )
+            metadata = _load_worker_metadata(metadata_path)
+    except Exception as exc:
+        error_text = str(exc)
+        raise
+    finally:
+        final_returncode = int(metadata.get("returncode", completed.returncode if completed is not None else 1))
+        state_store.complete_job(
+            job_record,
+            returncode=final_returncode,
+            run_id=_coerce_optional_string(metadata.get("run_id")),
+            error=error_text,
         )
-        metadata = _load_worker_metadata(metadata_path)
 
     duration = time.perf_counter() - start
     return JobRunResult(
-        returncode=int(metadata.get("returncode", completed.returncode)),
+        returncode=int(metadata.get("returncode", completed.returncode if completed is not None else 1)),
         duration_seconds=duration,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        stdout=completed.stdout if completed is not None else "",
+        stderr=completed.stderr if completed is not None else "",
         job_name=str(metadata.get("job_name") or name),
+        job_id=job_record.job_id,
         run_id=_coerce_optional_string(metadata.get("run_id")),
     )
 

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from subprocess import CompletedProcess
 
+from src.service.job_state import ServiceJobStateStore
 from src.service.job_runner import execute_job_in_process, run_job
 
 
@@ -50,9 +51,11 @@ def test_run_job_uses_worker_metadata(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr("tempfile.TemporaryDirectory", lambda prefix=None: FakeTemporaryDirectory())
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("src.service.job_runner.ServiceJobStateStore", lambda: ServiceJobStateStore(tmp_path / "jobs"))
 
     result = run_job("research-refresh", ["--dry-run"])
 
     assert result.returncode == 0
+    assert result.job_id is not None
     assert result.run_id == "worker-run-1"
     assert result.stdout == "worker stdout"

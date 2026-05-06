@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping
 
-import yaml
+from src.runtime.config_composition import load_composed_yaml
 
 
 @dataclass(frozen=True)
@@ -50,9 +50,5 @@ def load_json(path: Path) -> Dict[str, Any]:
 
 
 def load_yaml(path: Path) -> Dict[str, Any]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if payload is None:
-        return {}
-    if not isinstance(payload, dict):
-        raise ValueError(f"Workflow config must be a mapping: {path}")
-    return payload
+    payload = load_composed_yaml(path)
+    return payload if isinstance(payload, dict) else {}

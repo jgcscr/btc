@@ -100,11 +100,18 @@ def build_champion_gate_alignment_check(
     configured_source = str(champion_gate_source or "labeled").strip().lower()
     labeled_gate_path = summary_dir / "champion_challenger_gate.json"
     policy_gate_path = policy_aligned_gate_path or (summary_dir / "champion_challenger_policy_aligned_companion.json")
+    selected_source = str(champion_gate_resolution.get("selected_source", "labeled")).strip().lower()
+    policy_gate_available = (
+        policy_aligned_gate_path is not None
+        or policy_gate_path.exists()
+        or effective_champion_gate_path == policy_gate_path
+        or selected_source == "policy_aligned"
+    )
     expected_source = "labeled"
     if (
         normalized_variant != "none"
         and configured_source in {"auto", "policy_aligned", "policy_aligned_official_shadow"}
-        and policy_gate_path.exists()
+        and policy_gate_available
     ):
         expected_source = "policy_aligned"
 
@@ -118,7 +125,6 @@ def build_champion_gate_alignment_check(
                 break
 
     expected_gate_path = policy_gate_path if expected_source == "policy_aligned" else labeled_gate_path
-    selected_source = str(champion_gate_resolution.get("selected_source", "labeled")).strip().lower()
     errors: List[str] = []
 
     if selected_source != expected_source:

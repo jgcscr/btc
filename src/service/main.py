@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from src.service.job_state import ServiceJobStateStore
 from src.service.job_runner import JOB_SPECS, list_jobs, run_job
 from src.service.orchestration import (
     ENDPOINT_SPECS,
@@ -28,7 +29,21 @@ class RunResponse(BaseModel):
     stdout: str
     stderr: str
     job_name: str
+    job_id: Optional[str] = None
     run_id: Optional[str] = None
+
+
+class JobStateResponse(BaseModel):
+    job_id: str
+    job_name: str
+    status: str
+    args: List[str]
+    created_at: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    run_id: Optional[str] = None
+    returncode: Optional[int] = None
+    error: Optional[str] = None
 
 
 def _build_env() -> Dict[str, str]:
@@ -54,12 +69,15 @@ def _run_registered_job(job_name: str, extra_args: Optional[List[str]] = None) -
         )
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown job: {job_name}") from None
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return RunResponse(
         returncode=result.returncode,
         duration_seconds=result.duration_seconds,
         stdout=result.stdout,
         stderr=result.stderr,
         job_name=result.job_name,
+        job_id=result.job_id,
         run_id=result.run_id,
     )
 
@@ -81,6 +99,14 @@ def jobs() -> Dict[str, List[Dict[str, str]]]:
 @app.post("/jobs/{job_name}", response_model=RunResponse)
 def run_registered_job(job_name: str, req: RunRequest) -> RunResponse:
     return _run_registered_job(job_name, req.args)
+
+
+@app.get("/job-runs/{job_id}", response_model=JobStateResponse)
+def get_job_run(job_id: str) -> JobStateResponse:
+    record = ServiceJobStateStore().get_job(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job id: {job_id}")
+    return JobStateResponse(**record.__dict__)
 
 
 def _run_endpoint_job(endpoint_name: str, req: RunRequest) -> RunResponse:

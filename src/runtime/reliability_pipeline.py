@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from src.runtime.models import PipelineExecutionResult, RuntimeMode
+from src.runtime.models import PipelineExecutionResult, PipelineStage, PipelineStatus, RuntimeMode
 from src.runtime.persistence import RuntimeStateStore
 from src.runtime.reliability_registry import ReliabilityRunRegistry
 from src.runtime.reliability_workflow_support import execute_reliability_workflow
@@ -12,18 +12,23 @@ from src.runtime.reliability_workflow_support import execute_reliability_workflo
 def execute_reliability_pipeline(args: argparse.Namespace) -> PipelineExecutionResult:
     store = RuntimeStateStore()
     run_paths = store.start_run(mode=RuntimeMode.RELIABILITY, request=vars(args))
-    store.append_event(run_paths, stage="pipeline", status="started", details={"mode": RuntimeMode.RELIABILITY.value})
+    store.append_event(
+        run_paths,
+        stage=PipelineStage.PIPELINE,
+        status=PipelineStatus.STARTED,
+        details={"mode": RuntimeMode.RELIABILITY.value},
+    )
 
     def sink(step_name: str, status: str, details: dict[str, Any] | None) -> None:
         payload = {"step_name": step_name}
         if details:
             payload.update(details)
-        store.append_event(run_paths, stage="workflow_step", status=status, details=payload)
+        store.append_event(run_paths, stage=PipelineStage.WORKFLOW_STEP, status=status, details=payload)
 
     try:
         manifest = execute_reliability_workflow(args, step_event_sink=sink)
     except Exception as exc:
-        store.append_event(run_paths, stage="pipeline", status="failed", details={"error": str(exc)})
+        store.append_event(run_paths, stage=PipelineStage.PIPELINE, status=PipelineStatus.FAILED, details={"error": str(exc)})
         store.finalize(
             run_paths,
             mode=RuntimeMode.RELIABILITY,
@@ -47,7 +52,7 @@ def execute_reliability_pipeline(args: argparse.Namespace) -> PipelineExecutionR
             "step_count": len(manifest.get("steps", [])) if isinstance(manifest, dict) else None,
         },
     )
-    store.append_event(run_paths, stage="pipeline", status="completed", details={"run_id": run_paths.run_id})
+    store.append_event(run_paths, stage=PipelineStage.PIPELINE, status=PipelineStatus.COMPLETED, details={"run_id": run_paths.run_id})
     return PipelineExecutionResult(
         run_id=run_paths.run_id,
         mode=RuntimeMode.RELIABILITY,

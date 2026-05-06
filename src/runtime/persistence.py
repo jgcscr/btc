@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import json
-from argparse import Namespace
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from src.runtime.models import RuntimeMode, RuntimeRunPaths
+from src.runtime.models import PipelineStage, PipelineStatus, RuntimeEvent, RuntimeMode, RuntimeRunPaths
 from src.runtime.run_registry import RuntimeRunRegistry
+from src.runtime.storage import ArtifactStorage, FileSystemArtifactStorage
 
 
 class RuntimeStateStore:
-    def __init__(self, root: Path | str = Path("artifacts/runtime_runs")) -> None:
+    def __init__(
+        self,
+        root: Path | str = Path("artifacts/runtime_runs"),
+        *,
+        artifact_storage: ArtifactStorage | None = None,
+    ) -> None:
         self.root = Path(root)
         self.registry = RuntimeRunRegistry(self.root)
+        self.artifact_storage = artifact_storage or FileSystemArtifactStorage()
 
     def start_run(self, *, mode: RuntimeMode, request: Mapping[str, Any]) -> RuntimeRunPaths:
         timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -38,20 +44,17 @@ class RuntimeStateStore:
         self,
         paths: RuntimeRunPaths,
         *,
-        stage: str,
-        status: str,
+        stage: PipelineStage | str,
+        status: PipelineStatus | str,
         details: Mapping[str, Any] | None = None,
     ) -> None:
-        event = {
-            "ts": datetime.now().astimezone().isoformat(),
-            "stage": stage,
-            "status": status,
-            "details": self._to_jsonable(details or {}),
-        }
-        paths.events_path.parent.mkdir(parents=True, exist_ok=True)
-        with paths.events_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event))
-            handle.write("\n")
+        event = RuntimeEvent(
+            ts=datetime.now().astimezone().isoformat(),
+            stage=stage.value if isinstance(stage, PipelineStage) else str(stage),
+            status=status.value if isinstance(status, PipelineStatus) else str(status),
+            details=self._to_jsonable(details or {}),
+        )
+        self.artifact_storage.append_event(paths.events_path, event)
 
     def write_predictions(self, paths: RuntimeRunPaths, payload: Mapping[str, Any]) -> None:
         self._write_json(paths.predictions_path, payload)
@@ -94,18 +97,7 @@ class RuntimeStateStore:
         )
 
     def _write_json(self, path: Path, payload: Mapping[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self._to_jsonable(payload), indent=2), encoding="utf-8")
+        self.artifact_storage.write_json(path, payload)
 
     def _to_jsonable(self, value: Any) -> Any:
-        if isinstance(value, Mapping):
-            return {str(key): self._to_jsonable(inner) for key, inner in value.items()}
-        if isinstance(value, Namespace):
-            return {key: self._to_jsonable(inner) for key, inner in vars(value).items()}
-        if isinstance(value, (list, tuple, set)):
-            return [self._to_jsonable(item) for item in value]
-        if isinstance(value, Path):
-            return value.as_posix()
-        if isinstance(value, (datetime, date)):
-            return value.isoformat()
-        return value
+        return self.artifact_storage.to_jsonable(value)

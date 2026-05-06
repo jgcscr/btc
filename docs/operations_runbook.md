@@ -27,6 +27,7 @@ Recommended command paths:
 - live inference: `python -m src.scripts.run_live_inference`
 - reliability workflow: `python -m src.scripts.run_reliability_pipeline`
 - shell cadence: `bash ./scripts/run_cadence.sh <daily|weekly|monthly|shadow>`
+- direct cadence entrypoint: `python -m src.scripts.run_cadence <daily|weekly|monthly|shadow>`
 - service/API: `src/service/main.py`
 
 Legacy full-surface note:
@@ -105,6 +106,12 @@ bash ./scripts/run_cadence.sh monthly
 bash ./scripts/run_cadence.sh shadow
 ```
 
+Equivalent direct Python path:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_cadence daily
+```
+
 ### Replay Validation
 
 ```bash
@@ -135,6 +142,7 @@ That runtime pipeline currently owns:
 The remaining broad CLI/config compatibility surface still lives in:
 
 - `src/scripts/run_refresh_and_predict.py`
+- runtime config loading now supports YAML inheritance through `extends`, merged before CLI normalization
 
 ### Reliability Wrapper
 
@@ -142,7 +150,15 @@ The reliability wrapper executes:
 
 - `src.runtime.reliability_pipeline.execute_reliability_pipeline(...)`
 
-That runtime layer writes runtime telemetry, but the actual workflow steps still come from:
+That runtime layer writes runtime telemetry, and the legacy workflow now delegates most repeated step construction through runtime-owned helpers such as:
+
+- `src.runtime.reliability_step_support`
+- `src.runtime.reliability_champion_command_builders`
+- `src.runtime.reliability_shadow_policy_command_builders`
+- `src.runtime.reliability_validation_command_builders`
+- `src.runtime.reliability_walkforward_command_builders`
+
+The remaining large execution surface still comes from:
 
 - `src.scripts.run_reliability_workflow`
 
@@ -150,7 +166,8 @@ That runtime layer writes runtime telemetry, but the actual workflow steps still
 
 The shell wrapper in `scripts/run_cadence.sh` currently:
 
-- resolves the latest trustworthy reliability run through `src.scripts.resolve_latest_trustworthy_reliability_run`
+- delegates immediately to `src.scripts.run_cadence`
+- resolves the latest trustworthy reliability run through `src.runtime.cadence_support`
 - uses `configs/run_refresh_and_predict.shadow_simplified.yaml` for the daily refresh path
 - runs reliability through `src.scripts.run_reliability_pipeline`
 - runs `shadow` comparison locally through `src.scripts.run_shadow_profile_comparison`
