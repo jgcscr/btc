@@ -11,6 +11,19 @@ from src.runtime.run_registry import RuntimeRunRegistry
 from src.runtime.storage import ArtifactStorage, FileSystemArtifactStorage
 
 
+def _build_artifact_manifest(paths: RuntimeRunPaths) -> dict[str, str]:
+    artifacts = {
+        "request": paths.request_path.as_posix(),
+        "events": paths.events_path.as_posix(),
+        "summary": paths.summary_path.as_posix(),
+        "predictions": paths.predictions_path.as_posix(),
+        "monitoring": paths.monitoring_path.as_posix(),
+    }
+    if paths.trade_ready_path.exists():
+        artifacts["trade_ready"] = paths.trade_ready_path.as_posix()
+    return artifacts
+
+
 class RuntimeStateStore:
     def __init__(
         self,
@@ -78,14 +91,7 @@ class RuntimeStateStore:
             "mode": mode.value,
             "status": status,
             "completed_at": datetime.now().astimezone().isoformat(),
-            "artifacts": {
-                "request": paths.request_path.as_posix(),
-                "events": paths.events_path.as_posix(),
-                "summary": paths.summary_path.as_posix(),
-                "predictions": paths.predictions_path.as_posix(),
-                "monitoring": paths.monitoring_path.as_posix(),
-                "trade_ready": paths.trade_ready_path.as_posix(),
-            },
+            "artifacts": _build_artifact_manifest(paths),
             "summary": self._to_jsonable(summary or {}),
         }
         self._write_json(paths.summary_path, payload)

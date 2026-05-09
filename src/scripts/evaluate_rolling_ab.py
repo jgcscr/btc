@@ -81,7 +81,42 @@ def main() -> None:
 
     merged = baseline.merge(candidate, on="ts", how="inner")
     if merged.empty:
-        raise RuntimeError("No overlapping timestamps between baseline and candidate backtests")
+        payload = {
+            "status": "no_overlapping_timestamps",
+            "message": "No overlapping timestamps between baseline and candidate backtests",
+            "rows_overlap": 0,
+            "window_size": int(args.window_size),
+            "step_size": int(args.step_size),
+            "min_window_trades": int(args.min_window_trades),
+            "allow_no_trade_baseline": bool(args.allow_no_trade_baseline),
+            "overall": {
+                "baseline": _window_stats(np.array([], dtype=float), np.array([], dtype=float)),
+                "candidate": _window_stats(np.array([], dtype=float), np.array([], dtype=float)),
+                "delta_cum_ret": 0.0,
+            },
+            "rolling_summary": {
+                "windows_total": 0,
+                "candidate_wins": 0,
+                "baseline_wins": 0,
+                "ties": 0,
+            },
+            "windows": [],
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        md_lines = [
+            "# Rolling A/B Report",
+            "",
+            "- Status: no_overlapping_timestamps",
+            "- Message: No overlapping timestamps between baseline and candidate backtests",
+            f"- Window size: {payload['window_size']}",
+            f"- Step size: {payload['step_size']}",
+            f"- Min window trades: {payload['min_window_trades']}",
+        ]
+        args.output_md.parent.mkdir(parents=True, exist_ok=True)
+        args.output_md.write_text("\n".join(md_lines), encoding="utf-8")
+        print(json.dumps(payload["rolling_summary"], indent=2))
+        return
 
     windows = _rolling_windows(merged, window_size=int(args.window_size), step_size=int(args.step_size))
     report_windows: List[Dict[str, object]] = []

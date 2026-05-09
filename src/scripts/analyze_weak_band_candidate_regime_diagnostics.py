@@ -77,7 +77,52 @@ def main() -> None:
     incumbent_df = _read_csv_or_parquet(args.incumbent)
     paired, pairing = _pair_frames(candidate_df, incumbent_df)
     if paired.empty:
-        raise RuntimeError("No paired rows available for weak-band regime diagnostics")
+        output = {
+            "candidate": str(args.candidate),
+            "incumbent": str(args.incumbent),
+            "pairing": pairing,
+            "status": "no_paired_rows",
+            "message": "No paired rows available for weak-band regime diagnostics",
+            "scope": {
+                "signal_col": str(args.signal_col),
+                "incumbent_signal_col": str(args.incumbent_signal_col),
+                "return_col": str(args.return_col),
+                "p_up_low": float(args.p_up_low),
+                "p_up_high": float(args.p_up_high),
+                "high_inclusive": bool(int(args.high_inclusive)),
+                "use_midband_slice": bool(int(args.use_midband_slice)),
+                "min_abs_ret_pred": float(args.min_abs_ret_pred),
+                "max_abs_ret_pred": float(args.max_abs_ret_pred),
+                "regime_col": str(args.regime_col),
+                "volatility_col": str(args.volatility_col),
+                "min_regime_rows": int(args.min_regime_rows),
+            },
+            "candidate_only_scope": {
+                "row_count": 0,
+                "net_return_total": 0.0,
+                "net_return_mean": float("nan"),
+                "hit_rate": float("nan"),
+            },
+            "regime_summary": [],
+            "volatility_bucket_summary": [],
+            "volatility_bucket_overall_summary": [],
+            "selected_harmful_regimes": [],
+            "selected_high_volatility_rule": {
+                "volatility_col": str(args.volatility_col),
+                "comparator": ">=",
+                "threshold": float("nan"),
+                "threshold_source": "median_volatility_within_selected_harmful_regimes",
+            },
+            "selection_rule": {
+                "requires_min_regime_rows": int(args.min_regime_rows),
+                "requires_negative_total_return": True,
+                "requires_negative_mean_return": True,
+            },
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(output, indent=2), encoding="utf-8")
+        print(json.dumps(output, indent=2))
+        return
 
     if str(args.signal_col) not in paired.columns:
         raise KeyError(f"Missing candidate signal column: {args.signal_col}")

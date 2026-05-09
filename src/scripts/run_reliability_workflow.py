@@ -2555,6 +2555,41 @@ def _deploy_promoted_reliability_artifacts(
     return manifest_payload
 
 
+def _deploy_trade_decision_model_if_ready(
+    *,
+    run_dir: Path,
+    summary_dir: Path,
+    deploy_cfg: Dict[str, Any],
+    trade_decision_model_path: Path,
+    trade_decision_deploy_ready: bool,
+) -> Dict[str, Any]:
+    target = Path(str(deploy_cfg.get("trade_decision_model_target", "artifacts/models/trade_decision_model.json")))
+    manifest_path = summary_dir / "trade_decision_model_early_deploy_manifest.json"
+    payload: Dict[str, Any] = {
+        "deployed_at": datetime.now(timezone.utc).isoformat(),
+        "run_id": str(run_dir.name),
+        "run_dir": str(run_dir),
+        "source": str(trade_decision_model_path),
+        "target": str(target),
+        "trade_decision_deploy_ready": bool(trade_decision_deploy_ready),
+        "deployed": False,
+        "reason": None,
+    }
+
+    if not bool(trade_decision_deploy_ready):
+        payload["reason"] = "deploy_not_ready"
+    elif not trade_decision_model_path.exists():
+        payload["reason"] = f"source_missing:{trade_decision_model_path}"
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(trade_decision_model_path, target)
+        payload["deployed"] = True
+        payload["reason"] = "promoted_early_after_trade_decision_training"
+
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
 def _find_latest_profile_snapshot_run(
     *,
     run_root: Path,
@@ -3031,7 +3066,7 @@ def execute_reliability_workflow(
             if candidate_quality_input_cfg
             else (summary_dir / "backtest_signals_meta_ensemble.csv")
         )
-        if not args.dry_run and not candidate_quality_input.exists():
+        if not args.dry_run and not candidate_quality_input.exists() and quality_input != labeled_snapshot_csv:
             candidate_quality_input = quality_input
         candidate_gate_input = candidate_quality_input
         tuning_quality_input = candidate_quality_input
@@ -3207,9 +3242,9 @@ def execute_reliability_workflow(
                 shutil.copyfile(pinned_labeled_meta, labeled_meta_output)
                 shutil.copyfile(pinned_labeled_meta, labeled_snapshot_meta)
             quality_input = labeled_snapshot_csv
-            if not candidate_quality_input_cfg:
+            if not candidate_quality_input_cfg and quality_input != labeled_snapshot_csv:
                 candidate_quality_input = quality_input
-            elif not candidate_quality_input.exists():
+            elif not candidate_quality_input.exists() and quality_input != labeled_snapshot_csv:
                 candidate_quality_input = quality_input
             candidate_gate_input = candidate_quality_input
             print(f"Using pinned labeled backtest CSV: {pinned_labeled_csv}", file=sys.stderr)
@@ -3247,9 +3282,9 @@ def execute_reliability_workflow(
         if not args.dry_run and quality_input.exists() and quality_input != labeled_snapshot_csv:
             shutil.copyfile(quality_input, labeled_snapshot_csv)
             quality_input = labeled_snapshot_csv
-            if not candidate_quality_input_cfg:
+            if not candidate_quality_input_cfg and quality_input != labeled_snapshot_csv:
                 candidate_quality_input = quality_input
-            elif not candidate_quality_input.exists():
+            elif not candidate_quality_input.exists() and quality_input != labeled_snapshot_csv:
                 candidate_quality_input = quality_input
             candidate_gate_input = candidate_quality_input
         if not args.dry_run and labeled_meta_output.exists() and labeled_meta_output != labeled_snapshot_meta:
@@ -4049,6 +4084,19 @@ def execute_reliability_workflow(
                     trade_decision_deploy_ready = bool(decision_payload.get("deploy_ready", False))
                 elif args.dry_run:
                     trade_decision_deploy_ready = bool(trade_decision_cfg.get("enabled", True))
+                if not args.dry_run:
+                    deploy_cfg_obj = quality_cfg.get("promotion_deploy", {})
+                    deploy_cfg = deploy_cfg_obj if isinstance(deploy_cfg_obj, dict) else {}
+                    if bool(deploy_cfg.get("enabled", False)) and bool(
+                        deploy_cfg.get("deploy_trade_decision_model_early", True)
+                    ):
+                        _deploy_trade_decision_model_if_ready(
+                            run_dir=run_dir,
+                            summary_dir=summary_dir,
+                            deploy_cfg=deploy_cfg,
+                            trade_decision_model_path=trade_decision_model_path,
+                            trade_decision_deploy_ready=trade_decision_deploy_ready,
+                        )
                 trade_decision_ablation_deploy_ready = False
                 if trade_decision_ablation_model_path.exists() and not args.dry_run:
                     trade_decision_ablation_payload_raw = _load_json(trade_decision_ablation_model_path)

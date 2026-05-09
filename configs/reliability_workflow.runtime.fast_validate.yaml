@@ -341,7 +341,7 @@ quality:
     n_boot: 2000
     seed: 42
   label_ablation:
-    enabled: true
+    enabled: false
     threshold: 0.0
     folds: 2
     train_size: 180

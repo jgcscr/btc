@@ -167,7 +167,41 @@ def main() -> None:
 
     paired, pairing = _pair_frames(default_df, midband_df, incumbent_df)
     if paired.empty:
-        raise RuntimeError("No paired rows available for midband shadow comparison")
+        output_payload = {
+            "default_candidate": str(args.default_candidate),
+            "midband_shadow_candidate": str(args.midband_shadow_candidate),
+            "incumbent": str(args.incumbent),
+            "pairing": pairing,
+            "status": "no_paired_rows",
+            "message": "No paired rows available for midband shadow comparison",
+            "windowing": {
+                "window_size": int(args.window_size),
+                "step_size": int(args.step_size),
+                "min_rows": int(args.min_rows),
+                "n_boot": int(args.n_boot),
+                "seed": int(args.seed),
+            },
+            "current_window": None,
+            "retrospective_windows": [],
+            "aggregate_summary": {
+                "number_of_evaluated_windows": 0,
+                "windows_improved_by_mean_diff": 0,
+                "windows_improved_by_candidate_net_return": 0,
+                "clearly_harmed_windows": [],
+                "aggregate_delta_candidate_net_return_total": float("nan"),
+                "aggregate_delta_mean_diff": float("nan"),
+                "median_vetoed_rows": float("nan"),
+                "mean_vetoed_rows": float("nan"),
+            },
+            "shadow_meta_vetoed_rows": {
+                "midband_shadow": None,
+            },
+            "run_level_verdict": "inconclusive",
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
+        print(json.dumps(output_payload, indent=2))
+        return
 
     default_ret = pd.to_numeric(paired[f"{args.candidate_col}_default"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     midband_ret = pd.to_numeric(paired[f"{args.candidate_col}_midband_shadow"], errors="coerce").fillna(0.0).to_numpy(dtype=float)

@@ -10,6 +10,10 @@ import pandas as pd
 from src.data.macro_loader import MACRO_FEATURE_COLUMNS
 from src.data.onchain_loader import ONCHAIN_FEATURE_COLUMNS
 from src.trading.data_quality import DataQualityError
+from src.trading.feature_engineering import (
+    apply_funding_rate_features as _shared_apply_funding_rate_features,
+    augment_hourly_price_features as _shared_augment_hourly_price_features,
+)
 from src.trading.intrabar_features import compute_hourly_intrabar_features
 from src.trading.signals import PreparedData, format_ts_iso, prepare_data_for_signals_from_ohlcv
 from src.trading.volatility import DEFAULT_REALIZED_WINDOWS, add_volatility_columns
@@ -329,6 +333,13 @@ def enrich_local_features_for_model(
 
         _add_numeric_column("momentum_slope_2h", close_for_liquidity.pct_change(periods=2))
         _add_numeric_column("momentum_slope_4h", close_for_liquidity.pct_change(periods=4))
+
+    before_shared = set(enriched.columns)
+    enriched = _shared_apply_funding_rate_features(enriched, strict_missing=False)
+    enriched = _shared_augment_hourly_price_features(enriched, strict_missing=False)
+    for column in required:
+        if column in enriched.columns and column not in before_shared:
+            _record_added(column)
 
     return enriched, added
 

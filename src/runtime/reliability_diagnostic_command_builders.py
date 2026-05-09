@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, List, Mapping, Sequence
+
+
+def _infer_horizon_from_path(input_path: Path) -> float | None:
+    match = re.search(r"(?:^|_)(\d+(?:\.\d+)?)h(?:_|$)", input_path.stem)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
 
 
 def build_feature_reliability_command(
@@ -11,7 +22,7 @@ def build_feature_reliability_command(
     feature_cfg: Mapping[str, Any],
     output_path: Path,
 ) -> List[str]:
-    return [
+    cmd = [
         python,
         "-m",
         "src.scripts.evaluate_feature_reliability",
@@ -28,6 +39,27 @@ def build_feature_reliability_command(
         "--output",
         str(output_path),
     ]
+    horizon = feature_cfg.get("horizon")
+    if horizon is None:
+        horizon = _infer_horizon_from_path(input_path)
+    if horizon is not None:
+        cmd.extend(["--horizon", str(float(horizon))])
+
+    horizon_col = feature_cfg.get("horizon_col")
+    if horizon_col:
+        cmd.extend(["--horizon-col", str(horizon_col)])
+
+    regime_col = feature_cfg.get("regime_col")
+    if regime_col:
+        cmd.extend(["--regime-col", str(regime_col)])
+    elif bool(feature_cfg.get("derive_regime", True)):
+        cmd.append("--derive-regime")
+
+    min_slice_rows = feature_cfg.get("min_slice_rows")
+    if min_slice_rows is not None:
+        cmd.extend(["--min-slice-rows", str(int(min_slice_rows))])
+
+    return cmd
 
 
 def build_overlap_trust_stability_command(

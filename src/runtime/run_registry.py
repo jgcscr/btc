@@ -8,6 +8,19 @@ from typing import Any, Mapping
 from src.runtime.models import RuntimeMode, RuntimeRunPaths
 
 
+def _build_artifact_manifest(paths: RuntimeRunPaths) -> dict[str, str]:
+    artifacts = {
+        "request": paths.request_path.as_posix(),
+        "events": paths.events_path.as_posix(),
+        "summary": paths.summary_path.as_posix(),
+        "predictions": paths.predictions_path.as_posix(),
+        "monitoring": paths.monitoring_path.as_posix(),
+    }
+    if paths.trade_ready_path.exists():
+        artifacts["trade_ready"] = paths.trade_ready_path.as_posix()
+    return artifacts
+
+
 class RuntimeRunRegistry:
     def __init__(self, root: Path | str = Path("artifacts/runtime_runs")) -> None:
         self.root = Path(root)
@@ -27,14 +40,7 @@ class RuntimeRunRegistry:
             "recorded_at": datetime.now().astimezone().isoformat(),
             "run_root": paths.root.as_posix(),
             "summary_path": paths.summary_path.as_posix(),
-            "artifacts": {
-                "request": paths.request_path.as_posix(),
-                "events": paths.events_path.as_posix(),
-                "summary": paths.summary_path.as_posix(),
-                "predictions": paths.predictions_path.as_posix(),
-                "monitoring": paths.monitoring_path.as_posix(),
-                "trade_ready": paths.trade_ready_path.as_posix(),
-            },
+            "artifacts": _build_artifact_manifest(paths),
             "summary": _to_jsonable(summary or {}),
         }
         self._write_json(self.root / "latest.json", payload)

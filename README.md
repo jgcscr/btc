@@ -55,6 +55,7 @@ Current operator note:
 
 - the checked-in `configs/run_refresh_and_predict.default.yaml` sets `write_artifacts: false`, so the baseline research command refreshes `artifacts/predictions/latest.json`, `artifacts/monitoring/latest.json`, and `artifacts/runtime_runs/latest.json`, but it does not rewrite `artifacts/monitoring/trade_ready_summary.json`
 - when you need the trade-ready monitoring snapshot to match the current research run, rerun the same command with `--write-artifacts`
+- without `--write-artifacts`, the run-scoped summary and latest runtime manifests omit the `trade_ready` artifact entry instead of advertising a file that was never written
 
 Exact fresh research commands used successfully:
 
@@ -109,6 +110,7 @@ Current reliability note:
 
 - both checked-in reliability workflow profiles already use `quality.lookback_rows: 50000` and `quality.lookback_hours: 8760`, which is the hardened long-window slice that produced a deploy-ready trade-decision gate during the feature-lift rerun
 - the checked-in default and runtime profiles now rebuild quality inputs from the run-local labeled snapshot, point the meta-component frame at `artifacts/monitoring/labeled_backtest_1h.csv`, and enable reliability-snapshot inclusion so downstream quality, trade-decision, and champion-gate checks evaluate the current-period candidate source instead of a stale historical backtest
+- the workflow now promotes a deploy-ready trade-decision model immediately after trade-decision training, before later optional diagnostics, so live gating can advance even when sparse downstream diagnostics degrade to nonfatal reports
 - `--continue-on-promotion-fail` now also treats expected directional-objective exit `2` as nonfatal, which keeps later validation steps running when deploy gating blocks promotion without aborting the workflow early
 - overlap reconciliation now supports a binary fallback labeling path when primary timestamp overlap is too sparse, and both checked-in profiles lower `quality.trade_decision_model.min_rows` to `240` plus `trend_ignition` regime minimum rows to `40` to match the current validated support envelope
 
@@ -214,7 +216,7 @@ Read these first after any runtime refresh or cadence run:
 - `artifacts/runtime_runs/<run-id>/summary.json`
 - `artifacts/runtime_runs/<run-id>/predictions.json`
 - `artifacts/runtime_runs/<run-id>/monitoring.json`
-- `artifacts/runtime_runs/<run-id>/trade_ready.json`
+- `artifacts/runtime_runs/<run-id>/trade_ready.json` only when the run used `--write-artifacts` or a profile with `write_artifacts: true`
 - `artifacts/runtime_runs/latest.json`
 - `artifacts/runtime_runs/latest_by_mode/<mode>.json`
 

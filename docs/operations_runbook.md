@@ -57,6 +57,7 @@ Current research note:
 
 - `configs/run_refresh_and_predict.default.yaml` keeps `write_artifacts: false`, so the first command refreshes `artifacts/predictions/latest.json`, `artifacts/monitoring/latest.json`, and `artifacts/runtime_runs/latest.json`, but leaves `artifacts/monitoring/trade_ready_summary.json` untouched
 - the `--write-artifacts` form refreshes `artifacts/monitoring/trade_ready_summary.json`, the run-scoped `trade_ready.json`, and the meta baseline in the same runtime pipeline pass
+- without `--write-artifacts`, the run-scoped summary and latest runtime manifests omit the `trade_ready` artifact entry instead of advertising a file that was never written
 
 ### Live Inference
 
@@ -96,6 +97,7 @@ Default profile:
 Current workflow note:
 
 - the checked-in runtime and default reliability profiles already use `quality.lookback_rows: 50000` and `quality.lookback_hours: 8760`, so the workflow path operates on the hardened long-window labeled slice rather than the older short 2000-row manual rebuild
+- trade-decision training now performs an early deploy of a deploy-ready gate before later optional diagnostics, and the sparse overlap shadow diagnostics now degrade to structured nonfatal outputs when paired rows or timestamp overlap are unavailable
 
 ### Shell Cadence
 
@@ -206,7 +208,7 @@ Read these first after a direct refresh, live inference run, or cadence refresh:
 - `artifacts/runtime_runs/<run-id>/summary.json`
 - `artifacts/runtime_runs/<run-id>/predictions.json`
 - `artifacts/runtime_runs/<run-id>/monitoring.json`
-- `artifacts/runtime_runs/<run-id>/trade_ready.json`
+ - `artifacts/runtime_runs/<run-id>/trade_ready.json` only when the run used `--write-artifacts` or a profile with `write_artifacts: true`
 
 Read these first after a reliability run:
 

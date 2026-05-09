@@ -122,7 +122,41 @@ def main() -> None:
         pairing = "tail_index"
 
     if merged.empty:
-        raise RuntimeError("No paired rows available for trigger-overlap diagnostics")
+        payload = {
+            "candidate": str(args.candidate),
+            "incumbent": str(args.incumbent),
+            "candidate_col": args.candidate_col,
+            "incumbent_col": args.incumbent_col,
+            "signal_col": args.signal_col,
+            "pairing": pairing,
+            "status": "no_paired_rows",
+            "message": "No paired rows available for trigger-overlap diagnostics",
+            "totals": {
+                "paired_rows": 0,
+                "candidate_trade_count": 0,
+                "incumbent_trade_count": 0,
+                "candidate_net_total": 0.0,
+                "incumbent_net_total": 0.0,
+                "net_diff_total": 0.0,
+                "net_diff_mean": float("nan"),
+                "net_diff_std": float("nan"),
+                "nonzero_paired_rows": 0,
+            },
+            "buckets": {},
+            "candidate_only_breakdown": {
+                "by_candidate_p_up_band": [],
+                "by_candidate_abs_ret_pred_band": [],
+            },
+            "incumbent_only_breakdown": {
+                "by_incumbent_p_up_band": [],
+                "by_incumbent_abs_ret_pred_band": [],
+            },
+            "worst_bucket": None,
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(json.dumps(payload, indent=2))
+        return
 
     sig_c = f"{args.signal_col}_cand"
     sig_i = f"{args.signal_col}_inc"
