@@ -576,6 +576,13 @@ def build_signal_expansion_rollout_summary(
     signal_payload: Mapping[str, Any],
     derivatives_audit: Mapping[str, Any],
     derivatives_scaffold: Mapping[str, Any],
+    meta_baseline_source_csv: str,
+    meta_config_path: str,
+    meta_signal_mode: str,
+    meta_weight_threshold: float,
+    meta_selected_weight_threshold: float | None = None,
+    meta_auto_threshold_on_oof: bool | None = None,
+    meta_threshold_selection: Mapping[str, Any] | None = None,
     derivatives_config_path: str,
     featurelift_config_path: str,
     featurelift_package_path: str,
@@ -592,8 +599,24 @@ def build_signal_expansion_rollout_summary(
     readiness = derivatives_audit.get("readiness") if isinstance(derivatives_audit.get("readiness"), Mapping) else {}
 
     return {
-        "next_priority_family": "derivatives",
+        "next_priority_family": "meta_ensemble",
+        "follow_on_priority_families": ["derivatives", "featurelift_4h"],
         "program_direction": {
+            "meta_ensemble": {
+                "status": "priority_eval_lane",
+                "recommended_action": "evaluate_before_expanding_base_models",
+                "source_csv": meta_baseline_source_csv,
+                "config_path": meta_config_path,
+                "signal_mode": meta_signal_mode,
+                "weight_threshold": meta_weight_threshold,
+                "selected_weight_threshold": (
+                    float(meta_selected_weight_threshold)
+                    if meta_selected_weight_threshold is not None
+                    else float(meta_weight_threshold)
+                ),
+                "auto_threshold_on_oof": bool(meta_auto_threshold_on_oof) if meta_auto_threshold_on_oof is not None else None,
+                "threshold_selection": dict(meta_threshold_selection or {}),
+            },
             "macro": {
                 "status": str(macro_payload.get("status") or "unknown"),
                 "disposition": str(macro_payload.get("disposition") or "unknown"),
@@ -618,6 +641,7 @@ def build_signal_expansion_rollout_summary(
             },
         },
         "implementation_notes": [
+            "Meta-ensemble evaluation is the first upgrade lane; improve the combiner before expanding the base-model roster.",
             "Derivatives move into a dedicated shadow candidate config rather than remaining ignored by live coverage.",
             "4h feature-lift remains the shadow retrain lane for model-level improvement.",
             "State-engineering stays constrained to the guarded 4h-only runner until stronger evidence appears.",

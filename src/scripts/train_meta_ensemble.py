@@ -13,6 +13,15 @@ from sklearn.model_selection import TimeSeriesSplit
 
 CostSchedule = Tuple[float, float, str]
 
+DEFAULT_META_COMPONENT_FRAME = Path("artifacts/monitoring/meta_component_frame_1h.csv")
+DEFAULT_META_COMPONENT_COLUMNS = ["xgb", "transformer", "lstm"]
+DEFAULT_META_WEIGHT_THRESHOLD = 0.52
+DEFAULT_META_SIGNAL_MODE = "meta_veto"
+DEFAULT_META_COMPONENT_WEIGHT_SPEC = "transformer:0.0,lstm:1.0,xgb:1.5"
+DEFAULT_META_AUTO_THRESHOLD = True
+DEFAULT_META_MIN_THRESHOLD_TRADES = 25
+DEFAULT_META_MAX_THRESHOLD_QUANTILE = 0.95
+
 
 @dataclass
 class MetaEnsembleResult:
@@ -61,13 +70,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight-threshold",
         type=float,
-        default=0.5,
+        default=DEFAULT_META_WEIGHT_THRESHOLD,
         help="Probability threshold to activate the meta-ensemble trade signal.",
+    )
+    parser.add_argument(
+        "--auto-threshold-on-oof",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_META_AUTO_THRESHOLD,
+        help="Select the trading threshold from OOF net-return performance instead of using the fixed threshold directly.",
+    )
+    parser.add_argument(
+        "--min-threshold-trades",
+        type=int,
+        default=DEFAULT_META_MIN_THRESHOLD_TRADES,
+        help="Minimum OOF trades required when selecting an automatic threshold.",
+    )
+    parser.add_argument(
+        "--max-auto-threshold-quantile",
+        type=float,
+        default=DEFAULT_META_MAX_THRESHOLD_QUANTILE,
+        help="Cap automatic thresholds at this OOF meta-probability quantile to avoid ultra-sparse tail thresholds.",
     )
     parser.add_argument(
         "--signal-mode",
         choices=("gate_only", "meta_veto", "meta_only"),
-        default="gate_only",
+        default=DEFAULT_META_SIGNAL_MODE,
         help="How to turn p_up_gate and p_up_meta into signal_meta.",
     )
     parser.add_argument(
@@ -84,13 +111,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--component-frame-csv",
         type=Path,
-        default=None,
+        default=DEFAULT_META_COMPONENT_FRAME,
         help="Optional CSV containing ts, ret_1h, and p_up_* component columns in one file.",
     )
     parser.add_argument(
         "--component-column",
         action="append",
-        default=[],
+        default=list(DEFAULT_META_COMPONENT_COLUMNS),
         help="Optional component column or alias to keep when using --component-frame-csv.",
     )
     parser.add_argument(
@@ -102,7 +129,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--component-weight-spec",
         type=str,
-        default=None,
+        default=DEFAULT_META_COMPONENT_WEIGHT_SPEC,
         help="Optional comma-separated component weights, e.g. transformer:0,lstm:1.5,xgb:1.5.",
     )
     parser.add_argument(
@@ -296,13 +323,20 @@ def load_component_frame(
 def validate_alignment(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
     base = frames[0].copy()
     for frame in frames[1:]:
-        if len(frame) != len(base):
-            raise ValueError("Input CSVs have mismatched lengths; ensure they cover identical windows.")
-        if not (frame["ts"].values == base["ts"].values).all():
-            raise ValueError("Timestamp alignment mismatch between input CSVs.")
-        if not np.allclose(frame["ret_1h"].values, base["ret_1h"].values):
-            raise ValueError("Mismatch in realized returns across input CSVs.")
-    return base
+        merged = base.merge(
+            frame,
+            on="ts",
+            how="inner",
+            suffixes=("", "_peer"),
+        )
+        if merged.empty:
+            raise ValueError("Input CSVs do not share any overlapping timestamps.")
+        if not np.allclose(merged["ret_1h"].values, merged["ret_1h_peer"].values):
+            raise ValueError("Mismatch in realized returns across overlapping input CSVs.")
+
+        keep_columns = [column for column in merged.columns if column != "ret_1h_peer"]
+        base = merged[keep_columns].copy()
+    return base.reset_index(drop=True)
 
 
 def compute_split_indices(n_rows: int) -> Tuple[int, int]:
@@ -441,6 +475,132 @@ def summarize_meta_backtest(
     return MetaEnsembleResult(fee_bps, slippage_bps, label, trades, hit_rate, net_return)
 
 
+def build_signal_from_probabilities(
+    gate_probability: pd.Series,
+    meta_probability: pd.Series,
+    *,
+    threshold: float,
+    signal_mode: str,
+) -> pd.Series:
+    gate_signal = gate_probability >= threshold
+    meta_signal = meta_probability >= threshold
+    if signal_mode == "meta_only":
+        signal = meta_signal
+    elif signal_mode == "meta_veto":
+        signal = gate_signal & meta_signal
+    else:
+        signal = gate_signal
+    return signal.astype(int)
+
+
+def label_backtest_splits(p_up_meta: pd.Series, *, n_test_start: int) -> pd.Series:
+    labels = pd.Series("test_holdout", index=p_up_meta.index, dtype=object)
+    labels.iloc[:n_test_start] = "trainval_oof"
+    warmup_mask = p_up_meta.isna()
+    labels.iloc[:n_test_start] = labels.iloc[:n_test_start].where(
+        ~warmup_mask.iloc[:n_test_start],
+        "train_warmup",
+    )
+    return labels
+
+
+def select_threshold_from_oof(
+    oof_frame: pd.DataFrame,
+    *,
+    fallback_threshold: float,
+    signal_mode: str,
+    min_trades: int,
+    max_threshold_quantile: float,
+    fee_bps: float = 2.0,
+    slippage_bps: float = 1.0,
+) -> tuple[float, Dict[str, float]]:
+    candidate_thresholds = [round(value, 3) for value in np.arange(0.45, 0.651, 0.01)]
+    best_summary: Dict[str, float] | None = None
+    best_threshold = float(fallback_threshold)
+    per_trade_cost = (float(fee_bps) + float(slippage_bps)) / 10_000.0
+
+    valid_oof = oof_frame[np.isfinite(oof_frame["p_up_meta"])].copy()
+    if valid_oof.empty:
+        return best_threshold, {
+            "threshold": best_threshold,
+            "trades": 0.0,
+            "net": float("nan"),
+            "hit_rate": float("nan"),
+        }
+
+    for threshold in candidate_thresholds:
+        signal = build_signal_from_probabilities(
+            valid_oof["p_up_gate"],
+            valid_oof["p_up_meta"],
+            threshold=threshold,
+            signal_mode=signal_mode,
+        )
+        trades = int(signal.sum())
+        if trades < int(min_trades):
+            continue
+        gross = valid_oof["ret_1h"] * signal
+        net = float((gross - per_trade_cost * signal).sum())
+        active = valid_oof.loc[signal > 0, "ret_1h"]
+        hit_rate = float((active > 0).mean()) if not active.empty else float("nan")
+        summary = {
+            "threshold": float(threshold),
+            "trades": float(trades),
+            "net": net,
+            "hit_rate": hit_rate,
+        }
+        if best_summary is None or summary["net"] > best_summary["net"] or (
+            summary["net"] == best_summary["net"] and summary["trades"] > best_summary["trades"]
+        ):
+            best_summary = summary
+            best_threshold = float(threshold)
+
+    if best_summary is None:
+        fallback_signal = build_signal_from_probabilities(
+            valid_oof["p_up_gate"],
+            valid_oof["p_up_meta"],
+            threshold=best_threshold,
+            signal_mode=signal_mode,
+        )
+        trades = int(fallback_signal.sum())
+        gross = valid_oof["ret_1h"] * fallback_signal
+        net = float((gross - per_trade_cost * fallback_signal).sum())
+        active = valid_oof.loc[fallback_signal > 0, "ret_1h"]
+        hit_rate = float((active > 0).mean()) if not active.empty else float("nan")
+        best_summary = {
+            "threshold": best_threshold,
+            "trades": float(trades),
+            "net": net,
+            "hit_rate": hit_rate,
+        }
+
+    capped_quantile = min(max(float(max_threshold_quantile), 0.0), 1.0)
+    quantile_cap = float(valid_oof["p_up_meta"].quantile(capped_quantile))
+    quantile_cap = round(quantile_cap, 3)
+    if np.isfinite(quantile_cap) and best_threshold > quantile_cap:
+        best_threshold = quantile_cap
+        capped_signal = build_signal_from_probabilities(
+            valid_oof["p_up_gate"],
+            valid_oof["p_up_meta"],
+            threshold=best_threshold,
+            signal_mode=signal_mode,
+        )
+        trades = int(capped_signal.sum())
+        gross = valid_oof["ret_1h"] * capped_signal
+        net = float((gross - per_trade_cost * capped_signal).sum())
+        active = valid_oof.loc[capped_signal > 0, "ret_1h"]
+        hit_rate = float((active > 0).mean()) if not active.empty else float("nan")
+        best_summary = {
+            "threshold": best_threshold,
+            "trades": float(trades),
+            "net": net,
+            "hit_rate": hit_rate,
+            "quantile_cap": quantile_cap,
+        }
+    else:
+        best_summary["quantile_cap"] = quantile_cap
+    return best_threshold, best_summary
+
+
 def adjust_baseline_net(
     base_net: float,
     base_fee_bps: float,
@@ -467,6 +627,7 @@ def save_meta_config(
     component_columns: Sequence[str],
     extra_feature_columns: Sequence[str],
     component_weights: Dict[str, float],
+    threshold_selection: Dict[str, float | int | bool | str | None],
 ) -> None:
     payload = {
         "feature_columns": list(feature_columns),
@@ -488,6 +649,18 @@ def save_meta_config(
         "oof_metrics": {key: float(value) for key, value in oof_metrics.items()},
         "trainval_metrics": {key: float(value) for key, value in trainval_metrics.items()},
         "component_weights": {key: float(value) for key, value in component_weights.items()},
+        "threshold_selection": {
+            key: (
+                value
+                if isinstance(value, bool)
+                else (
+                float(value)
+                if isinstance(value, (int, float, np.integer, np.floating)) and value is not None
+                else value
+                )
+            )
+            for key, value in threshold_selection.items()
+        },
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
@@ -543,12 +716,49 @@ def main() -> None:
 
     X_trainval = trainval_df[feature_cols]
     y_trainval = trainval_df["target"]
+    gate_trainval = weighted_probability_average(trainval_df, component_columns, component_weights)
 
     oof_prob = compute_oof_probabilities(X_trainval, y_trainval, n_splits=args.oof_splits)
+    selected_threshold = float(args.weight_threshold)
+    threshold_selection: Dict[str, float | int | bool | str | None] = {
+        "auto_threshold_on_oof": bool(args.auto_threshold_on_oof),
+        "fallback_threshold": float(args.weight_threshold),
+        "selected_threshold": float(selected_threshold),
+        "signal_mode": str(args.signal_mode),
+        "min_threshold_trades": int(args.min_threshold_trades),
+        "max_auto_threshold_quantile": float(args.max_auto_threshold_quantile),
+    }
+    if args.auto_threshold_on_oof:
+        selected_threshold, threshold_summary = select_threshold_from_oof(
+            pd.DataFrame(
+                {
+                    "ret_1h": trainval_df["ret_1h"].to_numpy(dtype=float),
+                    "p_up_meta": oof_prob,
+                    "p_up_gate": gate_trainval.to_numpy(dtype=float),
+                }
+            ),
+            fallback_threshold=float(args.weight_threshold),
+            signal_mode=args.signal_mode,
+            min_trades=int(args.min_threshold_trades),
+            max_threshold_quantile=float(args.max_auto_threshold_quantile),
+        )
+        threshold_selection.update(threshold_summary)
+        threshold_selection["selected_threshold"] = float(selected_threshold)
+        print(
+            "Selected OOF threshold: "
+            f"{selected_threshold:.3f} "
+            f"(net={threshold_summary['net']:.6f}, trades={int(threshold_summary['trades'])}, hit_rate={threshold_summary['hit_rate']:.3f}, quantile_cap={threshold_summary['quantile_cap']:.3f})"
+        )
+    else:
+        threshold_selection["quantile_cap"] = None
+        threshold_selection["trades"] = None
+        threshold_selection["net"] = None
+        threshold_selection["hit_rate"] = None
+
     oof_metrics = evaluate_probabilities(
         y_trainval.to_numpy(dtype=int),
         oof_prob,
-        threshold=args.weight_threshold,
+        threshold=selected_threshold,
     )
 
     print("OOF metrics (stacking sanity check):")
@@ -560,7 +770,7 @@ def main() -> None:
     trainval_metrics = evaluate_probabilities(
         y_trainval.to_numpy(dtype=int),
         trainval_prob,
-        threshold=args.weight_threshold,
+        threshold=selected_threshold,
     )
 
     print("\nFinal model metrics on train+val:")
@@ -575,30 +785,30 @@ def main() -> None:
 
     full_backtest = master.copy()
     full_backtest["p_up_meta"] = np.nan
-    full_backtest.loc[: n_test_start - 1, "p_up_meta"] = oof_prob
-    full_backtest.loc[n_test_start:, "p_up_meta"] = final_model.predict_proba(test_df[feature_cols])[:, 1]
+    p_up_meta_col = full_backtest.columns.get_loc("p_up_meta")
+    full_backtest.iloc[:n_test_start, p_up_meta_col] = oof_prob
+    full_backtest.iloc[n_test_start:, p_up_meta_col] = final_model.predict_proba(test_df[feature_cols])[:, 1]
     # Gate signal uses a stable average of base probabilities to reduce over-compressed meta scores.
     full_backtest["p_up_gate"] = weighted_probability_average(
         full_backtest,
         component_columns,
         component_weights,
     )
-    gate_signal = full_backtest["p_up_gate"] >= args.weight_threshold
-    meta_signal = full_backtest["p_up_meta"] >= args.weight_threshold
-    if args.signal_mode == "meta_only":
-        signal_meta = meta_signal
-    elif args.signal_mode == "meta_veto":
-        signal_meta = gate_signal & meta_signal
-    else:
-        signal_meta = gate_signal
+    gate_signal = full_backtest["p_up_gate"] >= selected_threshold
+    meta_signal = full_backtest["p_up_meta"] >= selected_threshold
+    signal_meta = build_signal_from_probabilities(
+        full_backtest["p_up_gate"],
+        full_backtest["p_up_meta"],
+        threshold=selected_threshold,
+        signal_mode=args.signal_mode,
+    ).astype(bool)
     full_backtest["meta_veto_blocked"] = (gate_signal & ~meta_signal).astype(int)
     full_backtest["signal_meta"] = signal_meta.astype(int)
     full_backtest["y_true"] = full_backtest["target"].astype(int)
     full_backtest["fold"] = (np.arange(len(full_backtest)) // max(int(n_val), 1)).astype(int)
-    full_backtest["backtest_split"] = np.where(
-        np.arange(len(full_backtest)) < n_test_start,
-        "trainval_oof",
-        "test_holdout",
+    full_backtest["backtest_split"] = label_backtest_splits(
+        full_backtest["p_up_meta"],
+        n_test_start=n_test_start,
     )
 
     schedules: List[CostSchedule] = [
@@ -673,7 +883,7 @@ def main() -> None:
         feature_cols,
         final_model.intercept_[0],
         final_model.coef_[0],
-        args.weight_threshold,
+        selected_threshold,
         args.signal_mode,
         schedule_dicts,
         oof_metrics,
@@ -682,6 +892,7 @@ def main() -> None:
         component_columns,
         extra_feature_columns,
         component_weights,
+        threshold_selection,
     )
 
     base_fee = 2.0
@@ -691,7 +902,7 @@ def main() -> None:
     else:
         baseline_prob = master[component_columns[0]].to_numpy(dtype=float)
     baseline_test = master.iloc[n_test_start:].copy()
-    baseline_test["signal_ensemble"] = (baseline_prob[n_test_start:] >= args.weight_threshold).astype(int)
+    baseline_test["signal_ensemble"] = (baseline_prob[n_test_start:] >= selected_threshold).astype(int)
     baseline_test["ret_ensemble_net"] = baseline_test["ret_1h"] * baseline_test["signal_ensemble"] - ((base_fee + base_slip) / 10_000.0) * baseline_test["signal_ensemble"]
     baseline_trades = int(baseline_test["signal_ensemble"].sum())
     baseline_net_base = float(baseline_test["ret_ensemble_net"].sum())

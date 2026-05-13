@@ -182,6 +182,13 @@ class SignalProgramSupportTests(unittest.TestCase):
             },
             derivatives_audit={"readiness": {"decision": "shadow_scaffold_ready", "next_action": "run_first_shadow_derivatives_validation"}},
             derivatives_scaffold={"runner_status": "ready"},
+            meta_baseline_source_csv="artifacts/backtests/backtest_signals_meta_ensemble.csv",
+            meta_config_path="configs/reliability_workflow.runtime.yaml",
+            meta_signal_mode="meta_veto",
+            meta_weight_threshold=0.52,
+            meta_selected_weight_threshold=0.54,
+            meta_auto_threshold_on_oof=True,
+            meta_threshold_selection={"trades": 313.0, "net": -0.114309, "quantile_cap": 0.54},
             derivatives_config_path="configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml",
             featurelift_config_path="configs/run_refresh_and_predict.shadow_featurelift_4h_candidate.yaml",
             featurelift_package_path="artifacts/analysis/featurelift_20260331_rerun/shadow_rollout_4h_package.md",
@@ -189,8 +196,11 @@ class SignalProgramSupportTests(unittest.TestCase):
             state_guarded_md_path="artifacts/analysis/state_engineering_guarded_shadow_4h_latest.md",
         )
 
-        self.assertEqual(payload["next_priority_family"], "derivatives")
+        self.assertEqual(payload["next_priority_family"], "meta_ensemble")
         self.assertEqual(payload["program_direction"]["macro"]["recommended_action"], "keep_deprioritized")
+        self.assertEqual(payload["program_direction"]["meta_ensemble"]["selected_weight_threshold"], 0.54)
+        self.assertTrue(payload["program_direction"]["meta_ensemble"]["auto_threshold_on_oof"])
+        self.assertEqual(payload["program_direction"]["meta_ensemble"]["threshold_selection"]["trades"], 313.0)
         self.assertEqual(
             payload["program_direction"]["derivatives"]["candidate_config"],
             "configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml",

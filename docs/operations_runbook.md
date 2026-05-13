@@ -389,7 +389,9 @@ Write the combined rollout summary for the active expansion lanes:
 
 Current rollout posture:
 
-- derivatives: next-priority shadow lane with a dedicated candidate config
+- meta-ensemble: evaluate the combiner before expanding the base-model roster; the runtime profile still configures `0.52`, but the latest trained combiner selected `0.54` from OOF threshold search with `meta_veto`
+- meta-ensemble threshold evidence: read `artifacts/backtests/meta_ensemble_config.json` for `threshold_selection` and `artifacts/analysis/signal_expansion_rollout_latest.{json,md}` for the packaged operator summary
+- derivatives: second-priority shadow lane with a dedicated candidate config
 - 4h feature-lift: existing retrain-driven shadow package remains active
 - 12h interaction experiments: use the dedicated shadow package rather than changing the validated shared stack in place
 - state-engineering: keep the guarded `4h`-only runner rather than widening scope
