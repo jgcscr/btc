@@ -92,6 +92,7 @@ def build_prediction_result(
         "confidence_min_source": confidence_min_source,
         "position_size_cap": position_size_cap,
         "p_up_components": signal.get("p_up_components", {}),
+        "direction_ensemble": signal.get("direction_ensemble", {}),
         "stop_loss": stop_loss_price,
         "take_profit": take_profit_price,
         "expected_value": expected_value,

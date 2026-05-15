@@ -254,6 +254,10 @@ Current wrapper-emitted live-style size caps in the approved Binance-only profil
 Current config note:
 
 - the live conservative config still contains some dormant `8h` controls, but the direct live wrapper does not emit `8h` because its default targets are `0.25,1,4,12`
+- current checked-in default, live, and research-safe profiles use the same family-biased direction ensemble policy: prefer `tree` and `attention`, keep `volatility` as support, and allow one optional `regime_logit` member when a horizon-specific artifact exists
+- top-level `dir_model_weights` intentionally excludes `regime_logit`; horizon-specific `regime_model_weights` and `direction_ensemble_policy` add it only after per-horizon artifact resolution, which keeps the base config compatible with CLI validation
+- the audit that drove this retune is written to `artifacts/analysis/direction_family_value_latest.json` by `src/scripts/analyze_direction_family_value.py`
+- the latest operator closeout for this retune is `docs/direction_ensemble_family_retune_closeout_20260515.md`
 
 ## 6. Minimum Checks Before Trusting A Runtime Snapshot
 

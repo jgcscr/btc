@@ -27,11 +27,21 @@ DEFAULT_DIR_MODEL_DIR_1H: str = (
 DEFAULT_LSTM_MODEL_DIR_1H: str | None = (
 	"models:/lstm_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/lstm_dir1h_v1"
 )
-DEFAULT_BILSTM_MODEL_DIR_1H: str | None = None
-DEFAULT_GRU_MODEL_DIR_1H: str | None = None
-DEFAULT_CNN_LSTM_MODEL_DIR_1H: str | None = None
-DEFAULT_CNN_BILSTM_MODEL_DIR_1H: str | None = None
-DEFAULT_GARCH_LSTM_MODEL_DIR_1H: str | None = None
+DEFAULT_BILSTM_MODEL_DIR_1H: str | None = (
+	"models:/bilstm_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/bilstm_dir1h_v1"
+)
+DEFAULT_GRU_MODEL_DIR_1H: str | None = (
+	"models:/gru_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/gru_dir1h_v1"
+)
+DEFAULT_CNN_LSTM_MODEL_DIR_1H: str | None = (
+	"models:/cnn_lstm_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/cnn_lstm_dir1h_v1"
+)
+DEFAULT_CNN_BILSTM_MODEL_DIR_1H: str | None = (
+	"models:/cnn_bilstm_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/cnn_bilstm_dir1h_v1"
+)
+DEFAULT_GARCH_LSTM_MODEL_DIR_1H: str | None = (
+	"models:/garch_lstm_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/garch_lstm_dir1h_v1"
+)
 DEFAULT_LGBM_MODEL_PATH_1H: str | None = "artifacts/models/lgbm_dir1h_v1/lgbm_dir1h_model.joblib"
 DEFAULT_TRANSFORMER_MODEL_DIR_1H: str | None = (
 	"models:/transformer_dir1h/latest" if _USE_MLFLOW_REGISTRY else "artifacts/models/transformer_dir1h_v1"
@@ -57,6 +67,18 @@ DEFAULT_TRANSFORMER_MODEL_DIR_BY_SUFFIX: dict[str, str | None] = {
 
 DEFAULT_DIR_MODEL_PATH_1H: str = DEFAULT_DIR_MODEL_DIR_1H
 
+DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H: dict[str, float] = {
+	"transformer": 1.0,
+	"lstm": 1.0,
+	"bilstm": 0.0,
+	"gru": 0.0,
+	"cnn_lstm": 0.0,
+	"cnn_bilstm": 0.0,
+	"garch_lstm": 0.0,
+	"lgbm": 0.0,
+	"xgb": 1.5,
+}
+
 # Structured direction-model registry describing each ensemble member.
 # Fields: ``type`` (loader key), ``path`` (directory or model file), and
 # ``weight`` (relative vote). ``name`` defaults to ``type`` when omitted.
@@ -65,25 +87,55 @@ DEFAULT_DIR_MODELS_1H: list[dict[str, object]] = [
 		"name": "transformer",
 		"type": "transformer",
 		"path": DEFAULT_TRANSFORMER_MODEL_DIR_1H,
-		"weight": 2.0,
+		"weight": DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H["transformer"],
+	},
+	{
+		"name": "lstm",
+		"type": "lstm",
+		"path": DEFAULT_LSTM_MODEL_DIR_1H,
+		"weight": DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H["lstm"],
+	},
+	{
+		"name": "bilstm",
+		"type": "bilstm",
+		"path": DEFAULT_BILSTM_MODEL_DIR_1H,
+		"weight": DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H["bilstm"],
 	},
 	{
 		"name": "gru",
 		"type": "gru",
-		"path": "artifacts/models/gru_dir1h_v1",
-		"weight": 1.0,
+		"path": DEFAULT_GRU_MODEL_DIR_1H,
+		"weight": DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H["gru"],
+	},
+	{
+		"name": "cnn_lstm",
+		"type": "cnn_lstm",
+		"path": DEFAULT_CNN_LSTM_MODEL_DIR_1H,
+		"weight": DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H["cnn_lstm"],
+	},
+	{
+		"name": "cnn_bilstm",
+		"type": "cnn_bilstm",
+		"path": DEFAULT_CNN_BILSTM_MODEL_DIR_1H,
+		"weight": DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H["cnn_bilstm"],
 	},
 	{
 		"name": "garch_lstm",
 		"type": "garch_lstm",
-		"path": "artifacts/models/garch_lstm_dir1h_v1",
-		"weight": 1.0,
+		"path": DEFAULT_GARCH_LSTM_MODEL_DIR_1H,
+		"weight": DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H["garch_lstm"],
+	},
+	{
+		"name": "lgbm",
+		"type": "lgbm",
+		"path": DEFAULT_LGBM_MODEL_PATH_1H,
+		"weight": DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H["lgbm"],
 	},
 	{
 		"name": "xgb",
 		"type": "xgb",
 		"path": DEFAULT_DIR_MODEL_PATH_1H,
-		"weight": 1.0,
+		"weight": DEFAULT_DIRECTION_MODEL_WEIGHT_BY_NAME_1H["xgb"],
 	},
 ]
 

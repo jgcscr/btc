@@ -86,7 +86,7 @@ _SEQUENCE_MODEL_ITER_ORDER = (
     "transformer_large",
 )
 _SEQUENCE_MODEL_TYPES = set(_SEQUENCE_MODEL_ITER_ORDER)
-_TREE_MODEL_TYPES = {"xgb", "lgbm"}
+_TREE_MODEL_TYPES = {"xgb", "lgbm", "regime_logit"}
 _VOLATILITY_METRIC_DEFAULT = "volatility_realized_24h"
 _VOLATILITY_MULT_DEFAULT = 1.25
 _HORIZON_PRECISION = 6

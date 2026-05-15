@@ -13,6 +13,68 @@ PreparedBundle = tuple[PreparedData, int, float, str]
 SummaryPayload = Dict[str, Dict[str, Any]]
 
 
+def _active_direction_model_names(direction_configs: Sequence[Mapping[str, Any]]) -> list[str]:
+    ordered: list[str] = []
+    for entry in direction_configs:
+        for raw_name in (entry.get("name"), entry.get("type")):
+            if raw_name is None:
+                continue
+            normalized = str(raw_name).strip().lower()
+            if normalized and normalized not in ordered:
+                ordered.append(normalized)
+    return ordered
+
+
+def _filter_direction_weight_map_to_active_models(
+    weight_map: Mapping[str, float],
+    *,
+    active_model_names: Sequence[str],
+) -> Dict[str, float]:
+    active = {str(name).strip().lower() for name in active_model_names}
+    return {
+        str(name): float(value)
+        for name, value in weight_map.items()
+        if str(name).strip().lower() in active
+    }
+
+
+def _scope_direction_policy_to_active_models(
+    policy: Mapping[str, Any],
+    *,
+    active_model_names: Sequence[str],
+) -> Dict[str, Any]:
+    scoped = dict(policy)
+    active = {str(name).strip().lower() for name in active_model_names}
+    model_groups = {
+        str(name): str(group)
+        for name, group in dict(policy.get("model_groups") or {}).items()
+        if str(name).strip().lower() in active
+    }
+    active_groups = {str(group) for group in model_groups.values()}
+    priority_order: list[str] = []
+    for raw_name in list(policy.get("priority_order") or []):
+        normalized = str(raw_name).strip().lower()
+        if normalized in active and normalized not in priority_order:
+            priority_order.append(normalized)
+    for raw_name in active_model_names:
+        normalized = str(raw_name).strip().lower()
+        if normalized not in priority_order:
+            priority_order.append(normalized)
+    scoped["model_groups"] = model_groups
+    scoped["priority_order"] = priority_order
+    scoped["preferred_groups"] = [
+        str(group)
+        for group in list(policy.get("preferred_groups") or [])
+        if str(group) in active_groups
+    ]
+    scoped["max_models_per_group"] = {
+        str(group): int(limit)
+        for group, limit in dict(policy.get("max_models_per_group") or {}).items()
+        if str(group) in active_groups
+    }
+    return scoped
+
+
 @dataclass(frozen=True)
 class PredictionPipelineConfig:
     targets: Iterable[float]
@@ -539,9 +601,18 @@ def _build_prediction_summary(
             horizon=horizon,
             policy=state.regime_weight_policy,
         )
+        active_model_names = _active_direction_model_names(direction_configs)
+        dir_weight_map = _filter_direction_weight_map_to_active_models(
+            dir_weight_map,
+            active_model_names=active_model_names,
+        )
         scoped_direction_ensemble_policy = deps.scope_direction_ensemble_policy(
             state.direction_ensemble_policy_resolved,
             horizon,
+        )
+        scoped_direction_ensemble_policy = _scope_direction_policy_to_active_models(
+            scoped_direction_ensemble_policy,
+            active_model_names=active_model_names,
         )
         signal = compute_signal_for_index(
             prepared=prepared,

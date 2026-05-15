@@ -81,6 +81,9 @@ def test_direction_configs_for_horizon_applies_overrides_and_adds_lgbm(tmp_path:
     lgbm_dir = model_root / "lgbm_dir4h_v2"
     lgbm_dir.mkdir(parents=True, exist_ok=True)
     (lgbm_dir / "lgbm_dir4h_model.joblib").write_text("ok", encoding="utf-8")
+    regime_logit_dir = model_root / "regime_logit_dir4h_v2"
+    regime_logit_dir.mkdir(parents=True, exist_ok=True)
+    (regime_logit_dir / "regime_logit_dir4h_model.joblib").write_text("ok", encoding="utf-8")
     transformer_dir = tmp_path / "transformer_dir"
     transformer_dir.mkdir(parents=True, exist_ok=True)
     logs: list[tuple[str, object]] = []
@@ -116,8 +119,10 @@ def test_direction_configs_for_horizon_applies_overrides_and_adds_lgbm(tmp_path:
     )
 
     assert any(item["type"] == "lgbm" for item in configs)
+    assert any(item["type"] == "regime_logit" for item in configs)
     assert weight_map["xgb"] == 1.0
     assert weight_map["lgbm"] == 1.0
+    assert weight_map["regime_logit"] == 0.5
     override_payload = dict(logs[0][1])
     assert override_payload["xgb"] == "new-xgb"
     assert override_payload["lstm"].endswith("lstm_dir4h_v2")

@@ -1,5 +1,85 @@
 from __future__ import annotations
 
+from src.runtime.prediction_result_support import build_prediction_result
+
+
+def test_build_prediction_result_surfaces_direction_ensemble_metadata() -> None:
+	result, _ = build_prediction_result(
+		signal={
+			"p_up_components": {"xgb": 0.6},
+			"direction_ensemble": {"selected_models": ["xgb", "transformer"], "rejected_models": ["gru"]},
+		},
+		label="1h",
+		horizon=1.0,
+		signal_ts="2026-05-15T00:00:00Z",
+		close=100.0,
+		p_up=0.6,
+		raw_p_up=0.6,
+		ret_pred=0.01,
+		trend_prob=0.0,
+		ignition_state=0,
+		cooldown_active=False,
+		signal_ensemble=1,
+		signal_dir_only=1,
+		confidence_score=0.5,
+		position_size=0.5,
+		confidence_min=0.0,
+		confidence_min_source="default",
+		position_size_cap=1.0,
+		stop_loss_price=99.0,
+		take_profit_price=102.0,
+		expected_value=0.01,
+		horizon_thresholds={"p_up_min": 0.5, "ret_min": 0.0},
+		regime_state="neutral",
+		calibration_key=None,
+		calibration_used_regime_key=False,
+		probability_guard=None,
+		regime_weight_policy=None,
+		target_projection=None,
+		volatility_payload={},
+		volatility_flag=False,
+		forecast_coherence_policy={},
+		direction_output_policy={},
+		direction_output_scoped=False,
+		trade_decision_policy={},
+		abstention_policy={},
+		direction_fallback_policy=None,
+		trend_payload=None,
+		target_range_policy=None,
+		regime_score=None,
+		adaptive_scale=1.0,
+		horizon_p_up=0.5,
+		horizon_ret=0.0,
+		row_features={},
+		optional_feature_fields=[],
+		project_price=lambda close, ret: close * (1.0 + ret),
+		get_active_regime_weight_override=lambda *_args, **_kwargs: None,
+		derive_probability_alignment_features=lambda **_kwargs: {
+			"raw_p_up_side": "up",
+			"resolved_p_up_side": "up",
+			"ret_pred_side": "up",
+			"projected_price_side": "up",
+			"forecast_consensus_side": "up",
+			"probability_calibration_guard_applied": 0.0,
+			"probability_calibration_used_regime_key": 0.0,
+			"raw_calibrated_probability_gap": 0.0,
+			"probability_alignment_gap": 0.0,
+			"raw_p_up_ret_mismatch": 0.0,
+			"p_up_ret_mismatch": 0.0,
+			"raw_p_up_direction_mismatch": 0.0,
+			"p_up_direction_mismatch": 0.0,
+			"ret_projected_price_consensus": 1.0,
+		},
+		build_direction_output=lambda **_kwargs: {"direction": "up"},
+		apply_target_range_overrides=lambda stop, take, projection, ratio, signal_dir_only: ({}, stop, take),
+		evaluate_direction_only_fallback=lambda *_args, **_kwargs: ({"active": False}, False),
+		finite_float_or_none=lambda value: float(value) if value is not None else None,
+		coerce_row_value=lambda value: float(value) if value is not None else None,
+	)
+
+	assert result["direction_ensemble"]["selected_models"] == ["xgb", "transformer"]
+	assert result["direction_ensemble"]["rejected_models"] == ["gru"]
+
 import pandas as pd
 import pytest
 

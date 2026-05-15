@@ -11,6 +11,20 @@ The suite trains:
 - Transformer classifiers.
 - A sparse regime-focused logistic classifier for orthogonal macro/volatility/regime features.
 
+Current runtime note:
+
+- the active default/live/research runtime profiles do not treat every trained family equally
+- current checked-in ensemble policy prioritizes `tree` and `attention`, keeps `volatility` as support, and lets `regime_logit` join as an optional orthogonal family when the matching artifact exists for that horizon
+- recurrent families remain available, but their rerank and regime-specific weights are intentionally lower than the tree/attention stack after the May 15, 2026 family-value audit
+
+To refresh the family-value audit from the canonical labeled monitoring slice:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.analyze_direction_family_value \
+  --input artifacts/monitoring/labeled_backtest_1h.csv \
+  --output artifacts/analysis/direction_family_value_latest.json
+```
+
 ## One-command suite runner
 
 Use the orchestration script to rebuild datasets and train the full stack in a single run:

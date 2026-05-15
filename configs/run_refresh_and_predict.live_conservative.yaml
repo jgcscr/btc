@@ -6,10 +6,10 @@ targets:
   - 12
 p_up_min: 0.45
 ret_min: 0.0
-direction_threshold: 0.6
-auto_direction_threshold: true
-thresholds_json: artifacts/models/calibrated_thresholds_merged.json
-data_quality:
+      default: transformer:1.15,lstm:0.7,bilstm:0.2,gru:0.3,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.55,regime_logit:0.5,lgbm:1.2,xgb:1.5
+      trend_ignition: transformer:1.2,lstm:0.7,bilstm:0.2,gru:0.3,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.5,regime_logit:0.45,lgbm:1.2,xgb:1.55
+      neutral: transformer:1.15,lstm:0.7,bilstm:0.2,gru:0.3,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.55,regime_logit:0.5,lgbm:1.2,xgb:1.5
+      chop: transformer:1.0,lstm:0.65,bilstm:0.2,gru:0.3,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.7,regime_logit:0.65,lgbm:1.1,xgb:1.4
   enabled: false
   max_staleness_hours: 6.0
   max_missing_ratio: 0.01
@@ -22,34 +22,39 @@ confidence_min_by_horizon_regime:
 position_size_floor: 0.0
 position_size_cap: 0.35
 position_size_cap_by_horizon:
+    regime: [regime_logit]
   "0.25": 0.0
   "1": 0.15
   "4": 0.35
   "8": 0.2
   "12": 0.35
+      regime: 1
 abstention_policy:
   enabled: true
   min_confidence: 0.2
   min_abs_expected_value: 0.0002
   min_edge_over_fee: 0.0001
+      regime: 1
   require_positive_ev: true
   hold_prob_center: 0.5
   hold_prob_band: 0.03
   thresholds_by_horizon_regime:
     "8":
+      regime: 1
       trend_ignition:
-        hold_prob_band: 0.0
-uncertainty_policy:
-  enabled: true
+    "1": [xgb, lgbm, transformer, regime_logit, garch_lstm, lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
+    "4": [xgb, lgbm, transformer, regime_logit, garch_lstm, lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
+    "12": [xgb, lgbm, transformer, regime_logit, garch_lstm, lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
   alpha: 0.2
-  hold_prob_center: 0.5
-  max_interval_width: 0.75
-  require_center_cross: true
+    "1": [tree, attention, regime]
+    "4": [tree, attention, regime]
+    "12": [tree, attention, regime]
   min_component_count: 3
   thresholds_by_horizon_regime:
     "1":
       neutral:
         max_interval_width: 0.6
+    regime_logit: regime
         require_center_cross: true
       chop:
         max_interval_width: 0.5
@@ -59,21 +64,21 @@ uncertainty_policy:
         require_center_cross: true
     "4":
       neutral:
-        max_interval_width: 0.8
-        require_center_cross: true
-      chop:
+    trend_ignition: tree:1.15,attention:1.05,recurrent:0.85,volatility:0.95,regime:1.0
+    neutral: tree:1.15,attention:1.05,recurrent:0.8,volatility:0.95,regime:1.0
+    chop: tree:1.1,attention:1.0,recurrent:0.8,volatility:1.0,regime:1.05
         max_interval_width: 0.7
-        require_center_cross: true
-      trend_ignition:
-        max_interval_width: 0.85
+    "1": "transformer:1.2,lstm:0.7,bilstm:0.2,gru:0.3,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.5,regime_logit:0.45,lgbm:1.2,xgb:1.55"
+    "4": "transformer:1.1,lstm:0.8,bilstm:0.3,gru:0.4,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.65,regime_logit:0.6,lgbm:1.05,xgb:1.5"
+    "12": "transformer:1.1,lstm:0.8,bilstm:0.3,gru:0.4,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.65,regime_logit:0.6,lgbm:1.05,xgb:1.5"
         require_center_cross: false
-    "8":
-      neutral:
-        max_interval_width: 0.85
+    "1": "transformer:1.15,lstm:0.7,bilstm:0.2,gru:0.3,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.55,regime_logit:0.5,lgbm:1.2,xgb:1.5"
+    "4": "transformer:1.05,lstm:0.8,bilstm:0.3,gru:0.4,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.65,regime_logit:0.55,lgbm:1.0,xgb:1.5"
+    "12": "transformer:1.05,lstm:0.8,bilstm:0.3,gru:0.4,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.65,regime_logit:0.55,lgbm:1.0,xgb:1.5"
         require_center_cross: false
-      chop:
-        max_interval_width: 0.75
-        require_center_cross: true
+    "1": "transformer:1.0,lstm:0.65,bilstm:0.2,gru:0.3,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.7,regime_logit:0.65,lgbm:1.1,xgb:1.4"
+    "4": "transformer:0.9,lstm:0.75,bilstm:0.25,gru:0.35,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.8,regime_logit:0.75,lgbm:1.0,xgb:1.4"
+    "12": "transformer:0.9,lstm:0.75,bilstm:0.25,gru:0.35,cnn_lstm:0.1,cnn_bilstm:0.1,garch_lstm:0.8,regime_logit:0.75,lgbm:1.0,xgb:1.4"
       trend_ignition:
         max_interval_width: 0.95
         require_center_cross: false
@@ -229,6 +234,7 @@ direction_ensemble_policy:
     recurrent: [lstm, bilstm, gru, cnn_lstm, cnn_bilstm]
     attention: [transformer, transformer_large]
     volatility: [garch_lstm]
+    regime: [regime_logit]
   max_active_by_horizon:
     "1": 3
     "4": 5
@@ -239,24 +245,27 @@ direction_ensemble_policy:
       recurrent: 1
       attention: 1
       volatility: 1
+      regime: 1
     "4":
       tree: 2
       recurrent: 2
       attention: 1
       volatility: 1
+      regime: 1
     "12":
       tree: 2
       recurrent: 2
       attention: 1
       volatility: 1
+      regime: 1
   priority_by_horizon:
-    "1": [xgb, transformer, lstm, lgbm, garch_lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
-    "4": [xgb, lgbm, lstm, transformer, garch_lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
-    "12": [xgb, lgbm, transformer, lstm, garch_lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
+    "1": [xgb, lgbm, transformer, regime_logit, garch_lstm, lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
+    "4": [xgb, lgbm, transformer, regime_logit, garch_lstm, lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
+    "12": [xgb, lgbm, transformer, regime_logit, garch_lstm, lstm, gru, bilstm, cnn_lstm, cnn_bilstm]
   preferred_groups_by_horizon:
-    "1": [tree, attention, recurrent]
-    "4": [tree, attention]
-    "12": [tree, attention]
+    "1": [tree, attention, regime]
+    "4": [tree, attention, regime]
+    "12": [tree, attention, regime]
 confluence_policy:
   enabled: true
   short_horizons: [1]

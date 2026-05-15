@@ -188,6 +188,16 @@ def direction_configs_for_horizon(
                     return str(model_path)
         return None
 
+    def regime_logit_model_path() -> Optional[str]:
+        suffixes = model_suffix_candidates(horizon, normalize_horizon_value=normalize_horizon_value)
+        for suffix in suffixes:
+            for version in model_version_priority:
+                model_dir = model_root / f"regime_logit_dir{suffix}_{version}"
+                model_path = model_dir / f"regime_logit_dir{suffix}_model.joblib"
+                if model_path.exists():
+                    return str(model_path)
+        return None
+
     configs = clone_direction_model_configs_fn(base_configs)
     overrides = {"xgb": dir_model_path}
     overrides.update(sequence_model_overrides())
@@ -200,6 +210,16 @@ def direction_configs_for_horizon(
                 "type": "lgbm",
                 "path": lgbm_path,
                 "weight": 1.0,
+            }
+        )
+    regime_logit_path = regime_logit_model_path()
+    if regime_logit_path and not any(entry.get("type") == "regime_logit" for entry in configs):
+        configs.append(
+            {
+                "name": "regime_logit",
+                "type": "regime_logit",
+                "path": regime_logit_path,
+                "weight": 0.5,
             }
         )
     log_direction_model_configs_fn(configs, label=f"[run_refresh_and_predict] direction models ({horizon_label})")
