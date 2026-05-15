@@ -9,6 +9,7 @@ The suite trains:
 - Direction classifiers (XGBoost, LightGBM).
 - Sequence classifiers (LSTM, GRU, BiLSTM, CNN-LSTM, CNN-BiLSTM, GARCH-LSTM).
 - Transformer classifiers.
+- A sparse regime-focused logistic classifier for orthogonal macro/volatility/regime features.
 
 ## One-command suite runner
 
@@ -22,7 +23,8 @@ Use the orchestration script to rebuild datasets and train the full stack in a s
   --train-direction \
   --train-lgbm \
   --train-sequence \
-  --train-transformer
+  --train-transformer \
+  --train-regime-logit
 ```
 
 Recommended for CI smoke tests:
@@ -60,7 +62,25 @@ Train only sequence and transformer models:
 /workspaces/btc/.venv/bin/python -m src.scripts.train_model_suite \
   --targets 0.25,1,4,8,12 \
   --train-sequence \
+  --compact-sequence-set \
   --train-transformer
+```
+
+Train only the regime specialist:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.train_model_suite \
+  --targets 0.25,1,4,8,12 \
+  --train-regime-logit
+```
+
+Train a selected subset of sequence models explicitly:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.train_model_suite \
+  --targets 1,4,12 \
+  --train-sequence \
+  --sequence-models gru,garch_lstm
 ```
 
 In this codespace, prefer the explicit interpreter path above unless you have already activated `.venv` in your shell.
@@ -117,6 +137,7 @@ The suite writes model artifacts to:
 - Regression: `artifacts/models/xgb_ret{horizon}_v1/`
 - Direction (XGBoost): `artifacts/models/xgb_dir{horizon}_v1/`
 - Direction (LightGBM): `artifacts/models/lgbm_dir{horizon}_v1/`
+- Direction (Regime logistic): `artifacts/models/regime_logit_dir{horizon}_v1/`
 - Sequence models: `artifacts/models/{lstm,gru,bilstm,cnn_lstm,cnn_bilstm,garch_lstm}_dir{horizon}_v1/`
 - Transformer: `artifacts/models/transformer_dir{horizon}_v1/`
 
@@ -126,5 +147,6 @@ Where `{horizon}` is one of `15m`, `1h`, `4h`, `8h`, `12h`.
 
 - 15m/1h targets use flat label keys in the dataset; multi-horizon targets use `y_dir{horizon}h_*` and `y_ret{horizon}h_*` fields.
 - The suite script shells out to the existing CLIs so model hyperparameters and logging remain consistent with prior runs.
+- `--compact-sequence-set` is a shortcut for `--sequence-models gru,garch_lstm`.
 - Multi-horizon feature builders now explicitly exclude forward-return leakage columns.
 - Use `src.scripts.generate_featurelift_comparison_report` after retraining if the checked-in March 31 comparison artifacts need to be refreshed.

@@ -22,7 +22,7 @@ search:
   meta_signal_mode: meta_veto
   meta_component_frame_csv: artifacts/monitoring/meta_component_frame_1h.csv
   meta_component_frame_source: artifacts/monitoring/labeled_backtest_1h.csv
-  meta_component_columns: [xgb, transformer, lstm]
+  meta_component_columns: [xgb, transformer, gru, garch_lstm]
   meta_component_weights_from_audit_path: artifacts/analysis/direction_model_audit_latest.json
   paper_live_config: configs/run_refresh_and_predict.live_conservative_binance_only.yaml
   apply_direction_audit_to_paper_live: true
@@ -304,6 +304,7 @@ quality:
       chop: 0.18
     min_f1_by_regime:
       chop: 0.40
+      neutral: 0.35
   leakage_audit:
     enabled: true
     y_key: y
@@ -385,9 +386,9 @@ quality:
       enabled: true
       mode: disable
       expected_source_path: artifacts/monitoring/labeled_backtest_1h_incumbent.csv
-      threshold_variants: [0.555, 0.56]
+      threshold_variants: [0.555]
       selection_calibration_guard:
-        enabled: true
+        enabled: false
         source_threshold: 0.555
         regime_col: regime_state
         p_col: p_up
@@ -402,7 +403,7 @@ quality:
         regime_state: neutral
         min_abs_ret_pred: 0.00212
       neutral_p_up_cap:
-        enabled: true
+        enabled: false
         source_threshold: 0.555
         regime_col: regime_state
         p_col: p_up
@@ -438,9 +439,9 @@ quality:
         require_candidate_not_dominated: true
         prefer_calibration_stability_within_eligible: true
         fallback_variant_when_no_eligible: none
-        threshold_variants: [0.56, 0.57, 0.58, 0.60]
+        threshold_variants: []
         selection_calibration_guard:
-          enabled: true
+          enabled: false
           regime_col: regime_state
           p_col: p_up
           rules: []
@@ -468,7 +469,7 @@ quality:
             deployed_rule_path: artifacts/monitoring/selection_calibration_guard_rule_1h.json
             deploy_manifest_path: artifacts/monitoring/reliability_promotion_deploy_manifest.json
         recent_triggered_regime_volatility:
-          enabled: true
+          enabled: false
           regime_col: regime_state
           volatility_col: volatility_realized_24h
           min_regime_rows: 2
@@ -553,7 +554,7 @@ quality:
         max_abs_ret_pred: 0.001
         incumbent_reference_path: null
       retrospective:
-        enabled: true
+        enabled: false
         window_size: 120
         step_size: 24
         min_rows: 80

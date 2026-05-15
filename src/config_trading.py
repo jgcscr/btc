@@ -62,58 +62,22 @@ DEFAULT_DIR_MODEL_PATH_1H: str = DEFAULT_DIR_MODEL_DIR_1H
 # ``weight`` (relative vote). ``name`` defaults to ``type`` when omitted.
 DEFAULT_DIR_MODELS_1H: list[dict[str, object]] = [
 	{
-		"name": "lgbm",
-		"type": "lgbm",
-		"path": DEFAULT_LGBM_MODEL_PATH_1H,
-		"weight": 1.0,
-		"optional": True,
-	},
-	{
 		"name": "transformer",
 		"type": "transformer",
 		"path": DEFAULT_TRANSFORMER_MODEL_DIR_1H,
 		"weight": 2.0,
 	},
 	{
-		"name": "lstm",
-		"type": "lstm",
-		"path": DEFAULT_LSTM_MODEL_DIR_1H,
-		"weight": 1.0,
-	},
-	{
-		"name": "bilstm",
-		"type": "bilstm",
-		"path": "artifacts/models/bilstm_dir1h_v1",
-		"weight": 1.0,
-		"optional": True,
-	},
-	{
 		"name": "gru",
 		"type": "gru",
 		"path": "artifacts/models/gru_dir1h_v1",
 		"weight": 1.0,
-		"optional": True,
-	},
-	{
-		"name": "cnn_lstm",
-		"type": "cnn_lstm",
-		"path": "artifacts/models/cnn_lstm_dir1h_v1",
-		"weight": 1.0,
-		"optional": True,
-	},
-	{
-		"name": "cnn_bilstm",
-		"type": "cnn_bilstm",
-		"path": "artifacts/models/cnn_bilstm_dir1h_v1",
-		"weight": 1.0,
-		"optional": True,
 	},
 	{
 		"name": "garch_lstm",
 		"type": "garch_lstm",
 		"path": "artifacts/models/garch_lstm_dir1h_v1",
 		"weight": 1.0,
-		"optional": True,
 	},
 	{
 		"name": "xgb",
@@ -136,7 +100,7 @@ OPTUNA_LSTM_MODEL_DIR_1H: str = "artifacts/models/lstm_dir1h_20251218T181937Z"
 OPTUNA_TRANSFORMER_MODEL_DIR_1H: str = "artifacts/models/transformer_dir1h_20251218T175733Z"
 OPTUNA_P_UP_MIN_1H: float = 0.60
 OPTUNA_RET_MIN_1H: float = 0.0
-OPTUNA_DIR_MODEL_WEIGHTS_1H: str = "transformer:2,lstm:1,xgb:1"
+OPTUNA_DIR_MODEL_WEIGHTS_1H: str = "transformer:2,gru:1,garch_lstm:1,xgb:1"
 
 # Per-trade fee and slippage assumptions in basis points. These are
 # intended as conservative but realistic defaults for a liquid BTCUSDT

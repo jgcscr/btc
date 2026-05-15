@@ -166,6 +166,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--midband-focus-max-abs-ret-pred", type=float, default=0.001)
     parser.add_argument("--midband-focus-negative-weight", type=float, default=1.0)
     parser.add_argument("--midband-focus-positive-weight", type=float, default=1.0)
+    parser.add_argument("--regime-focus-enabled", action="store_true")
+    parser.add_argument("--regime-focus-state", type=str, default="")
+    parser.add_argument("--regime-focus-regime-col", type=str, default="regime_state")
+    parser.add_argument("--regime-focus-negative-weight", type=float, default=1.0)
+    parser.add_argument("--regime-focus-positive-weight", type=float, default=1.0)
+    parser.add_argument("--recency-focus-enabled", action="store_true")
+    parser.add_argument("--recency-focus-window-rows", type=int, default=0)
+    parser.add_argument("--recency-focus-negative-weight", type=float, default=1.0)
+    parser.add_argument("--recency-focus-positive-weight", type=float, default=1.0)
     parser.add_argument("--feature-meta-path", type=Path, default=None)
     parser.add_argument(
         "--reference-feature-mode",
@@ -174,8 +183,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--reference-feature-expected-source", type=str, default=None)
     parser.add_argument("--reference-feature-max-abs-value", type=float, default=None)
+    parser.add_argument(
+        "--exclude-feature-columns",
+        action="append",
+        default=[],
+        help="Feature column(s) to exclude from training. Accepts repeated flags or comma-separated values.",
+    )
     parser.add_argument("--output", type=Path, required=True, help="Output JSON path.")
     return parser.parse_args()
+
+
+def _resolve_selected_feature_columns(args: argparse.Namespace) -> list[str]:
+    excluded: set[str] = set()
+    for raw_value in args.exclude_feature_columns or []:
+        for token in str(raw_value).split(","):
+            name = token.strip()
+            if name:
+                excluded.add(name)
+    selected = [column for column in FEATURE_COLUMNS if column not in excluded]
+    if not selected:
+        raise RuntimeError("Trade decision training requires at least one feature column.")
+    return selected
 
 
 def _extract_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -433,6 +461,61 @@ def _build_midband_focus_weights(df: pd.DataFrame, y: pd.Series, args: argparse.
     return weights
 
 
+def _apply_regime_focus_weights(
+    weights: np.ndarray,
+    df: pd.DataFrame,
+    y: pd.Series,
+    args: argparse.Namespace,
+) -> np.ndarray:
+    if not bool(args.regime_focus_enabled):
+        return weights
+
+    regime_state = str(args.regime_focus_state).strip().lower()
+    if not regime_state:
+        return weights
+
+    regime_col = str(args.regime_focus_regime_col)
+    regimes = df.get(regime_col)
+    if regimes is None:
+        return weights
+
+    focus_mask = regimes.astype(str).str.strip().str.lower() == regime_state
+    focus_arr = focus_mask.to_numpy(dtype=bool)
+    y_arr = y.to_numpy(dtype=int)
+    neg_weight = max(1.0, float(args.regime_focus_negative_weight))
+    pos_weight = max(1.0, float(args.regime_focus_positive_weight))
+    weights[focus_arr & (y_arr <= 0)] *= neg_weight
+    weights[focus_arr & (y_arr > 0)] *= pos_weight
+    return weights
+
+
+def _apply_recency_focus_weights(
+    weights: np.ndarray,
+    full_df: pd.DataFrame,
+    train_df: pd.DataFrame,
+    y: pd.Series,
+    args: argparse.Namespace,
+) -> np.ndarray:
+    if not bool(args.recency_focus_enabled):
+        return weights
+
+    recent_window_rows = max(0, int(args.recency_focus_window_rows))
+    if recent_window_rows <= 0 or full_df.empty or train_df.empty:
+        return weights
+
+    recent_index = full_df.tail(recent_window_rows).index
+    focus_mask = train_df.index.isin(recent_index)
+    if not np.any(focus_mask):
+        return weights
+
+    y_arr = y.to_numpy(dtype=int)
+    neg_weight = max(1.0, float(args.recency_focus_negative_weight))
+    pos_weight = max(1.0, float(args.recency_focus_positive_weight))
+    weights[focus_mask & (y_arr <= 0)] *= neg_weight
+    weights[focus_mask & (y_arr > 0)] *= pos_weight
+    return weights
+
+
 def _build_expected_net_curve(
     prob: np.ndarray,
     ret_net: np.ndarray,
@@ -619,7 +702,11 @@ def main() -> None:
         feature_meta=feature_meta,
         args=args,
     )
+    selected_feature_columns = _resolve_selected_feature_columns(args)
+    X = X.loc[:, selected_feature_columns].copy()
     sample_weight = _build_midband_focus_weights(train_df, y, args)
+    sample_weight = _apply_regime_focus_weights(sample_weight, train_df, y, args)
+    sample_weight = _apply_recency_focus_weights(sample_weight, df, train_df, y, args)
 
     if int(y.nunique()) < 2:
         raise RuntimeError("Trade decision training requires both positive and negative classes.")
@@ -726,8 +813,11 @@ def main() -> None:
     }
     deploy_reasons = [name for name, passed in deploy_checks.items() if not passed]
 
+    excluded_feature_columns = [column for column in FEATURE_COLUMNS if column not in selected_feature_columns]
+
     payload: Dict[str, object] = {
-        "feature_columns": FEATURE_COLUMNS,
+        "feature_columns": selected_feature_columns,
+        "excluded_feature_columns": excluded_feature_columns,
         "coefficients": [float(v) for v in model.coef_[0]],
         "intercept": float(model.intercept_[0]),
         "threshold": float(args.threshold),
@@ -753,6 +843,31 @@ def main() -> None:
             "negative_weight": float(args.midband_focus_negative_weight),
             "positive_weight": float(args.midband_focus_positive_weight),
             "focused_rows": int((sample_weight > 1.0).sum()),
+        },
+        "regime_focus": {
+            "enabled": bool(args.regime_focus_enabled),
+            "state": str(args.regime_focus_state).strip().lower(),
+            "regime_col": str(args.regime_focus_regime_col),
+            "negative_weight": float(args.regime_focus_negative_weight),
+            "positive_weight": float(args.regime_focus_positive_weight),
+            "focused_rows": int(
+                (
+                    df.get(str(args.regime_focus_regime_col), pd.Series(index=df.index, dtype=object))
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                    == str(args.regime_focus_state).strip().lower()
+                ).sum()
+            ) if bool(args.regime_focus_enabled) else 0,
+        },
+        "recency_focus": {
+            "enabled": bool(args.recency_focus_enabled),
+            "window_rows": int(args.recency_focus_window_rows),
+            "negative_weight": float(args.recency_focus_negative_weight),
+            "positive_weight": float(args.recency_focus_positive_weight),
+            "focused_rows": int(
+                train_df.index.isin(df.tail(max(0, int(args.recency_focus_window_rows))).index).sum()
+            ) if bool(args.recency_focus_enabled) else 0,
         },
         "reference_feature_controls": reference_feature_controls,
         "metrics": {

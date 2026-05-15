@@ -924,27 +924,24 @@ def _summarize_trade_decision_stage_distribution(
         inferred_dir = 1 if ret_pred >= 0.0 else 0
         signal_dir_only = int(_safe_float(row.get("signal_dir_only", inferred_dir), default=float(inferred_dir)))
         regime_state = str(row.get("regime_state", rrp.REGIME_NEUTRAL)).strip().lower()
-        result = {
-            "p_up": p_up,
-            "ret_pred": ret_pred,
-            "expected_value": _safe_float(row.get("expected_value", p_up * ret_pred), default=p_up * ret_pred),
-            "signal_dir_only": signal_dir_only,
-            "signal_ensemble": int(_safe_float(row.get("signal_ensemble", 0.0), default=0.0)),
-            "incumbent_signal_reference": _safe_float(row.get("incumbent_signal_reference", 0.0), default=0.0),
-            "candidate_only_reference": _safe_float(row.get("candidate_only_reference", 0.0), default=0.0),
-            "candidate_incumbent_disagreement": _safe_float(
-                row.get("candidate_incumbent_disagreement", 0.0),
-                default=0.0,
-            ),
-            "trade_action": str(row.get("trade_action", "hold")),
-            "volatility": {
-                "snapshot": {
-                    "volatility_realized_24h": _safe_float(row.get("volatility_realized_24h", 0.0), default=0.0),
-                    "volatility_ewm_24h": _safe_float(row.get("volatility_ewm_24h", 0.0), default=0.0),
-                    "volatility_garch_like": _safe_float(row.get("volatility_garch_like", 0.0), default=0.0),
-                }
-            },
-        }
+        result = row.to_dict()
+        result.update(
+            {
+                "p_up": p_up,
+                "ret_pred": ret_pred,
+                "expected_value": _safe_float(row.get("expected_value", p_up * ret_pred), default=p_up * ret_pred),
+                "signal_dir_only": signal_dir_only,
+                "signal_ensemble": int(_safe_float(row.get("signal_ensemble", 0.0), default=0.0)),
+                "trade_action": str(row.get("trade_action", "hold")),
+                "volatility": {
+                    "snapshot": {
+                        "volatility_realized_24h": _safe_float(row.get("volatility_realized_24h", 0.0), default=0.0),
+                        "volatility_ewm_24h": _safe_float(row.get("volatility_ewm_24h", 0.0), default=0.0),
+                        "volatility_garch_like": _safe_float(row.get("volatility_garch_like", 0.0), default=0.0),
+                    }
+                },
+            }
+        )
         payload = rrp._apply_trade_decision_model(
             result=result,
             regime_state=regime_state,
@@ -3028,6 +3025,7 @@ def execute_reliability_workflow(
                 search_cfg=search_cfg,
                 load_json=_load_json,
                 extract_audit_weight_spec=_extract_audit_weight_spec,
+                requested_components=meta_component_columns if isinstance(meta_component_columns, Sequence) and not isinstance(meta_component_columns, (str, bytes)) else None,
             )
             if audit_error and audit_path is not None:
                 print(f"Warning: failed to load meta component weights from audit {audit_path}: {audit_error}", file=sys.stderr)
@@ -3340,6 +3338,7 @@ def execute_reliability_workflow(
                     search_cfg=search_cfg,
                     load_json=_load_json,
                     extract_audit_weight_spec=_extract_audit_weight_spec,
+                    requested_components=search_cfg.get("meta_component_columns") if isinstance(search_cfg.get("meta_component_columns"), Sequence) and not isinstance(search_cfg.get("meta_component_columns"), (str, bytes)) else None,
                 )
                 if audit_error and audit_path is not None:
                     print(
@@ -3997,18 +3996,29 @@ def execute_reliability_workflow(
                             str(reference_feature_controls_cfg.get("mode", "allow")),
                         ]
                     )
-                    expected_reference_source = reference_feature_controls_cfg.get("expected_source_path")
-                    if expected_reference_source is not None:
-                        decision_cmd.extend(
-                            ["--reference-feature-expected-source", str(expected_reference_source)]
-                        )
-                    if reference_feature_controls_cfg.get("max_abs_value") is not None:
-                        decision_cmd.extend(
-                            [
-                                "--reference-feature-max-abs-value",
-                                str(float(reference_feature_controls_cfg.get("max_abs_value"))),
-                            ]
-                        )
+                exclude_feature_columns_cfg = trade_decision_cfg.get("exclude_feature_columns")
+                if isinstance(exclude_feature_columns_cfg, Sequence) and not isinstance(
+                    exclude_feature_columns_cfg,
+                    (str, bytes),
+                ):
+                    for raw_column in exclude_feature_columns_cfg:
+                        column_name = str(raw_column).strip()
+                        if column_name:
+                            decision_cmd.extend(["--exclude-feature-columns", column_name])
+                elif isinstance(exclude_feature_columns_cfg, str) and exclude_feature_columns_cfg.strip():
+                    decision_cmd.extend(["--exclude-feature-columns", exclude_feature_columns_cfg.strip()])
+                expected_reference_source = reference_feature_controls_cfg.get("expected_source_path")
+                if expected_reference_source is not None:
+                    decision_cmd.extend(
+                        ["--reference-feature-expected-source", str(expected_reference_source)]
+                    )
+                if reference_feature_controls_cfg.get("max_abs_value") is not None:
+                    decision_cmd.extend(
+                        [
+                            "--reference-feature-max-abs-value",
+                            str(float(reference_feature_controls_cfg.get("max_abs_value"))),
+                        ]
+                    )
                 midband_focus_cfg_obj = trade_decision_cfg.get("midband_focus", {})
                 midband_focus_cfg = midband_focus_cfg_obj if isinstance(midband_focus_cfg_obj, dict) else {}
                 if bool(midband_focus_cfg.get("enabled", False)):
@@ -4032,6 +4042,36 @@ def execute_reliability_workflow(
                     max_abs_ret_pred = midband_focus_cfg.get("max_abs_ret_pred")
                     if max_abs_ret_pred is not None:
                         decision_cmd.extend(["--midband-focus-max-abs-ret-pred", str(float(max_abs_ret_pred))])
+                regime_focus_cfg_obj = trade_decision_cfg.get("regime_focus", {})
+                regime_focus_cfg = regime_focus_cfg_obj if isinstance(regime_focus_cfg_obj, dict) else {}
+                if bool(regime_focus_cfg.get("enabled", False)):
+                    decision_cmd.extend(
+                        [
+                            "--regime-focus-enabled",
+                            "--regime-focus-state",
+                            str(regime_focus_cfg.get("state", "neutral")),
+                            "--regime-focus-regime-col",
+                            str(regime_focus_cfg.get("regime_col", "regime_state")),
+                            "--regime-focus-negative-weight",
+                            str(float(regime_focus_cfg.get("negative_weight", 1.0))),
+                            "--regime-focus-positive-weight",
+                            str(float(regime_focus_cfg.get("positive_weight", 1.0))),
+                        ]
+                    )
+                recency_focus_cfg_obj = trade_decision_cfg.get("recency_focus", {})
+                recency_focus_cfg = recency_focus_cfg_obj if isinstance(recency_focus_cfg_obj, dict) else {}
+                if bool(recency_focus_cfg.get("enabled", False)):
+                    decision_cmd.extend(
+                        [
+                            "--recency-focus-enabled",
+                            "--recency-focus-window-rows",
+                            str(int(recency_focus_cfg.get("window_rows", 0))),
+                            "--recency-focus-negative-weight",
+                            str(float(recency_focus_cfg.get("negative_weight", 1.0))),
+                            "--recency-focus-positive-weight",
+                            str(float(recency_focus_cfg.get("positive_weight", 1.0))),
+                        ]
+                    )
                 if bool(trade_decision_cfg.get("candidate_only", False)):
                     decision_cmd.append("--candidate-only")
                 results.append(
@@ -4142,6 +4182,7 @@ def execute_reliability_workflow(
                     weak_veto_reference_path_cfg = weak_veto_cfg.get("incumbent_reference_path")
                     refined_veto_cfg_obj = weak_veto_cfg.get("refined", {})
                     refined_veto_cfg = refined_veto_cfg_obj if isinstance(refined_veto_cfg_obj, dict) else {}
+                    refined_veto_enabled = bool(refined_veto_cfg.get("enabled", False))
                     refined_veto_low = float(refined_veto_cfg.get("p_up_low", weak_veto_low))
                     refined_veto_high = float(refined_veto_cfg.get("p_up_high", weak_veto_high))
                     refined_veto_high_inclusive = bool(refined_veto_cfg.get("high_inclusive", weak_veto_high_inclusive))
@@ -4149,6 +4190,7 @@ def execute_reliability_workflow(
                     refined_veto_reference_path_cfg = refined_veto_cfg.get("incumbent_reference_path")
                     midband_veto_cfg_obj = weak_veto_cfg.get("midband", {})
                     midband_veto_cfg = midband_veto_cfg_obj if isinstance(midband_veto_cfg_obj, dict) else {}
+                    midband_veto_enabled = bool(midband_veto_cfg.get("enabled", False))
                     midband_veto_low = float(midband_veto_cfg.get("p_up_low", weak_veto_low))
                     midband_veto_high = float(midband_veto_cfg.get("p_up_high", weak_veto_high))
                     midband_veto_high_inclusive = bool(midband_veto_cfg.get("high_inclusive", weak_veto_high_inclusive))
@@ -4176,6 +4218,7 @@ def execute_reliability_workflow(
                     ]
                     raw_ev_veto_cfg_obj = weak_veto_cfg.get("raw_ev_sign", {})
                     raw_ev_veto_cfg = raw_ev_veto_cfg_obj if isinstance(raw_ev_veto_cfg_obj, dict) else {}
+                    raw_ev_veto_enabled = bool(raw_ev_veto_cfg.get("enabled", False))
                     raw_ev_veto_low = float(raw_ev_veto_cfg.get("p_up_low", weak_veto_low))
                     raw_ev_veto_high = float(raw_ev_veto_cfg.get("p_up_high", weak_veto_high))
                     raw_ev_veto_high_inclusive = bool(raw_ev_veto_cfg.get("high_inclusive", weak_veto_high_inclusive))
@@ -4185,6 +4228,7 @@ def execute_reliability_workflow(
                     direction_align_veto_cfg = (
                         direction_align_veto_cfg_obj if isinstance(direction_align_veto_cfg_obj, dict) else {}
                     )
+                    direction_align_veto_enabled = bool(direction_align_veto_cfg.get("enabled", False))
                     direction_align_veto_low = float(direction_align_veto_cfg.get("p_up_low", weak_veto_low))
                     direction_align_veto_high = float(direction_align_veto_cfg.get("p_up_high", weak_veto_high))
                     direction_align_veto_high_inclusive = bool(
@@ -4207,6 +4251,7 @@ def execute_reliability_workflow(
                     joint_direction_midband_veto_cfg = (
                         joint_direction_midband_veto_cfg_obj if isinstance(joint_direction_midband_veto_cfg_obj, dict) else {}
                     )
+                    joint_direction_midband_veto_enabled = bool(joint_direction_midband_veto_cfg.get("enabled", False))
                     joint_direction_midband_veto_low = float(joint_direction_midband_veto_cfg.get("p_up_low", weak_veto_low))
                     joint_direction_midband_veto_high = float(joint_direction_midband_veto_cfg.get("p_up_high", weak_veto_high))
                     joint_direction_midband_veto_high_inclusive = bool(
@@ -4226,6 +4271,7 @@ def execute_reliability_workflow(
                     regime_state_veto_cfg = (
                         regime_state_veto_cfg_obj if isinstance(regime_state_veto_cfg_obj, dict) else {}
                     )
+                    regime_state_veto_enabled = bool(regime_state_veto_cfg.get("enabled", False))
                     regime_state_veto_low = float(regime_state_veto_cfg.get("p_up_low", weak_veto_low))
                     regime_state_veto_high = float(regime_state_veto_cfg.get("p_up_high", weak_veto_high))
                     regime_state_veto_high_inclusive = bool(
@@ -4252,6 +4298,7 @@ def execute_reliability_workflow(
                     chop_high_vol_veto_cfg = (
                         chop_high_vol_veto_cfg_obj if isinstance(chop_high_vol_veto_cfg_obj, dict) else {}
                     )
+                    chop_high_vol_veto_enabled = bool(chop_high_vol_veto_cfg.get("enabled", False))
                     chop_high_vol_veto_low = float(chop_high_vol_veto_cfg.get("p_up_low", weak_veto_low))
                     chop_high_vol_veto_high = float(chop_high_vol_veto_cfg.get("p_up_high", weak_veto_high))
                     chop_high_vol_veto_high_inclusive = bool(
@@ -4278,6 +4325,7 @@ def execute_reliability_workflow(
                     volatility_only_veto_cfg = (
                         volatility_only_veto_cfg_obj if isinstance(volatility_only_veto_cfg_obj, dict) else {}
                     )
+                    volatility_only_veto_enabled = bool(volatility_only_veto_cfg.get("enabled", False))
                     volatility_only_veto_low = float(volatility_only_veto_cfg.get("p_up_low", weak_veto_low))
                     volatility_only_veto_high = float(volatility_only_veto_cfg.get("p_up_high", weak_veto_high))
                     volatility_only_veto_high_inclusive = bool(
@@ -4300,6 +4348,11 @@ def execute_reliability_workflow(
 
                     resolved_trade_decision_threshold = float(
                         trade_decision_cfg.get("threshold", trade_policy_cfg.get("threshold", 0.55))
+                    )
+                    trade_decision_threshold_overrides = (
+                        trade_decision_cfg.get("thresholds_by_horizon_regime")
+                        if isinstance(trade_decision_cfg.get("thresholds_by_horizon_regime"), dict)
+                        else {}
                     )
                     aligned_candidate_input = summary_dir / "backtest_signals_meta_ensemble_decision_aligned.csv"
                     common_align_args = [
@@ -4344,6 +4397,13 @@ def execute_reliability_workflow(
                         "--policy-midband-high-inclusive",
                         "1" if direct_midband_policy_high_inclusive else "0",
                     ]
+                    if trade_decision_threshold_overrides:
+                        common_align_args.extend(
+                            [
+                                "--thresholds-by-horizon-regime-json",
+                                json.dumps(trade_decision_threshold_overrides, separators=(",", ":")),
+                            ]
+                        )
                     if direct_midband_policy_min_abs_ret_pred is not None:
                         common_align_args.extend(
                             ["--policy-midband-min-abs-ret-pred", str(float(direct_midband_policy_min_abs_ret_pred))]
@@ -5672,612 +5732,620 @@ def execute_reliability_workflow(
                         )
                     )
 
-                    refined_shadow_bundle = _build_shadow_policy_command_bundle(
-                        python=python,
-                        variant_name="refined_veto",
-                        candidate_input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        companion_baseline_path=companion_baseline_input,
-                        summary_dir=summary_dir,
-                        common_align_args=common_align_args,
-                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        n_boot=int(champ_cfg.get("n_boot", 2000)),
-                        alpha=float(champ_cfg.get("alpha", 0.05)),
-                        seed=int(champ_cfg.get("seed", 42)),
-                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        feature_sources=shadow_feature_sources,
-                        extra_policy_args=[
-                            "--refined-candidate-only-veto",
-                            "1",
-                            "--refined-pup-low",
-                            str(refined_veto_low),
-                            "--refined-pup-high",
-                            str(refined_veto_high),
-                            "--refined-high-inclusive",
-                            "1" if refined_veto_high_inclusive else "0",
-                            "--refined-min-abs-ret-pred",
-                            str(refined_veto_min_abs_ret_pred),
-                            "--refined-incumbent-reference",
-                            str(refined_veto_reference_path_cfg or companion_baseline_input),
-                        ],
-                    )
-                    refined_shadow_candidate_path = refined_shadow_bundle.candidate_path
-                    results.append(
-                        _run_step(
-                            "build_shadow_refined_veto_candidate_band",
-                            refined_shadow_bundle.build_command,
-                            logs_dir / "build_shadow_refined_veto_candidate_band.log",
-                            args.dry_run,
+                    if refined_veto_enabled:
+                        refined_shadow_bundle = _build_shadow_policy_command_bundle(
+                            python=python,
+                            variant_name="refined_veto",
+                            candidate_input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            companion_baseline_path=companion_baseline_input,
+                            summary_dir=summary_dir,
+                            common_align_args=common_align_args,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            feature_sources=shadow_feature_sources,
+                            extra_policy_args=[
+                                "--refined-candidate-only-veto",
+                                "1",
+                                "--refined-pup-low",
+                                str(refined_veto_low),
+                                "--refined-pup-high",
+                                str(refined_veto_high),
+                                "--refined-high-inclusive",
+                                "1" if refined_veto_high_inclusive else "0",
+                                "--refined-min-abs-ret-pred",
+                                str(refined_veto_min_abs_ret_pred),
+                                "--refined-incumbent-reference",
+                                str(refined_veto_reference_path_cfg or companion_baseline_input),
+                            ],
                         )
-                    )
+                        refined_shadow_candidate_path = refined_shadow_bundle.candidate_path
+                        results.append(
+                            _run_step(
+                                "build_shadow_refined_veto_candidate_band",
+                                refined_shadow_bundle.build_command,
+                                logs_dir / "build_shadow_refined_veto_candidate_band.log",
+                                args.dry_run,
+                            )
+                        )
 
-                    results.append(
-                        _run_step(
-                            "champion_challenger_policy_aligned_shadow_refined_veto_companion",
-                            refined_shadow_bundle.companion_command,
-                            logs_dir / "champion_challenger_policy_aligned_shadow_refined_veto_companion.log",
-                            args.dry_run,
+                        results.append(
+                            _run_step(
+                                "champion_challenger_policy_aligned_shadow_refined_veto_companion",
+                                refined_shadow_bundle.companion_command,
+                                logs_dir / "champion_challenger_policy_aligned_shadow_refined_veto_companion.log",
+                                args.dry_run,
+                            )
                         )
-                    )
 
-                    results.append(
-                        _run_step(
-                            "paired_trigger_overlap_policy_aligned_shadow_refined_veto",
-                            refined_shadow_bundle.overlap_command,
-                            logs_dir / "paired_trigger_overlap_policy_aligned_shadow_refined_veto.log",
-                            args.dry_run,
+                        results.append(
+                            _run_step(
+                                "paired_trigger_overlap_policy_aligned_shadow_refined_veto",
+                                refined_shadow_bundle.overlap_command,
+                                logs_dir / "paired_trigger_overlap_policy_aligned_shadow_refined_veto.log",
+                                args.dry_run,
+                            )
                         )
-                    )
 
-                    midband_shadow_bundle = _build_shadow_policy_command_bundle(
-                        python=python,
-                        variant_name="midband_veto",
-                        candidate_input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        companion_baseline_path=companion_baseline_input,
-                        summary_dir=summary_dir,
-                        common_align_args=common_align_args,
-                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        n_boot=int(champ_cfg.get("n_boot", 2000)),
-                        alpha=float(champ_cfg.get("alpha", 0.05)),
-                        seed=int(champ_cfg.get("seed", 42)),
-                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        feature_sources=shadow_feature_sources,
-                        extra_policy_args=[
-                            "--midband-candidate-only-veto",
-                            "1",
-                            "--midband-pup-low",
-                            str(midband_veto_low),
-                            "--midband-pup-high",
-                            str(midband_veto_high),
-                            "--midband-high-inclusive",
-                            "1" if midband_veto_high_inclusive else "0",
-                            "--midband-min-abs-ret-pred",
-                            str(midband_veto_min_abs_ret_pred),
-                            "--midband-max-abs-ret-pred",
-                            str(midband_veto_max_abs_ret_pred),
-                            "--midband-incumbent-reference",
-                            str(midband_veto_reference_path_cfg or companion_baseline_input),
-                        ],
-                    )
-                    midband_shadow_candidate_path = midband_shadow_bundle.candidate_path
-                    midband_shadow_meta_path = midband_shadow_bundle.meta_output_path
-                    results.append(
-                        _run_step(
-                            "build_shadow_midband_veto_candidate_band",
-                            midband_shadow_bundle.build_command,
-                            logs_dir / "build_shadow_midband_veto_candidate_band.log",
-                            args.dry_run,
+                    if midband_veto_enabled:
+                        midband_shadow_bundle = _build_shadow_policy_command_bundle(
+                            python=python,
+                            variant_name="midband_veto",
+                            candidate_input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            companion_baseline_path=companion_baseline_input,
+                            summary_dir=summary_dir,
+                            common_align_args=common_align_args,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            feature_sources=shadow_feature_sources,
+                            extra_policy_args=[
+                                "--midband-candidate-only-veto",
+                                "1",
+                                "--midband-pup-low",
+                                str(midband_veto_low),
+                                "--midband-pup-high",
+                                str(midband_veto_high),
+                                "--midband-high-inclusive",
+                                "1" if midband_veto_high_inclusive else "0",
+                                "--midband-min-abs-ret-pred",
+                                str(midband_veto_min_abs_ret_pred),
+                                "--midband-max-abs-ret-pred",
+                                str(midband_veto_max_abs_ret_pred),
+                                "--midband-incumbent-reference",
+                                str(midband_veto_reference_path_cfg or companion_baseline_input),
+                            ],
                         )
-                    )
+                        midband_shadow_candidate_path = midband_shadow_bundle.candidate_path
+                        midband_shadow_meta_path = midband_shadow_bundle.meta_output_path
+                        results.append(
+                            _run_step(
+                                "build_shadow_midband_veto_candidate_band",
+                                midband_shadow_bundle.build_command,
+                                logs_dir / "build_shadow_midband_veto_candidate_band.log",
+                                args.dry_run,
+                            )
+                        )
 
-                    results.append(
-                        _run_step(
-                            "champion_challenger_policy_aligned_shadow_midband_veto_companion",
-                            midband_shadow_bundle.companion_command,
-                            logs_dir / "champion_challenger_policy_aligned_shadow_midband_veto_companion.log",
-                            args.dry_run,
+                        results.append(
+                            _run_step(
+                                "champion_challenger_policy_aligned_shadow_midband_veto_companion",
+                                midband_shadow_bundle.companion_command,
+                                logs_dir / "champion_challenger_policy_aligned_shadow_midband_veto_companion.log",
+                                args.dry_run,
+                            )
                         )
-                    )
 
-                    results.append(
-                        _run_step(
-                            "paired_trigger_overlap_policy_aligned_shadow_midband_veto",
-                            midband_shadow_bundle.overlap_command,
-                            logs_dir / "paired_trigger_overlap_policy_aligned_shadow_midband_veto.log",
-                            args.dry_run,
+                        results.append(
+                            _run_step(
+                                "paired_trigger_overlap_policy_aligned_shadow_midband_veto",
+                                midband_shadow_bundle.overlap_command,
+                                logs_dir / "paired_trigger_overlap_policy_aligned_shadow_midband_veto.log",
+                                args.dry_run,
+                            )
                         )
-                    )
 
-                    raw_ev_shadow_bundle = _build_shadow_policy_command_bundle(
-                        python=python,
-                        variant_name="raw_ev_veto",
-                        candidate_input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        companion_baseline_path=companion_baseline_input,
-                        summary_dir=summary_dir,
-                        common_align_args=common_align_args,
-                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        n_boot=int(champ_cfg.get("n_boot", 2000)),
-                        alpha=float(champ_cfg.get("alpha", 0.05)),
-                        seed=int(champ_cfg.get("seed", 42)),
-                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        feature_sources=shadow_feature_sources,
-                        extra_policy_args=[
-                            "--raw-ev-sign-candidate-only-veto",
-                            "1",
-                            "--raw-ev-sign-pup-low",
-                            str(raw_ev_veto_low),
-                            "--raw-ev-sign-pup-high",
-                            str(raw_ev_veto_high),
-                            "--raw-ev-sign-high-inclusive",
-                            "1" if raw_ev_veto_high_inclusive else "0",
-                            "--raw-ev-sign-max",
-                            str(raw_ev_veto_max),
-                            "--raw-ev-sign-incumbent-reference",
-                            str(raw_ev_veto_reference_path_cfg or companion_baseline_input),
-                        ],
-                    )
-                    raw_ev_shadow_candidate_path = raw_ev_shadow_bundle.candidate_path
-                    results.append(
-                        _run_step(
-                            "build_shadow_raw_ev_veto_candidate_band",
-                            raw_ev_shadow_bundle.build_command,
-                            logs_dir / "build_shadow_raw_ev_veto_candidate_band.log",
-                            args.dry_run,
+                    if raw_ev_veto_enabled:
+                        raw_ev_shadow_bundle = _build_shadow_policy_command_bundle(
+                            python=python,
+                            variant_name="raw_ev_veto",
+                            candidate_input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            companion_baseline_path=companion_baseline_input,
+                            summary_dir=summary_dir,
+                            common_align_args=common_align_args,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            feature_sources=shadow_feature_sources,
+                            extra_policy_args=[
+                                "--raw-ev-sign-candidate-only-veto",
+                                "1",
+                                "--raw-ev-sign-pup-low",
+                                str(raw_ev_veto_low),
+                                "--raw-ev-sign-pup-high",
+                                str(raw_ev_veto_high),
+                                "--raw-ev-sign-high-inclusive",
+                                "1" if raw_ev_veto_high_inclusive else "0",
+                                "--raw-ev-sign-max",
+                                str(raw_ev_veto_max),
+                                "--raw-ev-sign-incumbent-reference",
+                                str(raw_ev_veto_reference_path_cfg or companion_baseline_input),
+                            ],
                         )
-                    )
+                        raw_ev_shadow_candidate_path = raw_ev_shadow_bundle.candidate_path
+                        results.append(
+                            _run_step(
+                                "build_shadow_raw_ev_veto_candidate_band",
+                                raw_ev_shadow_bundle.build_command,
+                                logs_dir / "build_shadow_raw_ev_veto_candidate_band.log",
+                                args.dry_run,
+                            )
+                        )
 
-                    results.append(
-                        _run_step(
-                            "champion_challenger_policy_aligned_shadow_raw_ev_veto_companion",
-                            raw_ev_shadow_bundle.companion_command,
-                            logs_dir / "champion_challenger_policy_aligned_shadow_raw_ev_veto_companion.log",
-                            args.dry_run,
+                        results.append(
+                            _run_step(
+                                "champion_challenger_policy_aligned_shadow_raw_ev_veto_companion",
+                                raw_ev_shadow_bundle.companion_command,
+                                logs_dir / "champion_challenger_policy_aligned_shadow_raw_ev_veto_companion.log",
+                                args.dry_run,
+                            )
                         )
-                    )
 
-                    results.append(
-                        _run_step(
-                            "paired_trigger_overlap_policy_aligned_shadow_raw_ev_veto",
-                            raw_ev_shadow_bundle.overlap_command,
-                            logs_dir / "paired_trigger_overlap_policy_aligned_shadow_raw_ev_veto.log",
-                            args.dry_run,
+                        results.append(
+                            _run_step(
+                                "paired_trigger_overlap_policy_aligned_shadow_raw_ev_veto",
+                                raw_ev_shadow_bundle.overlap_command,
+                                logs_dir / "paired_trigger_overlap_policy_aligned_shadow_raw_ev_veto.log",
+                                args.dry_run,
+                            )
                         )
-                    )
 
-                    direction_align_shadow_candidate_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_direction_align_veto.csv"
-                    )
-                    direction_align_shadow_meta_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_direction_align_veto_meta.json"
-                    )
-                    direction_align_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
-                        python=python,
-                        input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        output_path=direction_align_shadow_candidate_path,
-                        meta_output_path=direction_align_shadow_meta_path,
-                    )
-                    direction_align_shadow_build_cmd.extend(common_align_args)
-                    if quality_input.exists() or args.dry_run:
-                        direction_align_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
-                    if incumbent_backtest_for_features:
-                        direction_align_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    direction_align_shadow_bundle = _build_shadow_policy_command_bundle(
-                        python=python,
-                        variant_name="direction_align_veto",
-                        candidate_input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        companion_baseline_path=companion_baseline_input,
-                        summary_dir=summary_dir,
-                        common_align_args=common_align_args,
-                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        n_boot=int(champ_cfg.get("n_boot", 2000)),
-                        alpha=float(champ_cfg.get("alpha", 0.05)),
-                        seed=int(champ_cfg.get("seed", 42)),
-                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        feature_sources=shadow_feature_sources,
-                        extra_policy_args=[
-                            "--direction-align-candidate-only-veto",
-                            "1",
-                            "--direction-align-pup-low",
-                            str(direction_align_veto_low),
-                            "--direction-align-pup-high",
-                            str(direction_align_veto_high),
-                            "--direction-align-high-inclusive",
-                            "1" if direction_align_veto_high_inclusive else "0",
-                            "--direction-align-require-aligned",
-                            "1" if direction_align_veto_require_aligned else "0",
-                            "--direction-align-use-midband-slice",
-                            "1" if direction_align_veto_use_midband_slice else "0",
-                            "--direction-align-min-abs-ret-pred",
-                            str(direction_align_veto_min_abs_ret_pred),
-                            "--direction-align-max-abs-ret-pred",
-                            str(direction_align_veto_max_abs_ret_pred),
-                            "--direction-align-incumbent-reference",
-                            str(direction_align_veto_reference_path_cfg or companion_baseline_input),
-                        ],
-                    )
-                    direction_align_shadow_candidate_path = direction_align_shadow_bundle.candidate_path
-                    results.append(
-                        _run_step(
-                            "build_shadow_direction_align_veto_candidate_band",
-                            direction_align_shadow_bundle.build_command,
-                            logs_dir / "build_shadow_direction_align_veto_candidate_band.log",
-                            args.dry_run,
+                    if direction_align_veto_enabled:
+                        direction_align_shadow_candidate_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_direction_align_veto.csv"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "champion_challenger_policy_aligned_shadow_direction_align_veto_companion",
-                            direction_align_shadow_bundle.companion_command,
-                            logs_dir / "champion_challenger_policy_aligned_shadow_direction_align_veto_companion.log",
-                            args.dry_run,
+                        direction_align_shadow_meta_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_direction_align_veto_meta.json"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "paired_trigger_overlap_policy_aligned_shadow_direction_align_veto",
-                            direction_align_shadow_bundle.overlap_command,
-                            logs_dir / "paired_trigger_overlap_policy_aligned_shadow_direction_align_veto.log",
-                            args.dry_run,
+                        direction_align_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                            python=python,
+                            input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            output_path=direction_align_shadow_candidate_path,
+                            meta_output_path=direction_align_shadow_meta_path,
                         )
-                    )
+                        direction_align_shadow_build_cmd.extend(common_align_args)
+                        if quality_input.exists() or args.dry_run:
+                            direction_align_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
+                        if incumbent_backtest_for_features:
+                            direction_align_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
+                        direction_align_shadow_bundle = _build_shadow_policy_command_bundle(
+                            python=python,
+                            variant_name="direction_align_veto",
+                            candidate_input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            companion_baseline_path=companion_baseline_input,
+                            summary_dir=summary_dir,
+                            common_align_args=common_align_args,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            feature_sources=shadow_feature_sources,
+                            extra_policy_args=[
+                                "--direction-align-candidate-only-veto",
+                                "1",
+                                "--direction-align-pup-low",
+                                str(direction_align_veto_low),
+                                "--direction-align-pup-high",
+                                str(direction_align_veto_high),
+                                "--direction-align-high-inclusive",
+                                "1" if direction_align_veto_high_inclusive else "0",
+                                "--direction-align-require-aligned",
+                                "1" if direction_align_veto_require_aligned else "0",
+                                "--direction-align-use-midband-slice",
+                                "1" if direction_align_veto_use_midband_slice else "0",
+                                "--direction-align-min-abs-ret-pred",
+                                str(direction_align_veto_min_abs_ret_pred),
+                                "--direction-align-max-abs-ret-pred",
+                                str(direction_align_veto_max_abs_ret_pred),
+                                "--direction-align-incumbent-reference",
+                                str(direction_align_veto_reference_path_cfg or companion_baseline_input),
+                            ],
+                        )
+                        direction_align_shadow_candidate_path = direction_align_shadow_bundle.candidate_path
+                        results.append(
+                            _run_step(
+                                "build_shadow_direction_align_veto_candidate_band",
+                                direction_align_shadow_bundle.build_command,
+                                logs_dir / "build_shadow_direction_align_veto_candidate_band.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "champion_challenger_policy_aligned_shadow_direction_align_veto_companion",
+                                direction_align_shadow_bundle.companion_command,
+                                logs_dir / "champion_challenger_policy_aligned_shadow_direction_align_veto_companion.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "paired_trigger_overlap_policy_aligned_shadow_direction_align_veto",
+                                direction_align_shadow_bundle.overlap_command,
+                                logs_dir / "paired_trigger_overlap_policy_aligned_shadow_direction_align_veto.log",
+                                args.dry_run,
+                            )
+                        )
 
-                    joint_direction_midband_shadow_candidate_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_joint_direction_midband_veto.csv"
-                    )
-                    joint_direction_midband_shadow_meta_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_joint_direction_midband_veto_meta.json"
-                    )
-                    joint_direction_midband_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
-                        python=python,
-                        input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        output_path=joint_direction_midband_shadow_candidate_path,
-                        meta_output_path=joint_direction_midband_shadow_meta_path,
-                    )
-                    joint_direction_midband_shadow_build_cmd.extend(common_align_args)
-                    if quality_input.exists() or args.dry_run:
-                        joint_direction_midband_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
-                    if incumbent_backtest_for_features:
-                        joint_direction_midband_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    joint_direction_midband_shadow_bundle = _build_shadow_policy_command_bundle(
-                        python=python,
-                        variant_name="joint_direction_midband_veto",
-                        candidate_input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        companion_baseline_path=companion_baseline_input,
-                        summary_dir=summary_dir,
-                        common_align_args=common_align_args,
-                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        n_boot=int(champ_cfg.get("n_boot", 2000)),
-                        alpha=float(champ_cfg.get("alpha", 0.05)),
-                        seed=int(champ_cfg.get("seed", 42)),
-                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        feature_sources=shadow_feature_sources,
-                        extra_policy_args=[
-                            "--joint-direction-midband-candidate-only-veto",
-                            "1",
-                            "--joint-direction-midband-pup-low",
-                            str(joint_direction_midband_veto_low),
-                            "--joint-direction-midband-pup-high",
-                            str(joint_direction_midband_veto_high),
-                            "--joint-direction-midband-high-inclusive",
-                            "1" if joint_direction_midband_veto_high_inclusive else "0",
-                            "--joint-direction-midband-require-aligned",
-                            "1" if joint_direction_midband_veto_require_aligned else "0",
-                            "--joint-direction-midband-min-abs-ret-pred",
-                            str(joint_direction_midband_veto_min_abs_ret_pred),
-                            "--joint-direction-midband-max-abs-ret-pred",
-                            str(joint_direction_midband_veto_max_abs_ret_pred),
-                            "--joint-direction-midband-incumbent-reference",
-                            str(joint_direction_midband_veto_reference_path_cfg or companion_baseline_input),
-                        ],
-                    )
-                    joint_direction_midband_shadow_candidate_path = joint_direction_midband_shadow_bundle.candidate_path
-                    results.append(
-                        _run_step(
-                            "build_shadow_joint_direction_midband_veto_candidate_band",
-                            joint_direction_midband_shadow_bundle.build_command,
-                            logs_dir / "build_shadow_joint_direction_midband_veto_candidate_band.log",
-                            args.dry_run,
+                    if joint_direction_midband_veto_enabled:
+                        joint_direction_midband_shadow_candidate_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_joint_direction_midband_veto.csv"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "champion_challenger_policy_aligned_shadow_joint_direction_midband_veto_companion",
-                            joint_direction_midband_shadow_bundle.companion_command,
-                            logs_dir / "champion_challenger_policy_aligned_shadow_joint_direction_midband_veto_companion.log",
-                            args.dry_run,
+                        joint_direction_midband_shadow_meta_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_joint_direction_midband_veto_meta.json"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "paired_trigger_overlap_policy_aligned_shadow_joint_direction_midband_veto",
-                            joint_direction_midband_shadow_bundle.overlap_command,
-                            logs_dir / "paired_trigger_overlap_policy_aligned_shadow_joint_direction_midband_veto.log",
-                            args.dry_run,
+                        joint_direction_midband_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                            python=python,
+                            input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            output_path=joint_direction_midband_shadow_candidate_path,
+                            meta_output_path=joint_direction_midband_shadow_meta_path,
                         )
-                    )
+                        joint_direction_midband_shadow_build_cmd.extend(common_align_args)
+                        if quality_input.exists() or args.dry_run:
+                            joint_direction_midband_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
+                        if incumbent_backtest_for_features:
+                            joint_direction_midband_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
+                        joint_direction_midband_shadow_bundle = _build_shadow_policy_command_bundle(
+                            python=python,
+                            variant_name="joint_direction_midband_veto",
+                            candidate_input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            companion_baseline_path=companion_baseline_input,
+                            summary_dir=summary_dir,
+                            common_align_args=common_align_args,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            feature_sources=shadow_feature_sources,
+                            extra_policy_args=[
+                                "--joint-direction-midband-candidate-only-veto",
+                                "1",
+                                "--joint-direction-midband-pup-low",
+                                str(joint_direction_midband_veto_low),
+                                "--joint-direction-midband-pup-high",
+                                str(joint_direction_midband_veto_high),
+                                "--joint-direction-midband-high-inclusive",
+                                "1" if joint_direction_midband_veto_high_inclusive else "0",
+                                "--joint-direction-midband-require-aligned",
+                                "1" if joint_direction_midband_veto_require_aligned else "0",
+                                "--joint-direction-midband-min-abs-ret-pred",
+                                str(joint_direction_midband_veto_min_abs_ret_pred),
+                                "--joint-direction-midband-max-abs-ret-pred",
+                                str(joint_direction_midband_veto_max_abs_ret_pred),
+                                "--joint-direction-midband-incumbent-reference",
+                                str(joint_direction_midband_veto_reference_path_cfg or companion_baseline_input),
+                            ],
+                        )
+                        joint_direction_midband_shadow_candidate_path = joint_direction_midband_shadow_bundle.candidate_path
+                        results.append(
+                            _run_step(
+                                "build_shadow_joint_direction_midband_veto_candidate_band",
+                                joint_direction_midband_shadow_bundle.build_command,
+                                logs_dir / "build_shadow_joint_direction_midband_veto_candidate_band.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "champion_challenger_policy_aligned_shadow_joint_direction_midband_veto_companion",
+                                joint_direction_midband_shadow_bundle.companion_command,
+                                logs_dir / "champion_challenger_policy_aligned_shadow_joint_direction_midband_veto_companion.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "paired_trigger_overlap_policy_aligned_shadow_joint_direction_midband_veto",
+                                joint_direction_midband_shadow_bundle.overlap_command,
+                                logs_dir / "paired_trigger_overlap_policy_aligned_shadow_joint_direction_midband_veto.log",
+                                args.dry_run,
+                            )
+                        )
 
-                    regime_state_shadow_candidate_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_regime_state_veto.csv"
-                    )
-                    regime_state_shadow_meta_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_regime_state_veto_meta.json"
-                    )
-                    regime_state_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
-                        python=python,
-                        input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        output_path=regime_state_shadow_candidate_path,
-                        meta_output_path=regime_state_shadow_meta_path,
-                    )
-                    regime_state_shadow_build_cmd.extend(common_align_args)
-                    if quality_input.exists() or args.dry_run:
-                        regime_state_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
-                    if incumbent_backtest_for_features:
-                        regime_state_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    regime_state_shadow_bundle = _build_shadow_policy_command_bundle(
-                        python=python,
-                        variant_name="regime_state_veto",
-                        candidate_input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        companion_baseline_path=companion_baseline_input,
-                        summary_dir=summary_dir,
-                        common_align_args=common_align_args,
-                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        n_boot=int(champ_cfg.get("n_boot", 2000)),
-                        alpha=float(champ_cfg.get("alpha", 0.05)),
-                        seed=int(champ_cfg.get("seed", 42)),
-                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        feature_sources=shadow_feature_sources,
-                        extra_policy_args=[
-                            "--regime-state-candidate-only-veto",
-                            "1",
-                            "--regime-state-pup-low",
-                            str(regime_state_veto_low),
-                            "--regime-state-pup-high",
-                            str(regime_state_veto_high),
-                            "--regime-state-high-inclusive",
-                            "1" if regime_state_veto_high_inclusive else "0",
-                            "--regime-state-regimes",
-                            ",".join(selected_regime_states),
-                            "--regime-state-use-midband-slice",
-                            "1" if regime_state_veto_use_midband_slice else "0",
-                            "--regime-state-min-abs-ret-pred",
-                            str(regime_state_veto_min_abs_ret_pred),
-                            "--regime-state-max-abs-ret-pred",
-                            str(regime_state_veto_max_abs_ret_pred),
-                            "--regime-state-incumbent-reference",
-                            str(regime_state_veto_reference_path_cfg or companion_baseline_input),
-                        ],
-                    )
-                    regime_state_shadow_candidate_path = regime_state_shadow_bundle.candidate_path
-                    results.append(
-                        _run_step(
-                            "build_shadow_regime_state_veto_candidate_band",
-                            regime_state_shadow_bundle.build_command,
-                            logs_dir / "build_shadow_regime_state_veto_candidate_band.log",
-                            args.dry_run,
+                    if regime_state_veto_enabled:
+                        regime_state_shadow_candidate_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_regime_state_veto.csv"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "champion_challenger_policy_aligned_shadow_regime_state_veto_companion",
-                            regime_state_shadow_bundle.companion_command,
-                            logs_dir / "champion_challenger_policy_aligned_shadow_regime_state_veto_companion.log",
-                            args.dry_run,
+                        regime_state_shadow_meta_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_regime_state_veto_meta.json"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "paired_trigger_overlap_policy_aligned_shadow_regime_state_veto",
-                            regime_state_shadow_bundle.overlap_command,
-                            logs_dir / "paired_trigger_overlap_policy_aligned_shadow_regime_state_veto.log",
-                            args.dry_run,
+                        regime_state_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                            python=python,
+                            input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            output_path=regime_state_shadow_candidate_path,
+                            meta_output_path=regime_state_shadow_meta_path,
                         )
-                    )
+                        regime_state_shadow_build_cmd.extend(common_align_args)
+                        if quality_input.exists() or args.dry_run:
+                            regime_state_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
+                        if incumbent_backtest_for_features:
+                            regime_state_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
+                        regime_state_shadow_bundle = _build_shadow_policy_command_bundle(
+                            python=python,
+                            variant_name="regime_state_veto",
+                            candidate_input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            companion_baseline_path=companion_baseline_input,
+                            summary_dir=summary_dir,
+                            common_align_args=common_align_args,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            feature_sources=shadow_feature_sources,
+                            extra_policy_args=[
+                                "--regime-state-candidate-only-veto",
+                                "1",
+                                "--regime-state-pup-low",
+                                str(regime_state_veto_low),
+                                "--regime-state-pup-high",
+                                str(regime_state_veto_high),
+                                "--regime-state-high-inclusive",
+                                "1" if regime_state_veto_high_inclusive else "0",
+                                "--regime-state-regimes",
+                                ",".join(selected_regime_states),
+                                "--regime-state-use-midband-slice",
+                                "1" if regime_state_veto_use_midband_slice else "0",
+                                "--regime-state-min-abs-ret-pred",
+                                str(regime_state_veto_min_abs_ret_pred),
+                                "--regime-state-max-abs-ret-pred",
+                                str(regime_state_veto_max_abs_ret_pred),
+                                "--regime-state-incumbent-reference",
+                                str(regime_state_veto_reference_path_cfg or companion_baseline_input),
+                            ],
+                        )
+                        regime_state_shadow_candidate_path = regime_state_shadow_bundle.candidate_path
+                        results.append(
+                            _run_step(
+                                "build_shadow_regime_state_veto_candidate_band",
+                                regime_state_shadow_bundle.build_command,
+                                logs_dir / "build_shadow_regime_state_veto_candidate_band.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "champion_challenger_policy_aligned_shadow_regime_state_veto_companion",
+                                regime_state_shadow_bundle.companion_command,
+                                logs_dir / "champion_challenger_policy_aligned_shadow_regime_state_veto_companion.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "paired_trigger_overlap_policy_aligned_shadow_regime_state_veto",
+                                regime_state_shadow_bundle.overlap_command,
+                                logs_dir / "paired_trigger_overlap_policy_aligned_shadow_regime_state_veto.log",
+                                args.dry_run,
+                            )
+                        )
 
-                    chop_high_vol_shadow_candidate_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_chop_high_vol_veto.csv"
-                    )
-                    chop_high_vol_shadow_meta_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_chop_high_vol_veto_meta.json"
-                    )
-                    chop_high_vol_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
-                        python=python,
-                        input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        output_path=chop_high_vol_shadow_candidate_path,
-                        meta_output_path=chop_high_vol_shadow_meta_path,
-                    )
-                    chop_high_vol_shadow_build_cmd.extend(common_align_args)
-                    if quality_input.exists() or args.dry_run:
-                        chop_high_vol_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
-                    if incumbent_backtest_for_features:
-                        chop_high_vol_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    chop_high_vol_shadow_build_cmd.extend(
-                        [
-                            "--chop-high-vol-candidate-only-veto",
-                            "1",
-                            "--chop-high-vol-pup-low",
-                            str(chop_high_vol_veto_low),
-                            "--chop-high-vol-pup-high",
-                            str(chop_high_vol_veto_high),
-                            "--chop-high-vol-high-inclusive",
-                            "1" if chop_high_vol_veto_high_inclusive else "0",
-                            "--chop-high-vol-regime-state",
-                            str(chop_high_vol_veto_regime_state),
-                            "--chop-high-vol-volatility-col",
-                            str(chop_high_vol_veto_volatility_col),
-                            "--chop-high-vol-min-volatility",
-                            str(selected_high_volatility_threshold if selected_high_volatility_threshold is not None else "nan"),
-                            "--chop-high-vol-use-midband-slice",
-                            "1" if chop_high_vol_veto_use_midband_slice else "0",
-                            "--chop-high-vol-min-abs-ret-pred",
-                            str(chop_high_vol_veto_min_abs_ret_pred),
-                            "--chop-high-vol-max-abs-ret-pred",
-                            str(chop_high_vol_veto_max_abs_ret_pred),
-                            "--chop-high-vol-incumbent-reference",
-                            str(chop_high_vol_veto_reference_path_cfg or companion_baseline_input),
-                        ]
-                    )
-                    chop_high_vol_shadow_bundle = _build_shadow_policy_command_bundle(
-                        python=python,
-                        variant_name="chop_high_vol_veto",
-                        candidate_input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        companion_baseline_path=companion_baseline_input,
-                        summary_dir=summary_dir,
-                        common_align_args=common_align_args,
-                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        n_boot=int(champ_cfg.get("n_boot", 2000)),
-                        alpha=float(champ_cfg.get("alpha", 0.05)),
-                        seed=int(champ_cfg.get("seed", 42)),
-                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        feature_sources=shadow_feature_sources,
-                        extra_policy_args=[
-                            "--chop-high-vol-candidate-only-veto",
-                            "1",
-                            "--chop-high-vol-pup-low",
-                            str(chop_high_vol_veto_low),
-                            "--chop-high-vol-pup-high",
-                            str(chop_high_vol_veto_high),
-                            "--chop-high-vol-high-inclusive",
-                            "1" if chop_high_vol_veto_high_inclusive else "0",
-                            "--chop-high-vol-regime-state",
-                            str(chop_high_vol_veto_regime_state),
-                            "--chop-high-vol-volatility-col",
-                            str(chop_high_vol_veto_volatility_col),
-                            "--chop-high-vol-min-volatility",
-                            str(selected_high_volatility_threshold if selected_high_volatility_threshold is not None else "nan"),
-                            "--chop-high-vol-use-midband-slice",
-                            "1" if chop_high_vol_veto_use_midband_slice else "0",
-                            "--chop-high-vol-min-abs-ret-pred",
-                            str(chop_high_vol_veto_min_abs_ret_pred),
-                            "--chop-high-vol-max-abs-ret-pred",
-                            str(chop_high_vol_veto_max_abs_ret_pred),
-                            "--chop-high-vol-incumbent-reference",
-                            str(chop_high_vol_veto_reference_path_cfg or companion_baseline_input),
-                        ],
-                    )
-                    chop_high_vol_shadow_candidate_path = chop_high_vol_shadow_bundle.candidate_path
-                    results.append(
-                        _run_step(
-                            "build_shadow_chop_high_vol_veto_candidate_band",
-                            chop_high_vol_shadow_bundle.build_command,
-                            logs_dir / "build_shadow_chop_high_vol_veto_candidate_band.log",
-                            args.dry_run,
+                    if chop_high_vol_veto_enabled:
+                        chop_high_vol_shadow_candidate_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_chop_high_vol_veto.csv"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "champion_challenger_policy_aligned_shadow_chop_high_vol_veto_companion",
-                            chop_high_vol_shadow_bundle.companion_command,
-                            logs_dir / "champion_challenger_policy_aligned_shadow_chop_high_vol_veto_companion.log",
-                            args.dry_run,
+                        chop_high_vol_shadow_meta_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_chop_high_vol_veto_meta.json"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "paired_trigger_overlap_policy_aligned_shadow_chop_high_vol_veto",
-                            chop_high_vol_shadow_bundle.overlap_command,
-                            logs_dir / "paired_trigger_overlap_policy_aligned_shadow_chop_high_vol_veto.log",
-                            args.dry_run,
+                        chop_high_vol_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                            python=python,
+                            input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            output_path=chop_high_vol_shadow_candidate_path,
+                            meta_output_path=chop_high_vol_shadow_meta_path,
                         )
-                    )
+                        chop_high_vol_shadow_build_cmd.extend(common_align_args)
+                        if quality_input.exists() or args.dry_run:
+                            chop_high_vol_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
+                        if incumbent_backtest_for_features:
+                            chop_high_vol_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
+                        chop_high_vol_shadow_build_cmd.extend(
+                            [
+                                "--chop-high-vol-candidate-only-veto",
+                                "1",
+                                "--chop-high-vol-pup-low",
+                                str(chop_high_vol_veto_low),
+                                "--chop-high-vol-pup-high",
+                                str(chop_high_vol_veto_high),
+                                "--chop-high-vol-high-inclusive",
+                                "1" if chop_high_vol_veto_high_inclusive else "0",
+                                "--chop-high-vol-regime-state",
+                                str(chop_high_vol_veto_regime_state),
+                                "--chop-high-vol-volatility-col",
+                                str(chop_high_vol_veto_volatility_col),
+                                "--chop-high-vol-min-volatility",
+                                str(selected_high_volatility_threshold if selected_high_volatility_threshold is not None else "nan"),
+                                "--chop-high-vol-use-midband-slice",
+                                "1" if chop_high_vol_veto_use_midband_slice else "0",
+                                "--chop-high-vol-min-abs-ret-pred",
+                                str(chop_high_vol_veto_min_abs_ret_pred),
+                                "--chop-high-vol-max-abs-ret-pred",
+                                str(chop_high_vol_veto_max_abs_ret_pred),
+                                "--chop-high-vol-incumbent-reference",
+                                str(chop_high_vol_veto_reference_path_cfg or companion_baseline_input),
+                            ]
+                        )
+                        chop_high_vol_shadow_bundle = _build_shadow_policy_command_bundle(
+                            python=python,
+                            variant_name="chop_high_vol_veto",
+                            candidate_input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            companion_baseline_path=companion_baseline_input,
+                            summary_dir=summary_dir,
+                            common_align_args=common_align_args,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            feature_sources=shadow_feature_sources,
+                            extra_policy_args=[
+                                "--chop-high-vol-candidate-only-veto",
+                                "1",
+                                "--chop-high-vol-pup-low",
+                                str(chop_high_vol_veto_low),
+                                "--chop-high-vol-pup-high",
+                                str(chop_high_vol_veto_high),
+                                "--chop-high-vol-high-inclusive",
+                                "1" if chop_high_vol_veto_high_inclusive else "0",
+                                "--chop-high-vol-regime-state",
+                                str(chop_high_vol_veto_regime_state),
+                                "--chop-high-vol-volatility-col",
+                                str(chop_high_vol_veto_volatility_col),
+                                "--chop-high-vol-min-volatility",
+                                str(selected_high_volatility_threshold if selected_high_volatility_threshold is not None else "nan"),
+                                "--chop-high-vol-use-midband-slice",
+                                "1" if chop_high_vol_veto_use_midband_slice else "0",
+                                "--chop-high-vol-min-abs-ret-pred",
+                                str(chop_high_vol_veto_min_abs_ret_pred),
+                                "--chop-high-vol-max-abs-ret-pred",
+                                str(chop_high_vol_veto_max_abs_ret_pred),
+                                "--chop-high-vol-incumbent-reference",
+                                str(chop_high_vol_veto_reference_path_cfg or companion_baseline_input),
+                            ],
+                        )
+                        chop_high_vol_shadow_candidate_path = chop_high_vol_shadow_bundle.candidate_path
+                        results.append(
+                            _run_step(
+                                "build_shadow_chop_high_vol_veto_candidate_band",
+                                chop_high_vol_shadow_bundle.build_command,
+                                logs_dir / "build_shadow_chop_high_vol_veto_candidate_band.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "champion_challenger_policy_aligned_shadow_chop_high_vol_veto_companion",
+                                chop_high_vol_shadow_bundle.companion_command,
+                                logs_dir / "champion_challenger_policy_aligned_shadow_chop_high_vol_veto_companion.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "paired_trigger_overlap_policy_aligned_shadow_chop_high_vol_veto",
+                                chop_high_vol_shadow_bundle.overlap_command,
+                                logs_dir / "paired_trigger_overlap_policy_aligned_shadow_chop_high_vol_veto.log",
+                                args.dry_run,
+                            )
+                        )
 
-                    volatility_only_shadow_candidate_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_volatility_only_veto.csv"
-                    )
-                    volatility_only_shadow_meta_path = (
-                        summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_volatility_only_veto_meta.json"
-                    )
-                    volatility_only_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
-                        python=python,
-                        input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        output_path=volatility_only_shadow_candidate_path,
-                        meta_output_path=volatility_only_shadow_meta_path,
-                    )
-                    volatility_only_shadow_build_cmd.extend(common_align_args)
-                    if quality_input.exists() or args.dry_run:
-                        volatility_only_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
-                    if incumbent_backtest_for_features:
-                        volatility_only_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
-                    volatility_only_shadow_bundle = _build_shadow_policy_command_bundle(
-                        python=python,
-                        variant_name="volatility_only_veto",
-                        candidate_input_path=companion_candidate_input,
-                        model_path=trade_decision_model_path,
-                        companion_baseline_path=companion_baseline_input,
-                        summary_dir=summary_dir,
-                        common_align_args=common_align_args,
-                        baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
-                        candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
-                        n_boot=int(champ_cfg.get("n_boot", 2000)),
-                        alpha=float(champ_cfg.get("alpha", 0.05)),
-                        seed=int(champ_cfg.get("seed", 42)),
-                        signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
-                        feature_sources=shadow_feature_sources,
-                        extra_policy_args=[
-                            "--volatility-only-candidate-only-veto",
-                            "1",
-                            "--volatility-only-pup-low",
-                            str(volatility_only_veto_low),
-                            "--volatility-only-pup-high",
-                            str(volatility_only_veto_high),
-                            "--volatility-only-high-inclusive",
-                            "1" if volatility_only_veto_high_inclusive else "0",
-                            "--volatility-only-volatility-col",
-                            str(volatility_only_veto_volatility_col),
-                            "--volatility-only-min-volatility",
-                            str(volatility_only_min_volatility if volatility_only_min_volatility is not None else "nan"),
-                            "--volatility-only-use-midband-slice",
-                            "1" if volatility_only_veto_use_midband_slice else "0",
-                            "--volatility-only-min-abs-ret-pred",
-                            str(volatility_only_veto_min_abs_ret_pred),
-                            "--volatility-only-max-abs-ret-pred",
-                            str(volatility_only_veto_max_abs_ret_pred),
-                            "--volatility-only-incumbent-reference",
-                            str(volatility_only_veto_reference_path_cfg or companion_baseline_input),
-                        ],
-                    )
-                    volatility_only_shadow_candidate_path = volatility_only_shadow_bundle.candidate_path
-                    results.append(
-                        _run_step(
-                            "build_shadow_volatility_only_veto_candidate_band",
-                            volatility_only_shadow_bundle.build_command,
-                            logs_dir / "build_shadow_volatility_only_veto_candidate_band.log",
-                            args.dry_run,
+                    if volatility_only_veto_enabled:
+                        volatility_only_shadow_candidate_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_volatility_only_veto.csv"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "champion_challenger_policy_aligned_shadow_volatility_only_veto_companion",
-                            volatility_only_shadow_bundle.companion_command,
-                            logs_dir / "champion_challenger_policy_aligned_shadow_volatility_only_veto_companion.log",
-                            args.dry_run,
+                        volatility_only_shadow_meta_path = (
+                            summary_dir / "backtest_signals_meta_ensemble_decision_aligned_shadow_volatility_only_veto_meta.json"
                         )
-                    )
-                    results.append(
-                        _run_step(
-                            "paired_trigger_overlap_policy_aligned_shadow_volatility_only_veto",
-                            volatility_only_shadow_bundle.overlap_command,
-                            logs_dir / "paired_trigger_overlap_policy_aligned_shadow_volatility_only_veto.log",
-                            args.dry_run,
+                        volatility_only_shadow_build_cmd = _build_trade_decision_policy_backtest_command(
+                            python=python,
+                            input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            output_path=volatility_only_shadow_candidate_path,
+                            meta_output_path=volatility_only_shadow_meta_path,
                         )
-                    )
+                        volatility_only_shadow_build_cmd.extend(common_align_args)
+                        if quality_input.exists() or args.dry_run:
+                            volatility_only_shadow_build_cmd.extend(["--feature-source", str(quality_input)])
+                        if incumbent_backtest_for_features:
+                            volatility_only_shadow_build_cmd.extend(["--feature-source", str(incumbent_backtest_for_features)])
+                        volatility_only_shadow_bundle = _build_shadow_policy_command_bundle(
+                            python=python,
+                            variant_name="volatility_only_veto",
+                            candidate_input_path=companion_candidate_input,
+                            model_path=trade_decision_model_path,
+                            companion_baseline_path=companion_baseline_input,
+                            summary_dir=summary_dir,
+                            common_align_args=common_align_args,
+                            baseline_col=str(champ_cfg.get("baseline_col", "ret_ensemble_net")),
+                            candidate_col=str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            n_boot=int(champ_cfg.get("n_boot", 2000)),
+                            alpha=float(champ_cfg.get("alpha", 0.05)),
+                            seed=int(champ_cfg.get("seed", 42)),
+                            signal_col=str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            feature_sources=shadow_feature_sources,
+                            extra_policy_args=[
+                                "--volatility-only-candidate-only-veto",
+                                "1",
+                                "--volatility-only-pup-low",
+                                str(volatility_only_veto_low),
+                                "--volatility-only-pup-high",
+                                str(volatility_only_veto_high),
+                                "--volatility-only-high-inclusive",
+                                "1" if volatility_only_veto_high_inclusive else "0",
+                                "--volatility-only-volatility-col",
+                                str(volatility_only_veto_volatility_col),
+                                "--volatility-only-min-volatility",
+                                str(volatility_only_min_volatility if volatility_only_min_volatility is not None else "nan"),
+                                "--volatility-only-use-midband-slice",
+                                "1" if volatility_only_veto_use_midband_slice else "0",
+                                "--volatility-only-min-abs-ret-pred",
+                                str(volatility_only_veto_min_abs_ret_pred),
+                                "--volatility-only-max-abs-ret-pred",
+                                str(volatility_only_veto_max_abs_ret_pred),
+                                "--volatility-only-incumbent-reference",
+                                str(volatility_only_veto_reference_path_cfg or companion_baseline_input),
+                            ],
+                        )
+                        volatility_only_shadow_candidate_path = volatility_only_shadow_bundle.candidate_path
+                        results.append(
+                            _run_step(
+                                "build_shadow_volatility_only_veto_candidate_band",
+                                volatility_only_shadow_bundle.build_command,
+                                logs_dir / "build_shadow_volatility_only_veto_candidate_band.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "champion_challenger_policy_aligned_shadow_volatility_only_veto_companion",
+                                volatility_only_shadow_bundle.companion_command,
+                                logs_dir / "champion_challenger_policy_aligned_shadow_volatility_only_veto_companion.log",
+                                args.dry_run,
+                            )
+                        )
+                        results.append(
+                            _run_step(
+                                "paired_trigger_overlap_policy_aligned_shadow_volatility_only_veto",
+                                volatility_only_shadow_bundle.overlap_command,
+                                logs_dir / "paired_trigger_overlap_policy_aligned_shadow_volatility_only_veto.log",
+                                args.dry_run,
+                            )
+                        )
 
                     weak_veto_retro_cfg_obj = weak_veto_cfg.get("retrospective", {})
                     weak_veto_retro_cfg = weak_veto_retro_cfg_obj if isinstance(weak_veto_retro_cfg_obj, dict) else {}
@@ -7857,6 +7925,61 @@ def execute_reliability_workflow(
                         json.dumps(selection_payload, indent=2),
                         encoding="utf-8",
                     )
+                    recent_slice_targets: list[tuple[str, dict[str, Path]]] = []
+                    raw_shadow_artifact = official_shadow_artifacts.get("none")
+                    if isinstance(raw_shadow_artifact, dict):
+                        recent_slice_targets.append(("raw_candidate", raw_shadow_artifact))
+                    for target_variant_name in (best_variant, best_ineligible_variant):
+                        if not target_variant_name or str(target_variant_name).strip().lower() == "none":
+                            continue
+                        target_artifact = official_shadow_artifacts.get(str(target_variant_name))
+                        if isinstance(target_artifact, dict):
+                            recent_slice_targets.append((str(target_variant_name), target_artifact))
+
+                    emitted_recent_slice_variants: set[str] = set()
+                    for target_label, target_artifact in recent_slice_targets:
+                        if target_label in emitted_recent_slice_variants:
+                            continue
+                        target_candidate_path = target_artifact.get("candidate_path")
+                        if not isinstance(target_candidate_path, Path) or not target_candidate_path.exists():
+                            continue
+                        target_meta_path = target_artifact.get("meta_path")
+                        target_meta_payload = (
+                            _load_json(target_meta_path)
+                            if isinstance(target_meta_path, Path) and target_meta_path.exists()
+                            else {}
+                        )
+                        target_threshold = _safe_float(
+                            target_meta_payload.get("threshold") if isinstance(target_meta_payload, dict) else None,
+                            default=resolved_trade_decision_threshold,
+                        )
+                        recent_slice_output_path = summary_dir / f"recent_signal_active_slice_{target_label}.json"
+                        recent_slice_cmd = [
+                            python,
+                            "-m",
+                            "src.scripts.analyze_recent_signal_active_slice",
+                            "--input",
+                            str(target_candidate_path),
+                            "--output",
+                            str(recent_slice_output_path),
+                            "--recent-window",
+                            str(recent_window_rows),
+                            "--signal-col",
+                            str(trade_decision_cfg.get("signal_col", "signal_ensemble")),
+                            "--return-col",
+                            str(champ_cfg.get("candidate_col", "ret_ensemble_net")),
+                            "--threshold",
+                            str(float(target_threshold)),
+                        ]
+                        results.append(
+                            _run_step(
+                                f"recent_signal_active_slice_{target_label}",
+                                recent_slice_cmd,
+                                logs_dir / f"recent_signal_active_slice_{target_label}.log",
+                                args.dry_run,
+                            )
+                        )
+                        emitted_recent_slice_variants.add(target_label)
                     reference_feature_ablation_candidate = next(
                         (
                             candidate

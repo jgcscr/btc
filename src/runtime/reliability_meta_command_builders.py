@@ -14,6 +14,7 @@ ALLOWED_META_COMPONENTS = (
     "garch_lstm",
     "xgb",
     "lgbm",
+    "regime_logit",
 )
 
 
@@ -28,6 +29,7 @@ def resolve_meta_component_weight_spec(
     search_cfg: Mapping[str, Any],
     load_json: Callable[[Path], Any],
     extract_audit_weight_spec: Callable[..., str | None],
+    requested_components: Sequence[str] | None = None,
 ) -> tuple[str | None, Path | None, str | None]:
     meta_component_weight_audit_path = search_cfg.get("meta_component_weights_from_audit_path")
     if not meta_component_weight_audit_path:
@@ -36,11 +38,15 @@ def resolve_meta_component_weight_spec(
     if not audit_path.exists():
         return None, audit_path, None
     try:
+        allowed_components = tuple(
+            str(component)
+            for component in (requested_components or ALLOWED_META_COMPONENTS)
+            if str(component) in ALLOWED_META_COMPONENTS
+        )
+        if not allowed_components:
+            allowed_components = ALLOWED_META_COMPONENTS
         return (
-            extract_audit_weight_spec(
-                load_json(audit_path),
-                allowed_components=ALLOWED_META_COMPONENTS,
-            ),
+            extract_audit_weight_spec(load_json(audit_path), allowed_components=allowed_components),
             audit_path,
             None,
         )

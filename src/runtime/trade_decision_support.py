@@ -7,7 +7,11 @@ from typing import Any, Callable, Dict, Mapping
 
 import numpy as np
 
-from src.utils.component_diversity_support import component_feature_column_names, pairwise_feature_column_names
+from src.utils.component_diversity_support import (
+    component_feature_column_names,
+    pairwise_feature_column_names,
+    summarize_component_probabilities,
+)
 
 
 SummaryPayload = Dict[str, Dict[str, Any]]
@@ -226,52 +230,71 @@ def apply_trade_decision_model(
     vol_payload = result.get("volatility", {}) if isinstance(result.get("volatility"), Mapping) else {}
     vol_snapshot = vol_payload.get("snapshot", {}) if isinstance(vol_payload, Mapping) else {}
 
+    p_up_value = finite_float(result.get("p_up", 0.0), 0.0)
+    ret_pred_value = finite_float(result.get("ret_pred", 0.0), 0.0)
     feature_values: Dict[str, float] = {
-        "p_up": float(result.get("p_up", 0.0)),
-        "raw_p_up": float(result.get("raw_p_up", result.get("p_up", 0.0))),
-        "ret_pred": float(result.get("ret_pred", 0.0)),
-        "expected_value_proxy": float(result.get("p_up", 0.0)) * float(result.get("ret_pred", 0.0)),
-        "abs_ret_pred": abs(float(result.get("ret_pred", 0.0))),
-        "raw_calibrated_probability_gap": float(result.get("raw_calibrated_probability_gap", 0.0) or 0.0),
-        "probability_alignment_gap": float(result.get("probability_alignment_gap", 0.0) or 0.0),
-        "raw_p_up_ret_mismatch": float(result.get("raw_p_up_ret_mismatch", 0.0) or 0.0),
-        "p_up_ret_mismatch": float(result.get("p_up_ret_mismatch", 0.0) or 0.0),
-        "raw_p_up_direction_mismatch": float(result.get("raw_p_up_direction_mismatch", 0.0) or 0.0),
-        "p_up_direction_mismatch": float(result.get("p_up_direction_mismatch", 0.0) or 0.0),
-        "ret_projected_price_consensus": float(result.get("ret_projected_price_consensus", 0.0) or 0.0),
-        "probability_calibration_guard_applied": float(result.get("probability_calibration_guard_applied", 0.0) or 0.0),
-        "probability_calibration_used_regime_key": float(result.get("probability_calibration_used_regime_key", 0.0) or 0.0),
-        "residual_std": float(residual_std),
-        "confidence_score": float(result.get("confidence_score", 0.0)),
-        "position_size": float(result.get("position_size", 0.0)),
-        "volatility_realized_24h": float(vol_snapshot.get("volatility_realized_24h", 0.0) or 0.0),
-        "volatility_ewm_24h": float(vol_snapshot.get("volatility_ewm_24h", 0.0) or 0.0),
-        "volatility_garch_like": float(vol_snapshot.get("volatility_garch_like", 0.0) or 0.0),
-        "range_expansion_1h": float(result.get("range_expansion_1h", 0.0) or 0.0),
-        "distance_from_session_high_8h": float(result.get("distance_from_session_high_8h", 0.0) or 0.0),
-        "distance_from_session_low_8h": float(result.get("distance_from_session_low_8h", 0.0) or 0.0),
-        "vwap_deviation_8h": float(result.get("vwap_deviation_8h", 0.0) or 0.0),
-        "momentum_slope_2h": float(result.get("momentum_slope_2h", 0.0) or 0.0),
-        "momentum_slope_4h": float(result.get("momentum_slope_4h", 0.0) or 0.0),
-        "confluence_support_ratio": float(result.get("confluence_support_ratio", 0.0) or 0.0),
-        "confluence_short_term_ratio": float(result.get("confluence_short_term_ratio", 0.0) or 0.0),
-        "confluence_mid_term_ratio": float(result.get("confluence_mid_term_ratio", 0.0) or 0.0),
-        "confluence_direction_matches_dominant": float(result.get("confluence_direction_matches_dominant", 0.0) or 0.0),
-        "incumbent_signal_reference": float(result.get("incumbent_signal_reference", 0.0) or 0.0),
-        "candidate_only_reference": float(result.get("candidate_only_reference", 0.0) or 0.0),
-        "candidate_incumbent_disagreement": float(result.get("candidate_incumbent_disagreement", 0.0) or 0.0),
+        "p_up": p_up_value,
+        "raw_p_up": finite_float(result.get("raw_p_up", p_up_value), p_up_value),
+        "ret_pred": ret_pred_value,
+        "expected_value_proxy": p_up_value * ret_pred_value,
+        "abs_ret_pred": abs(ret_pred_value),
+        "raw_calibrated_probability_gap": finite_float(result.get("raw_calibrated_probability_gap", 0.0), 0.0),
+        "probability_alignment_gap": finite_float(result.get("probability_alignment_gap", 0.0), 0.0),
+        "raw_p_up_ret_mismatch": finite_float(result.get("raw_p_up_ret_mismatch", 0.0), 0.0),
+        "p_up_ret_mismatch": finite_float(result.get("p_up_ret_mismatch", 0.0), 0.0),
+        "raw_p_up_direction_mismatch": finite_float(result.get("raw_p_up_direction_mismatch", 0.0), 0.0),
+        "p_up_direction_mismatch": finite_float(result.get("p_up_direction_mismatch", 0.0), 0.0),
+        "ret_projected_price_consensus": finite_float(result.get("ret_projected_price_consensus", 0.0), 0.0),
+        "probability_calibration_guard_applied": finite_float(result.get("probability_calibration_guard_applied", 0.0), 0.0),
+        "probability_calibration_used_regime_key": finite_float(result.get("probability_calibration_used_regime_key", 0.0), 0.0),
+        "residual_std": finite_float(residual_std, 0.0),
+        "confidence_score": finite_float(result.get("confidence_score", 0.0), 0.0),
+        "position_size": finite_float(result.get("position_size", 0.0), 0.0),
+        "volatility_realized_24h": finite_float(vol_snapshot.get("volatility_realized_24h", 0.0), 0.0),
+        "volatility_ewm_24h": finite_float(vol_snapshot.get("volatility_ewm_24h", 0.0), 0.0),
+        "volatility_garch_like": finite_float(vol_snapshot.get("volatility_garch_like", 0.0), 0.0),
+        "range_expansion_1h": finite_float(result.get("range_expansion_1h", 0.0), 0.0),
+        "distance_from_session_high_8h": finite_float(result.get("distance_from_session_high_8h", 0.0), 0.0),
+        "distance_from_session_low_8h": finite_float(result.get("distance_from_session_low_8h", 0.0), 0.0),
+        "vwap_deviation_8h": finite_float(result.get("vwap_deviation_8h", 0.0), 0.0),
+        "momentum_slope_2h": finite_float(result.get("momentum_slope_2h", 0.0), 0.0),
+        "momentum_slope_4h": finite_float(result.get("momentum_slope_4h", 0.0), 0.0),
+        "confluence_support_ratio": finite_float(result.get("confluence_support_ratio", 0.0), 0.0),
+        "confluence_short_term_ratio": finite_float(result.get("confluence_short_term_ratio", 0.0), 0.0),
+        "confluence_mid_term_ratio": finite_float(result.get("confluence_mid_term_ratio", 0.0), 0.0),
+        "confluence_direction_matches_dominant": finite_float(result.get("confluence_direction_matches_dominant", 0.0), 0.0),
+        "horizon_consensus_support_ratio": finite_float(result.get("horizon_consensus_support_ratio", 0.0), 0.0),
+        "horizon_directional_agreement_ratio": finite_float(result.get("horizon_directional_agreement_ratio", 0.0), 0.0),
+        "horizon_directional_disagreement_count": finite_float(result.get("horizon_directional_disagreement_count", 0.0), 0.0),
+        "horizon_short_term_alignment_ratio": finite_float(result.get("horizon_short_term_alignment_ratio", 0.0), 0.0),
+        "horizon_mid_term_alignment_ratio": finite_float(result.get("horizon_mid_term_alignment_ratio", 0.0), 0.0),
+        "horizon_weighted_p_up": finite_float(result.get("horizon_weighted_p_up", p_up_value), p_up_value),
+        "horizon_weighted_ret_pred": finite_float(result.get("horizon_weighted_ret_pred", ret_pred_value), ret_pred_value),
+        "horizon_p_up_dispersion": finite_float(result.get("horizon_p_up_dispersion", 0.0), 0.0),
+        "horizon_bias_conflict": finite_float(result.get("horizon_bias_conflict", 0.0), 0.0),
+        "incumbent_signal_reference": finite_float(result.get("incumbent_signal_reference", 0.0), 0.0),
+        "candidate_only_reference": finite_float(result.get("candidate_only_reference", 0.0), 0.0),
+        "candidate_incumbent_disagreement": finite_float(result.get("candidate_incumbent_disagreement", 0.0), 0.0),
         "regime_is_trend": 1.0 if regime_state == regime_trend else 0.0,
         "regime_is_neutral": 1.0 if regime_state == regime_neutral else 0.0,
         "regime_is_chop": 1.0 if regime_state == regime_chop else 0.0,
     }
+    component_summary = summarize_component_probabilities(
+        {
+            str(name).removeprefix("p_up_"): value
+            for name, value in result.items()
+            if str(name).startswith("p_up_") and str(name) not in {"p_up", "p_up_meta", "p_up_gate"}
+        }
+    )
+    for column in component_feature_column_names():
+        feature_values[column] = finite_float(result.get(column, component_summary.get(column, 0.0)), component_summary.get(column, 0.0))
     for column in [
-        *component_feature_column_names(),
         *pairwise_feature_column_names(),
         "direction_ensemble_selected_count",
         "direction_ensemble_rejected_count",
         "direction_ensemble_missing_preferred_group_count",
     ]:
-        feature_values[column] = float(result.get(column, 0.0) or 0.0)
+        feature_values[column] = finite_float(result.get(column, 0.0), 0.0)
 
     logit = intercept
     for name, coef in zip(feature_names, coefficients):

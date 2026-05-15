@@ -1202,6 +1202,39 @@ def _load_lgbm_direction_model(model_path: str, _device: Optional[str] = None) -
     }
 
 
+def _load_regime_logit_direction_model(model_path: str, _device: Optional[str] = None) -> Dict[str, Any]:
+    resolved_path = Path(model_path).expanduser()
+    if resolved_path.is_dir():
+        candidate = next(iter(sorted(resolved_path.glob("regime_logit_dir*_model.joblib"))), None)
+        if candidate is not None:
+            resolved_path = candidate
+        else:
+            raise FileNotFoundError(f"Regime logistic direction model not found in {resolved_path}")
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"Regime logistic direction model not found: {resolved_path}")
+
+    payload = joblib_load(resolved_path)
+    model = payload
+    feature_names = None
+    if isinstance(payload, dict):
+        model = payload.get("model")
+        feature_names = payload.get("feature_names")
+
+    if model is None:
+        raise ValueError(f"Regime logistic payload at {resolved_path} is missing a model instance.")
+
+    if not getattr(model, "_estimator_type", None):
+        model._estimator_type = "classifier"
+
+    if feature_names is not None:
+        feature_names = [str(name) for name in feature_names]
+
+    return {
+        "model": model,
+        "feature_names": feature_names,
+    }
+
+
 def load_trend_ignition_classifier(model_path: str) -> Dict[str, Any]:
     resolved_path = Path(model_path).expanduser()
     if not resolved_path.exists():
@@ -1241,6 +1274,7 @@ _DIRECTION_MODEL_LOADERS = {
     "transformer": _load_transformer_direction_model,
     "transformer_large": _load_transformer_large_direction_model,
     "lgbm": _load_lgbm_direction_model,
+    "regime_logit": _load_regime_logit_direction_model,
 }
 
 
@@ -1357,6 +1391,8 @@ def load_models(
                     models["dir_feature_names"] = list(feature_names)
             elif cfg_type == "lgbm":
                 models["dir_lgbm"] = info
+            elif cfg_type == "regime_logit":
+                models["dir_regime_logit"] = info
             elif cfg_type in _SEQUENCE_MODEL_TYPES:
                 models[f"dir_{cfg_type}"] = info
 

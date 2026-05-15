@@ -22,7 +22,7 @@ search:
   meta_signal_mode: meta_veto
   meta_component_frame_csv: artifacts/monitoring/meta_component_frame_1h.csv
   meta_component_frame_source: artifacts/monitoring/labeled_backtest_1h.csv
-  meta_component_columns: [xgb, transformer, lstm]
+  meta_component_columns: [xgb, transformer, gru, garch_lstm]
   paper_live_config: configs/run_refresh_and_predict.default.yaml
   direction_output_shadow:
     enabled: true

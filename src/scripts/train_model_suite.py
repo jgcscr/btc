@@ -7,6 +7,19 @@ from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
 
+SEQUENCE_MODEL_RUNNERS = {
+    "lstm": "src.scripts.train_lstm_dir1h",
+    "gru": "src.scripts.train_gru_dir1h",
+    "bilstm": "src.scripts.train_bilstm_dir1h",
+    "cnn_lstm": "src.scripts.train_cnn_lstm_dir1h",
+    "cnn_bilstm": "src.scripts.train_cnn_bilstm_dir1h",
+    "garch_lstm": "src.scripts.train_garch_lstm_dir1h",
+}
+
+DEFAULT_SEQUENCE_MODELS = ["lstm", "gru", "bilstm", "cnn_lstm", "cnn_bilstm", "garch_lstm"]
+COMPACT_SEQUENCE_MODELS = ["gru", "garch_lstm"]
+
+
 def _parse_targets(value: str) -> List[float]:
     parts = [part.strip() for part in value.split(",") if part.strip()]
     if not parts:
@@ -27,6 +40,21 @@ def _label_for_horizon(horizon: float) -> str:
     if float(horizon).is_integer():
         return f"{int(horizon)}h"
     return f"{horizon:g}h"
+
+
+def _parse_sequence_models(value: str) -> List[str]:
+    parts = [part.strip().lower() for part in value.split(",") if part.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("At least one sequence model must be provided.")
+    invalid = [part for part in parts if part not in SEQUENCE_MODEL_RUNNERS]
+    if invalid:
+        allowed = ", ".join(sorted(SEQUENCE_MODEL_RUNNERS))
+        raise argparse.ArgumentTypeError(f"Invalid sequence model(s): {', '.join(invalid)}. Allowed: {allowed}")
+    deduped: List[str] = []
+    for part in parts:
+        if part not in deduped:
+            deduped.append(part)
+    return deduped
 
 
 @dataclass(frozen=True)
@@ -232,7 +260,7 @@ def _train_lgbm_direction(horizon: float, dataset: DatasetConfig) -> None:
     _run_command(args)
 
 
-def _train_sequence_models(horizon: float, dataset: DatasetConfig, seq_len: int) -> None:
+def _train_sequence_models(horizon: float, dataset: DatasetConfig, seq_len: int, sequence_models: Sequence[str]) -> None:
     suffix = _label_for_horizon(horizon)
     horizon_int = int(round(horizon)) if horizon >= 1.0 else 1
 
@@ -245,54 +273,16 @@ def _train_sequence_models(horizon: float, dataset: DatasetConfig, seq_len: int)
         str(seq_len),
     ]
 
-    _run_command(
-        [
-            "src.scripts.train_lstm_dir1h",
-            "--output-dir",
-            f"artifacts/models/lstm_dir{suffix}_v1",
-            *common,
-        ]
-    )
-    _run_command(
-        [
-            "src.scripts.train_gru_dir1h",
-            "--output-dir",
-            f"artifacts/models/gru_dir{suffix}_v1",
-            *common,
-        ]
-    )
-    _run_command(
-        [
-            "src.scripts.train_bilstm_dir1h",
-            "--output-dir",
-            f"artifacts/models/bilstm_dir{suffix}_v1",
-            *common,
-        ]
-    )
-    _run_command(
-        [
-            "src.scripts.train_cnn_lstm_dir1h",
-            "--output-dir",
-            f"artifacts/models/cnn_lstm_dir{suffix}_v1",
-            *common,
-        ]
-    )
-    _run_command(
-        [
-            "src.scripts.train_cnn_bilstm_dir1h",
-            "--output-dir",
-            f"artifacts/models/cnn_bilstm_dir{suffix}_v1",
-            *common,
-        ]
-    )
-    _run_command(
-        [
-            "src.scripts.train_garch_lstm_dir1h",
-            "--output-dir",
-            f"artifacts/models/garch_lstm_dir{suffix}_v1",
-            *common,
-        ]
-    )
+    for model_name in sequence_models:
+        runner = SEQUENCE_MODEL_RUNNERS[model_name]
+        _run_command(
+            [
+                runner,
+                "--output-dir",
+                f"artifacts/models/{model_name}_dir{suffix}_v1",
+                *common,
+            ]
+        )
 
 
 def _train_transformer(horizon: float, dataset: DatasetConfig, seq_len: int, preset: str) -> None:
@@ -313,6 +303,25 @@ def _train_transformer(horizon: float, dataset: DatasetConfig, seq_len: int, pre
             preset,
         ]
     )
+
+
+def _train_regime_logit_direction(horizon: float, dataset: DatasetConfig) -> None:
+    suffix = _label_for_horizon(horizon)
+    horizon_int = int(round(horizon)) if horizon >= 1.0 else 1
+    args = [
+        "src.scripts.train_regime_logit_dir",
+        "--dataset-path",
+        dataset.direction_path,
+        "--output-dir",
+        f"artifacts/models/regime_logit_dir{suffix}_v1",
+        "--horizon",
+        str(horizon_int),
+        "--suffix",
+        suffix,
+    ]
+    if dataset.use_flat_labels:
+        args.append("--use-flat-labels")
+    _run_command(args)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -351,9 +360,25 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Train LSTM/GRU/BiLSTM/CNN-LSTM/CNN-BiLSTM/GARCH-LSTM direction models for each horizon.",
     )
     parser.add_argument(
+        "--sequence-models",
+        type=_parse_sequence_models,
+        default=list(DEFAULT_SEQUENCE_MODELS),
+        help="Comma-separated sequence models to train when --train-sequence is set.",
+    )
+    parser.add_argument(
+        "--compact-sequence-set",
+        action="store_true",
+        help="Shortcut for --sequence-models gru,garch_lstm.",
+    )
+    parser.add_argument(
         "--train-transformer",
         action="store_true",
         help="Train transformer direction models for each horizon.",
+    )
+    parser.add_argument(
+        "--train-regime-logit",
+        action="store_true",
+        help="Train the sparse regime-focused logistic direction model for each horizon.",
     )
     parser.add_argument(
         "--seq-len",
@@ -385,6 +410,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
+    if args.compact_sequence_set:
+        args.sequence_models = list(COMPACT_SEQUENCE_MODELS)
+
     targets = sorted({float(h) for h in args.targets})
     if not targets:
         raise SystemExit("No horizons provided.")
@@ -412,9 +440,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.train_lgbm:
             _train_lgbm_direction(horizon, dataset)
         if args.train_sequence:
-            _train_sequence_models(horizon, dataset, args.seq_len)
+            _train_sequence_models(horizon, dataset, args.seq_len, args.sequence_models)
         if args.train_transformer:
             _train_transformer(horizon, dataset, args.seq_len, args.transformer_preset)
+        if args.train_regime_logit:
+            _train_regime_logit_direction(horizon, dataset)
 
 
 if __name__ == "__main__":

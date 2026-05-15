@@ -10,6 +10,7 @@ import pandas as pd
 DEFAULT_COMPONENT_GROUPS: Dict[str, str] = {
     "xgb": "tree",
     "lgbm": "tree",
+    "regime_logit": "regime",
     "lstm": "recurrent",
     "bilstm": "recurrent",
     "gru": "recurrent",

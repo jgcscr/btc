@@ -98,6 +98,8 @@ Current workflow note:
 
 - the checked-in runtime and default reliability profiles already use `quality.lookback_rows: 50000` and `quality.lookback_hours: 8760`, so the workflow path operates on the hardened long-window labeled slice rather than the older short 2000-row manual rebuild
 - trade-decision training now performs an early deploy of a deploy-ready gate before later optional diagnostics, and the sparse overlap shadow diagnostics now degrade to structured nonfatal outputs when paired rows or timestamp overlap are unavailable
+- official shadow selection now emits recent signal-active slice diagnostics automatically for the raw aligned candidate and the selected or best-ineligible shadow branch when those artifacts exist
+- the emitted summaries live under `artifacts/reliability/<run-id>/summary/recent_signal_active_slice_*.json` and report recent signal-active rows, AUC, ECE, by-regime breakdown, and threshold-neighborhood density around the active decision threshold
 
 ### Shell Cadence
 

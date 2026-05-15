@@ -14,10 +14,10 @@ from sklearn.model_selection import TimeSeriesSplit
 CostSchedule = Tuple[float, float, str]
 
 DEFAULT_META_COMPONENT_FRAME = Path("artifacts/monitoring/meta_component_frame_1h.csv")
-DEFAULT_META_COMPONENT_COLUMNS = ["xgb", "transformer", "lstm"]
+DEFAULT_META_COMPONENT_COLUMNS = ["xgb", "transformer", "gru", "garch_lstm"]
 DEFAULT_META_WEIGHT_THRESHOLD = 0.52
 DEFAULT_META_SIGNAL_MODE = "meta_veto"
-DEFAULT_META_COMPONENT_WEIGHT_SPEC = "transformer:0.0,lstm:1.0,xgb:1.5"
+DEFAULT_META_COMPONENT_WEIGHT_SPEC = "transformer:1.5,gru:1.0,garch_lstm:1.0,xgb:1.25"
 DEFAULT_META_AUTO_THRESHOLD = True
 DEFAULT_META_MIN_THRESHOLD_TRADES = 25
 DEFAULT_META_MAX_THRESHOLD_QUANTILE = 0.95
@@ -174,7 +174,7 @@ def parse_component_weight_spec(spec: str | None, component_columns: Sequence[st
 def resolve_component_sources(args: argparse.Namespace) -> Dict[str, Path]:
     sources: Dict[str, Path] = {
         "transformer": args.transformer_csv,
-        "lstm": args.lstm_csv,
+        "gru": args.lstm_csv,
         "xgb": args.xgb_csv,
     }
     for raw_spec in args.component_csv or []:

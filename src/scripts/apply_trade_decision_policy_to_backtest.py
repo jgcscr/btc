@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional CSV path(s) used to backfill live-equivalent decision features by timestamp.",
     )
     parser.add_argument("--threshold", type=float, default=0.58)
+    parser.add_argument(
+        "--thresholds-by-horizon-regime-json",
+        type=str,
+        default="",
+        help="Optional JSON mapping of per-horizon/per-regime trade-decision thresholds.",
+    )
     parser.add_argument("--fee-bps", type=float, default=2.0)
     parser.add_argument("--slippage-bps", type=float, default=1.0)
     parser.add_argument("--replace-threshold-rule", type=int, default=1)
@@ -239,10 +245,18 @@ def main() -> None:
         df = base.drop(columns=["_ts_norm"], errors="ignore")
     missing_after = _feature_missing_counts(df)
 
+    thresholds_by_horizon_regime: Dict[str, Any] = {}
+    if str(args.thresholds_by_horizon_regime_json).strip():
+        parsed_thresholds = json.loads(str(args.thresholds_by_horizon_regime_json))
+        if not isinstance(parsed_thresholds, dict):
+            raise ValueError("--thresholds-by-horizon-regime-json must decode to a mapping.")
+        thresholds_by_horizon_regime = parsed_thresholds
+
     policy_cfg: Dict[str, Any] = {
         "enabled": True,
         "model_path": str(args.model),
         "threshold": float(args.threshold),
+        "thresholds_by_horizon_regime": thresholds_by_horizon_regime,
         "replace_threshold_rule": bool(int(args.replace_threshold_rule)),
         "require_direction_ret_alignment": bool(int(args.require_direction_ret_alignment)),
         "use_oof_expected_value": bool(int(args.use_oof_expected_value)),
@@ -312,6 +326,7 @@ def main() -> None:
         },
         "policy_flags": {
             "threshold": threshold,
+            "thresholds_by_horizon_regime": thresholds_by_horizon_regime,
             "min_expected_net": min_expected_net,
             "min_edge_over_fee": min_edge_over_fee,
             "require_direction_ret_alignment": require_alignment,
@@ -334,34 +349,25 @@ def main() -> None:
         signal_dir_only = _as_int(row.get("signal_dir_only", inferred_dir), inferred_dir)
         regime_state = str(row.get("regime_state", rrp.REGIME_NEUTRAL)).lower()
 
-        result = {
-            "p_up": p_up,
-            "raw_p_up": _as_float(row.get("raw_p_up", p_up), p_up),
-            "ret_pred": ret_pred,
-            "expected_value": _as_float(row.get("expected_value", p_up * ret_pred), p_up * ret_pred),
-            "signal_dir_only": signal_dir_only,
-            "signal_ensemble": _as_int(row.get("signal_ensemble", 0), 0),
-            "incumbent_signal_reference": _as_float(row.get("incumbent_signal_reference", 0.0), 0.0),
-            "candidate_only_reference": _as_float(row.get("candidate_only_reference", 0.0), 0.0),
-            "candidate_incumbent_disagreement": _as_float(row.get("candidate_incumbent_disagreement", 0.0), 0.0),
-            "raw_calibrated_probability_gap": _as_float(row.get("raw_calibrated_probability_gap", 0.0), 0.0),
-            "probability_alignment_gap": _as_float(row.get("probability_alignment_gap", 0.0), 0.0),
-            "raw_p_up_ret_mismatch": _as_float(row.get("raw_p_up_ret_mismatch", 0.0), 0.0),
-            "p_up_ret_mismatch": _as_float(row.get("p_up_ret_mismatch", 0.0), 0.0),
-            "raw_p_up_direction_mismatch": _as_float(row.get("raw_p_up_direction_mismatch", 0.0), 0.0),
-            "p_up_direction_mismatch": _as_float(row.get("p_up_direction_mismatch", 0.0), 0.0),
-            "ret_projected_price_consensus": _as_float(row.get("ret_projected_price_consensus", 0.0), 0.0),
-            "probability_calibration_guard_applied": _as_float(row.get("probability_calibration_guard_applied", 0.0), 0.0),
-            "probability_calibration_used_regime_key": _as_float(row.get("probability_calibration_used_regime_key", 0.0), 0.0),
-            "trade_action": str(row.get("trade_action", "hold")),
-            "volatility": {
-                "snapshot": {
-                    "volatility_realized_24h": _as_float(row.get("volatility_realized_24h", 0.0), 0.0),
-                    "volatility_ewm_24h": _as_float(row.get("volatility_ewm_24h", 0.0), 0.0),
-                    "volatility_garch_like": _as_float(row.get("volatility_garch_like", 0.0), 0.0),
+        result = row.to_dict()
+        result.update(
+            {
+                "p_up": p_up,
+                "raw_p_up": _as_float(row.get("raw_p_up", p_up), p_up),
+                "ret_pred": ret_pred,
+                "expected_value": _as_float(row.get("expected_value", p_up * ret_pred), p_up * ret_pred),
+                "signal_dir_only": signal_dir_only,
+                "signal_ensemble": _as_int(row.get("signal_ensemble", 0), 0),
+                "trade_action": str(row.get("trade_action", "hold")),
+                "volatility": {
+                    "snapshot": {
+                        "volatility_realized_24h": _as_float(row.get("volatility_realized_24h", 0.0), 0.0),
+                        "volatility_ewm_24h": _as_float(row.get("volatility_ewm_24h", 0.0), 0.0),
+                        "volatility_garch_like": _as_float(row.get("volatility_garch_like", 0.0), 0.0),
+                    },
                 },
-            },
-        }
+            }
+        )
         payload = rrp._apply_trade_decision_model(
             result=result,
             regime_state=regime_state,

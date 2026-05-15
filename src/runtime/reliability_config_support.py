@@ -40,6 +40,7 @@ def format_weight_spec(weights: Dict[str, float]) -> str:
         "garch_lstm",
         "xgb",
         "lgbm",
+        "regime_logit",
     ]
     seen = set()
     parts: List[str] = []
@@ -68,11 +69,12 @@ def extract_audit_weight_spec(
             for name, value in weights.items()
             if allowed_components is None or str(name) in set(str(v) for v in allowed_components)
         }
-        if filtered:
+        if any(float(value) > 0.0 for value in filtered.values()):
             return format_weight_spec(filtered)
     spec = recs.get("recommended_weight_spec_1h")
     parsed = parse_weight_spec(str(spec) if spec is not None else None, allowed_components=allowed_components)
-    return format_weight_spec(parsed) if parsed else None
+    positive = {name: value for name, value in parsed.items() if float(value) > 0.0}
+    return format_weight_spec(positive) if positive else None
 
 
 def build_audit_weighted_runtime_config(
