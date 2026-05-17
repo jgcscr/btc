@@ -246,6 +246,9 @@ The important runtime configs are:
 - `configs/run_refresh_and_predict.live_conservative.yaml`: backward-compatible legacy-equivalent alias
 - `configs/run_refresh_and_predict.research_safe.yaml`: research fallback profile that keeps the same baseline modeling stack as `default` but downgrades feature coverage violations from hard-fail to warning
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: cadence daily refresh profile
+- `configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml`: derivatives-first shadow package with the retuned direction ensemble, derivatives-aware regime artifacts, and shadow-only derivatives crowding penalty
+- `configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_candidate.yaml`: shadow-only derivative candidate that relaxes MFE headroom gating without changing live configs
+- `configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_1h_confluence_candidate.yaml`: follow-up shadow-only derivative candidate that also relaxes the 1h short-term confluence translation
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: shadow comparison left-hand profile
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: shadow comparison right-hand profile
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`: additional shadow-only diagnostic profile
@@ -260,6 +263,8 @@ Current wrapper-emitted live-style sizing caps from `configs/run_refresh_and_pre
 Current config note:
 
 - the live conservative config still contains some legacy `8h` sizing and regime overrides, but the direct live wrapper does not emit `8h` because its default target set is `0.25,1,4,12`
+- `src.scripts.package_derivatives_shadow_rollout` now accepts `--relax-mfe-headroom` and `--relax-1h-confluence` to emit the two shadow-only derivatives variants above without touching live or default configs
+- `src.scripts.replay_execution_tier_snapshot` replays archived prediction or comparison snapshots against the current execution policy so operators can confirm whether a historic `low_execution_confluence` rejection would still hold after policy fixes
 
 ## Cadence Operations
 

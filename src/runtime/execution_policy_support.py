@@ -1003,7 +1003,14 @@ def resolve_execution_policy(
         "execution_horizons": sorted({normalize_horizon_value(value) for value in (cfg.get("execution_horizons") or [0.25, 1.0])}),
         "horizon_bias_weights": normalize_float_map(cfg.get("horizon_bias_weights"), minimum=0.0),
         "short_term_strict_horizons": sorted(
-            {normalize_horizon_value(value) for value in (cfg.get("short_term_strict_horizons") or [1.0])}
+            {
+                normalize_horizon_value(value)
+                for value in (
+                    [1.0]
+                    if cfg.get("short_term_strict_horizons") is None
+                    else cfg.get("short_term_strict_horizons")
+                )
+            }
         ),
         "short_term_min_mid_ratio": max(min(float(cfg.get("short_term_min_mid_ratio") or 0.67), 1.0), 0.0),
         "short_term_min_support_ratio": max(min(float(cfg.get("short_term_min_support_ratio") or 0.75), 1.0), 0.0),

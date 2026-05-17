@@ -166,6 +166,15 @@ def test_normalize_trade_decision_policy_preserves_nested_veto_blocks() -> None:
                 "p_up_high": 0.59,
                 "regime_states": ["chop", "neutral"],
             },
+            "derivatives_shadow_adjustment": {
+                "enabled": True,
+                "mode": "futures_basis_crowding_penalty",
+                "horizons": "1h,4h,8h,12h",
+                "regime_states": ["chop", "neutral"],
+                "min_abs_basis_bps": 12.0,
+                "max_abs_ret_pred": 0.01,
+                "strength": 0.4,
+            },
         },
     )
 
@@ -179,6 +188,15 @@ def test_normalize_trade_decision_policy_preserves_nested_veto_blocks() -> None:
         "min_abs_ret_pred": None,
         "max_abs_ret_pred": None,
         "regime_states": ["chop", "neutral"],
+    }
+    assert normalized["derivatives_shadow_adjustment"] == {
+        "enabled": True,
+        "mode": "futures_basis_crowding_penalty",
+        "horizons": ["1h", "4h", "8h", "12h"],
+        "regime_states": ["chop", "neutral"],
+        "min_abs_basis_bps": 12.0,
+        "max_abs_ret_pred": 0.01,
+        "strength": 0.4,
     }
 
 

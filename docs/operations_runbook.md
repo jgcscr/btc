@@ -235,6 +235,9 @@ Use the profile that matches the task.
 - `configs/run_refresh_and_predict.research_safe.yaml`: research fallback that keeps the default stack but downgrades feature-coverage violations from hard-fail to warning
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: cadence daily profile
 - `configs/run_refresh_and_predict.shadow_featurelift_4h_candidate.yaml`: feature-lift shadow or paper package that swaps only the 4h candidate direction and regression artifacts and the hardened full-history trade-decision model
+- `configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml`: derivatives-first shadow package with retuned direction-family weighting, derivatives-only model paths, and a shadow-only derivatives crowding penalty
+- `configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_candidate.yaml`: shadow-only derivatives variant that relaxes MFE headroom gates for comparison runs without changing live configs
+- `configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_1h_confluence_candidate.yaml`: shadow-only derivatives follow-up that keeps the MFE relaxation and also disables strict 1h short-term confluence gating
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: shadow comparison left-hand profile
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: shadow comparison right-hand profile
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`: shadow-only stricter abstention profile
@@ -258,6 +261,7 @@ Current config note:
 - top-level `dir_model_weights` intentionally excludes `regime_logit`; horizon-specific `regime_model_weights` and `direction_ensemble_policy` add it only after per-horizon artifact resolution, which keeps the base config compatible with CLI validation
 - the audit that drove this retune is written to `artifacts/analysis/direction_family_value_latest.json` by `src/scripts/analyze_direction_family_value.py`
 - the latest operator closeout for this retune is `docs/direction_ensemble_family_retune_closeout_20260515.md`
+- `src.scripts.package_derivatives_shadow_rollout` now supports `--relax-mfe-headroom` and `--relax-1h-confluence` so shadow-only derivatives variants can be emitted from the same packaging path instead of hand-editing YAML
 
 ## 6. Minimum Checks Before Trusting A Runtime Snapshot
 
@@ -357,6 +361,23 @@ Generate the derivatives-first shadow candidate config and readiness package:
 /workspaces/btc/.venv/bin/python -m src.scripts.package_derivatives_shadow_rollout
 ```
 
+Emit the shadow-only MFE-relaxed candidate when the current comparison lane is testing execution headroom rather than live promotion:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_derivatives_shadow_rollout \
+  --relax-mfe-headroom \
+  --output-config configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_candidate.yaml
+```
+
+Emit the shadow-only 1h confluence follow-up when replay evidence shows the blocker moved from MFE headroom into short-term confluence translation:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.package_derivatives_shadow_rollout \
+  --relax-mfe-headroom \
+  --relax-1h-confluence \
+  --output-config configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_1h_confluence_candidate.yaml
+```
+
 Validate the candidate config without emitting a live run:
 
 ```bash
@@ -365,11 +386,34 @@ Validate the candidate config without emitting a live run:
   --dry-run
 ```
 
+Replay an archived raw snapshot or comparison artifact against the current execution policy when you need to confirm whether a stored `low_execution_confluence` decision still reproduces:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.replay_execution_tier_snapshot \
+  --snapshot artifacts/runtime_runs/<run-id>/predictions.json \
+  --config configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_candidate.yaml
+```
+
+For a comparison artifact, pass the profile label so the tool resolves the embedded snapshot path before replaying:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.replay_execution_tier_snapshot \
+  --snapshot artifacts/analysis/<comparison>.json \
+  --profile-label shadow \
+  --config configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_candidate.yaml
+```
+
 Run the candidate through the regular shadow-comparison surface:
 
 ```bash
 /workspaces/btc/.venv/bin/python -m src.scripts.run_derivatives_shadow_comparison
 ```
+
+Current guidance:
+
+- keep `configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml` as the baseline derivatives-first comparison profile
+- use `configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_candidate.yaml` only for shadow evidence on execution headroom gating
+- use `configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_1h_confluence_candidate.yaml` only when replay confirms the remaining blocker is strict 1h confluence translation rather than an earlier rejection reason
 
 ## 9. State-Engineering Guarded Rollout Package
 

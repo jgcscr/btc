@@ -18,6 +18,16 @@ from src.scripts.run_refresh_and_predict import (
 
 
 class ExecutionPolicyExtensionTests(unittest.TestCase):
+    def test_resolve_execution_policy_wrapper_preserves_explicit_empty_short_term_strict_horizons(self) -> None:
+        policy = _resolve_execution_policy(
+            {
+                "enabled": True,
+                "short_term_strict_horizons": [],
+            }
+        )
+
+        self.assertEqual(policy["short_term_strict_horizons"], [])
+
     def test_bias_context_uses_horizon_weights(self) -> None:
         summary = {
             "4h": {

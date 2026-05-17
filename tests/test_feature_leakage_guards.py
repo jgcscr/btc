@@ -35,6 +35,17 @@ class FeatureLeakageGuardTests(unittest.TestCase):
         filtered = build_training_dataset._drop_excluded_features(frame)
         self.assertEqual(list(filtered.columns), ["open"])
 
+    def test_hourly_drop_excluded_features_preserves_funding_zscore(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "open": [1.0],
+                "funding_rate_zscore_24h": [0.25],
+                "ret_1h": [0.1],
+            }
+        )
+        filtered = build_training_dataset._drop_excluded_features(frame)
+        self.assertEqual(list(filtered.columns), ["open", "funding_rate_zscore_24h"])
+
     def test_multi_horizon_excluded_features_cover_forward_returns(self) -> None:
         self.assertTrue({"ret_4h", "ret_8h", "ret_12h"}.issubset(build_training_dataset_multi_horizon.EXCLUDED_FEATURES))
 
@@ -57,6 +68,17 @@ class FeatureLeakageGuardTests(unittest.TestCase):
         )
         filtered = build_training_dataset_multi_horizon._drop_excluded_features(frame)
         self.assertEqual(list(filtered.columns), ["close"])
+
+    def test_multi_horizon_drop_excluded_features_preserves_funding_zscore(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "close": [1.0],
+                "funding_rate_zscore_24h": [0.25],
+                "ret_1h": [0.1],
+            }
+        )
+        filtered = build_training_dataset_multi_horizon._drop_excluded_features(frame)
+        self.assertEqual(list(filtered.columns), ["close", "funding_rate_zscore_24h"])
 
     def test_hourly_trend_ignition_label_is_not_allowed_feature(self) -> None:
         self.assertNotIn(build_training_dataset.TREND_IGNITION_LABEL, build_training_dataset.CORE_MODEL_FEATURES)

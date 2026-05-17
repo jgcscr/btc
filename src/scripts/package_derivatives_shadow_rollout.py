@@ -94,12 +94,27 @@ def main() -> None:
     parser.add_argument("--audit-markdown", type=Path, default=AUDIT_MD)
     parser.add_argument("--scaffold-json", type=Path, default=SCAFFOLD_JSON)
     parser.add_argument("--scaffold-markdown", type=Path, default=SCAFFOLD_MD)
+    parser.add_argument(
+        "--relax-mfe-headroom",
+        action="store_true",
+        help="Emit a shadow-only candidate that relaxes MFE headroom gates without touching live configs.",
+    )
+    parser.add_argument(
+        "--relax-1h-confluence",
+        action="store_true",
+        help="Emit a shadow-only candidate that relaxes the 1h short-term confluence floor without touching live configs.",
+    )
     args = parser.parse_args()
 
     base_config = _load_yaml(args.base_config)
     audit = build_derivatives_family_audit(config=base_config, models_root=args.models_root)
     scaffold = build_derivatives_shadow_scaffold(audit)
-    candidate_config = build_derivatives_shadow_candidate_config(base_config, audit=audit)
+    candidate_config = build_derivatives_shadow_candidate_config(
+        base_config,
+        audit=audit,
+        relax_mfe_headroom=bool(args.relax_mfe_headroom),
+        relax_1h_confluence=bool(args.relax_1h_confluence),
+    )
 
     args.output_config.parent.mkdir(parents=True, exist_ok=True)
     args.output_config.write_text(yaml.safe_dump(candidate_config, sort_keys=False), encoding="utf-8")
@@ -126,6 +141,8 @@ def main() -> None:
         "notes": [
             "This package removes funding-derived columns from the ignored live coverage list for shadow validation.",
             "Macro and on-chain remain ignored here; this candidate is intentionally derivatives-first.",
+            "MFE headroom is relaxed in shadow only." if args.relax_mfe_headroom else "MFE headroom remains aligned with the live conservative profile.",
+            "1h confluence translation is relaxed in shadow only." if args.relax_1h_confluence else "1h confluence translation remains aligned with the live conservative profile.",
             "Use the emitted config for dry-run or shadow evaluation only.",
         ],
     }

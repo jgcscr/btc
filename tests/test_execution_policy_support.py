@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from src.runtime.execution_policy_support import apply_execution_policy, resolve_execution_policy
+from src.runtime.execution_policy_support import apply_execution_policy, classify_execution_tier, resolve_execution_policy
 
 
 def _unexpected(*args, **kwargs):  # pragma: no cover - helper for guard tests
@@ -46,6 +46,64 @@ def test_resolve_execution_policy_normalizes_nested_config_blocks() -> None:
     assert policy["target_range_stop_refinement"]["horizons"] == [4.0, 8.0]
     assert policy["target_range_stop_refinement"]["confidence_min"] == 1.0
     assert policy["regime_templates"]["trend"]["entry_mode_by_tier"] == {"high": "immediate"}
+
+
+def test_resolve_execution_policy_preserves_explicit_empty_short_term_strict_horizons() -> None:
+    policy = resolve_execution_policy(
+        {
+            "enabled": True,
+            "short_term_strict_horizons": [],
+        },
+        normalize_horizon_value=lambda value: float(value),
+        coerce_numeric_horizon=lambda value: float(value),
+        default_lookback_bars=240,
+        default_min_samples=40,
+        default_target_range_stop_horizons=(1.0, 4.0),
+        default_target_range_stop_confidence_min=0.35,
+        default_target_range_stop_buffer_std_mult=0.5,
+        default_target_range_stop_min_tighten_fraction=0.2,
+    )
+
+    assert policy["short_term_strict_horizons"] == []
+
+
+def test_classify_execution_tier_allows_old_1h_shadow_snapshot_when_strict_short_term_is_disabled() -> None:
+    policy = resolve_execution_policy(
+        {
+            "enabled": True,
+            "short_term_strict_horizons": [],
+            "short_term_min_support_ratio": 0.8,
+            "short_term_min_mid_ratio": 0.8,
+            "immediate_entry_min_support_ratio": 0.8,
+            "immediate_entry_min_mid_ratio": 1.0,
+            "pullback_entry_min_support_ratio": 0.5,
+            "pullback_entry_min_mid_ratio": 0.66,
+            "high_execution_alignment_ratio": 0.5,
+            "medium_execution_alignment_ratio": 0.5,
+        },
+        normalize_horizon_value=lambda value: float(value),
+        coerce_numeric_horizon=lambda value: float(value),
+        default_lookback_bars=240,
+        default_min_samples=40,
+        default_target_range_stop_horizons=(1.0, 4.0),
+        default_target_range_stop_confidence_min=0.35,
+        default_target_range_stop_buffer_std_mult=0.5,
+        default_target_range_stop_min_tighten_fraction=0.2,
+    )
+
+    tier = classify_execution_tier(
+        {
+            "horizon_hours": 1.0,
+            "direction_next": "up",
+            "confluence_support_ratio": 0.7777777777777778,
+            "confluence_mid_term_ratio": 1.0,
+        },
+        bias_direction="up",
+        execution_alignment_ratio=1.0,
+        policy=policy,
+    )
+
+    assert tier == "medium"
 
 
 def test_apply_execution_policy_disabled_sets_basic_plan_without_deep_callbacks() -> None:

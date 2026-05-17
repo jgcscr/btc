@@ -121,6 +121,8 @@ def build_prediction_result(
         "volatility_flag": bool(volatility_flag),
         "gate_trace": [],
     }
+    if isinstance(signal.get("derivatives_shadow_adjustment"), Mapping):
+        result["derivatives_shadow_adjustment"] = dict(signal.get("derivatives_shadow_adjustment") or {})
     probability_alignment_features = derive_probability_alignment_features(
         close=close,
         projected_price=float(result["projected_price"]),

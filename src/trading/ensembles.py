@@ -99,14 +99,14 @@ def select_diverse_models(
     min_mean_abs_probability_gap: float | None = None,
     min_history_points: int = 0,
 ) -> Dict[str, Any]:
+    base_weights = {
+        str(name): max(float((weights or {}).get(name, 1.0)), 0.0)
+        for name in probabilities.keys()
+    }
     available = {
         str(name): float(value)
         for name, value in probabilities.items()
-        if math.isfinite(float(value))
-    }
-    base_weights = {
-        name: max(float((weights or {}).get(name, 1.0)), 0.0)
-        for name in available.keys()
+        if math.isfinite(float(value)) and base_weights.get(str(name), 0.0) > 0.0
     }
     ranked: list[tuple[int, float, str]] = []
     priority_lookup = {str(name): idx for idx, name in enumerate(priority_order or [])}

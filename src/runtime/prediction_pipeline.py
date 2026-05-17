@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
+from src.runtime.trade_decision_support import apply_derivatives_shadow_adjustment
 from src.trading.signals import DEFAULT_RESIDUAL_STD, PreparedData, compute_signal_for_index, load_models, load_residual_std_from_dataset, populate_sequence_cache_from_prepared
 from src.trading.volatility import latest_volatility_snapshot
 
@@ -218,6 +219,45 @@ class PredictionPreparationState:
     position_size_cap_by_horizon_resolved: Mapping[float, float]
     resolved_profiles: Mapping[str, Any]
     target_profiles: Mapping[float, str]
+    horizons_by_profile: Mapping[str, Sequence[float]]
+    base_direction_configs: Sequence[Any]
+    prepared_bundles: Mapping[str, PreparedBundle]
+    volatility_snapshots: Mapping[str, Mapping[str, Any]]
+    breakout_scores: Mapping[str, float]
+    target_range_bundles: Mapping[float, Dict[str, Any]]
+    residual_std_by_horizon: Mapping[float, float]
+    stub_close: float
+    stub_ts: str
+
+
+def _apply_derivatives_shadow_probability_adjustment(
+    *,
+    probability: float,
+    close: float,
+    row_features: Any,
+    horizon_label: str,
+    regime_state: str,
+    ret_pred: float,
+    signal_dir_only: int,
+    trade_decision_policy: Mapping[str, Any] | None,
+    coerce_row_value: Callable[[Any], float | None],
+) -> tuple[float, Dict[str, Any]]:
+    shadow_result = {"close": float(close)}
+    for field in ("funding_rate_zscore_24h", "fut_close", "fut_close_zscore_7h", "open_interest"):
+        if hasattr(row_features, "index") and field in row_features.index:
+            value = coerce_row_value(row_features.get(field))
+            if value is not None:
+                shadow_result[field] = float(value)
+    return apply_derivatives_shadow_adjustment(
+        float(probability),
+        result=shadow_result,
+        horizon_label=horizon_label,
+        regime_state=regime_state,
+        ret_pred=float(ret_pred),
+        signal_dir_only=int(signal_dir_only),
+        policy=trade_decision_policy or {},
+        finite_float_or_none=lambda value: None if value is None else float(value),
+    )
     horizons_by_profile: Mapping[str, list[float]]
     base_direction_configs: list[Any]
     prepared_bundles: Mapping[str, PreparedBundle]
@@ -663,19 +703,32 @@ def _build_prediction_summary(
                 projected_price=projected_price,
                 ret_pred=ret_pred,
             )
-            signal_dir_only = deps.resolve_direction_signal_for_horizon(
-                raw_probability=raw_p_up,
-                calibrated_probability=p_up,
-                threshold=thresh,
-                close=close,
-                projected_price=projected_price,
-                ret_pred=ret_pred,
-                calibration_key=calibration_key,
-                calibration_used_regime_key=calibration_used_regime_key,
-            )
-            signal_ensemble = int((p_up >= horizon_p_up) and (ret_pred >= horizon_ret) and (not bool(signal.get("volatility_flag"))))
-            expected_value = _compute_expected_value(p_up, ret_pred, residual_std, horizon_thresholds)
-            confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
+
+        p_up, derivatives_shadow_adjustment = _apply_derivatives_shadow_probability_adjustment(
+            probability=p_up,
+            close=close,
+            row_features=row_features,
+            horizon_label=label,
+            regime_state=regime_state,
+            ret_pred=ret_pred,
+            signal_dir_only=signal_dir_only,
+            trade_decision_policy=state.trade_decision_policy_resolved,
+            coerce_row_value=deps.coerce_row_value,
+        )
+        signal["derivatives_shadow_adjustment"] = derivatives_shadow_adjustment
+        signal_dir_only = deps.resolve_direction_signal_for_horizon(
+            raw_probability=raw_p_up,
+            calibrated_probability=p_up,
+            threshold=thresh,
+            close=close,
+            projected_price=projected_price,
+            ret_pred=ret_pred,
+            calibration_key=calibration_key,
+            calibration_used_regime_key=calibration_used_regime_key,
+        )
+        signal_ensemble = int((p_up >= horizon_p_up) and (ret_pred >= horizon_ret) and (not bool(signal.get("volatility_flag"))))
+        expected_value = _compute_expected_value(p_up, ret_pred, residual_std, horizon_thresholds)
+        confidence_score = _compute_confidence_score(p_up, expected_value, residual_std)
 
         stop_loss_price, take_profit_price = deps.compute_directional_stop_take_prices(
             close=close,
@@ -771,6 +824,10 @@ def _build_prediction_summary(
             horizon_ret=horizon_ret,
             row_features=row_features,
             optional_feature_fields=(
+                "funding_rate_zscore_24h",
+                "open_interest",
+                "fut_close",
+                "fut_close_zscore_7h",
                 "range_expansion_1h",
                 "distance_from_session_high_8h",
                 "distance_from_session_low_8h",

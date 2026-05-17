@@ -84,6 +84,25 @@ class DirectionEnsemblePolicyTests(unittest.TestCase):
         self.assertEqual(payload["selected_groups"], ["tree", "recurrent", "attention"])
         self.assertEqual(payload["missing_preferred_groups"], [])
 
+    def test_select_diverse_models_ignores_zero_weight_models(self) -> None:
+        payload = select_diverse_models(
+            {"xgb": 0.62, "lstm": 0.61, "cnn_lstm": 0.60, "transformer": 0.59},
+            {"xgb": 1.2, "lstm": 0.8, "cnn_lstm": 0.0, "transformer": 1.1},
+            priority_order=["xgb", "lstm", "cnn_lstm", "transformer"],
+            model_groups={
+                "xgb": "tree",
+                "lstm": "recurrent",
+                "cnn_lstm": "recurrent",
+                "transformer": "attention",
+            },
+            max_models_per_group={"tree": 1, "recurrent": 2, "attention": 1},
+            max_active_models=4,
+        )
+
+        self.assertEqual(payload["selected_models"], ["xgb", "lstm", "transformer"])
+        self.assertEqual(payload["base_weights"].get("cnn_lstm"), 0.0)
+        self.assertNotIn("cnn_lstm", payload["effective_weights"])
+
 
 if __name__ == "__main__":
     unittest.main()

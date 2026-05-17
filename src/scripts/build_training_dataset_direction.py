@@ -31,6 +31,7 @@ from src.data.source_parity import (
     drop_unready_source_family_features,
     evaluate_source_family_readiness,
 )
+from src.runtime.feature_parity_audit import classify_feature_family
 
 
 PROCESSED_PATHS = [
@@ -100,7 +101,6 @@ CORE_MODEL_FEATURES = [
 ZERO_VARIANCE_CANDIDATES: set[str] = set()
 
 EXCLUDED_FEATURES: set[str] = {
-    "funding_rate_zscore_24h",
     "ret_1h",
 }
 
@@ -154,6 +154,63 @@ def _filter_features_by_reliability(
     *,
     target_horizon: float | None = None,
 ) -> list[str]:
+    def preserve_unmentioned_derivatives(filtered: list[str], payload_obj: object, horizon_label: str | None) -> list[str]:
+        if not isinstance(payload_obj, dict):
+            return filtered
+
+        mentioned: set[str] = set()
+
+        accepted_features = payload_obj.get("accepted_features")
+        if isinstance(accepted_features, list):
+            mentioned.update(str(value) for value in accepted_features)
+
+        feature_scores = payload_obj.get("feature_scores")
+        if isinstance(feature_scores, dict):
+            mentioned.update(str(value) for value in feature_scores.keys())
+
+        if horizon_label:
+            accepted_by_horizon = payload_obj.get("accepted_features_by_horizon")
+            horizon_features = accepted_by_horizon.get(horizon_label) if isinstance(accepted_by_horizon, dict) else None
+            if isinstance(horizon_features, list):
+                mentioned.update(str(value) for value in horizon_features)
+
+            accepted_by_horizon_regime = payload_obj.get("accepted_features_by_horizon_regime")
+            horizon_regime_features = (
+                accepted_by_horizon_regime.get(horizon_label) if isinstance(accepted_by_horizon_regime, dict) else None
+            )
+            if isinstance(horizon_regime_features, dict):
+                for slice_features in horizon_regime_features.values():
+                    if isinstance(slice_features, list):
+                        mentioned.update(str(value) for value in slice_features)
+
+            horizon_feature_scores = payload_obj.get("horizon_feature_scores")
+            horizon_scores = horizon_feature_scores.get(horizon_label) if isinstance(horizon_feature_scores, dict) else None
+            if isinstance(horizon_scores, dict):
+                mentioned.update(str(value) for value in horizon_scores.keys())
+
+            horizon_regime_feature_scores = payload_obj.get("horizon_regime_feature_scores")
+            horizon_regime_scores = (
+                horizon_regime_feature_scores.get(horizon_label)
+                if isinstance(horizon_regime_feature_scores, dict)
+                else None
+            )
+            if isinstance(horizon_regime_scores, dict):
+                for regime_scores in horizon_regime_scores.values():
+                    if isinstance(regime_scores, dict):
+                        mentioned.update(str(value) for value in regime_scores.keys())
+
+        restored = list(filtered)
+        for feature in allowed_features:
+            if feature in restored:
+                continue
+            if classify_feature_family(feature) != "derivatives":
+                continue
+            if feature in mentioned:
+                continue
+            restored.append(feature)
+
+        return restored
+
     if not reliability_json:
         return allowed_features
     payload_path = Path(reliability_json)
@@ -189,7 +246,7 @@ def _filter_features_by_reliability(
                 print(
                     f"Feature reliability horizon-regime score filter kept {len(filtered_from_scores)} / {len(allowed_features)} features for {horizon_key}.",
                 )
-                return filtered_from_scores
+                return preserve_unmentioned_derivatives(filtered_from_scores, payload, horizon_key)
 
         horizon_regime = payload.get("accepted_features_by_horizon_regime", {}) if isinstance(payload, dict) else {}
         if isinstance(horizon_regime, dict) and isinstance(horizon_regime.get(horizon_key), dict):
@@ -202,7 +259,7 @@ def _filter_features_by_reliability(
                 print(
                     f"Feature reliability horizon-regime filter kept {len(filtered)} / {len(allowed_features)} features for {horizon_key}.",
                 )
-                return filtered
+                return preserve_unmentioned_derivatives(filtered, payload, horizon_key)
 
         horizon_scores = payload.get("horizon_feature_scores", {}) if isinstance(payload, dict) else {}
         if isinstance(horizon_scores, dict) and isinstance(horizon_scores.get(horizon_key), dict):
@@ -221,7 +278,7 @@ def _filter_features_by_reliability(
                 print(
                     f"Feature reliability horizon score filter kept {len(filtered_from_scores)} / {len(allowed_features)} features for {horizon_key}.",
                 )
-                return filtered_from_scores
+                return preserve_unmentioned_derivatives(filtered_from_scores, payload, horizon_key)
 
         accepted_by_horizon = payload.get("accepted_features_by_horizon", {}) if isinstance(payload, dict) else {}
         if isinstance(accepted_by_horizon, dict) and isinstance(accepted_by_horizon.get(horizon_key), list):
@@ -231,7 +288,7 @@ def _filter_features_by_reliability(
                 print(
                     f"Feature reliability horizon filter kept {len(filtered)} / {len(allowed_features)} features for {horizon_key}.",
                 )
-                return filtered
+                return preserve_unmentioned_derivatives(filtered, payload, horizon_key)
 
     accepted = payload.get("accepted_features")
     feature_scores = payload.get("feature_scores", {}) if isinstance(payload, dict) else {}
@@ -241,7 +298,7 @@ def _filter_features_by_reliability(
         filtered = [feature for feature in allowed_features if feature in accepted_set]
         if filtered:
             print(f"Feature reliability accepted set kept {len(filtered)} / {len(allowed_features)} features.")
-            return filtered
+            return preserve_unmentioned_derivatives(filtered, payload, horizon_key)
         print("Feature reliability accepted set matched no allowed features; falling back to score filter.")
 
     filtered: list[str] = []
@@ -257,7 +314,7 @@ def _filter_features_by_reliability(
             filtered.append(feature)
     if filtered:
         print(f"Feature reliability filter kept {len(filtered)} / {len(allowed_features)} features.")
-        return filtered
+        return preserve_unmentioned_derivatives(filtered, payload, horizon_key)
     print("Feature reliability filter removed all allowed features; using original set as fallback.")
     return allowed_features
 

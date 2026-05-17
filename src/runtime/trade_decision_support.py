@@ -114,6 +114,35 @@ def resolve_trade_decision_policy(
             "p_up_high": float(weak_band_veto_cfg.get("p_up_high", 0.60)),
             "high_inclusive": bool(weak_band_veto_cfg.get("high_inclusive", False)),
         },
+        "derivatives_shadow_adjustment": {
+            "enabled": bool((cfg.get("derivatives_shadow_adjustment") or {}).get("enabled", False)),
+            "mode": str((cfg.get("derivatives_shadow_adjustment") or {}).get("mode", "futures_basis_crowding_penalty")).strip().lower(),
+            "horizons": [
+                str(value).strip().lower()
+                for value in (
+                    (cfg.get("derivatives_shadow_adjustment") or {}).get("horizons", [])
+                    if isinstance((cfg.get("derivatives_shadow_adjustment") or {}).get("horizons", []), list)
+                    else []
+                )
+                if str(value).strip()
+            ],
+            "regime_states": [
+                str(value).strip().lower()
+                for value in (
+                    (cfg.get("derivatives_shadow_adjustment") or {}).get("regime_states", [])
+                    if isinstance((cfg.get("derivatives_shadow_adjustment") or {}).get("regime_states", []), list)
+                    else []
+                )
+                if str(value).strip()
+            ],
+            "min_abs_basis_bps": float((cfg.get("derivatives_shadow_adjustment") or {}).get("min_abs_basis_bps", 8.0)),
+            "max_abs_ret_pred": (
+                float((cfg.get("derivatives_shadow_adjustment") or {}).get("max_abs_ret_pred"))
+                if (cfg.get("derivatives_shadow_adjustment") or {}).get("max_abs_ret_pred") is not None
+                else None
+            ),
+            "strength": float((cfg.get("derivatives_shadow_adjustment") or {}).get("strength", 0.35)),
+        },
         "model": model_payload,
     }
 
@@ -156,6 +185,84 @@ def resolve_trade_decision_threshold(
     else:
         source = f"{format_horizon_label(horizon)}@{regime_key}"
     return max(0.0, min(1.0, float(override))), source
+
+
+def apply_derivatives_shadow_adjustment(
+    trade_probability: float,
+    *,
+    result: Mapping[str, Any],
+    horizon_label: str | None,
+    regime_state: str,
+    ret_pred: float,
+    signal_dir_only: int,
+    policy: Mapping[str, Any],
+    finite_float_or_none: Callable[[Any], float | None],
+) -> tuple[float, Dict[str, Any]]:
+    cfg = policy.get("derivatives_shadow_adjustment") if isinstance(policy.get("derivatives_shadow_adjustment"), Mapping) else {}
+    enabled = bool(cfg.get("enabled", False))
+    payload: Dict[str, Any] = {
+        "enabled": enabled,
+        "applied": False,
+        "mode": str(cfg.get("mode", "futures_basis_crowding_penalty") or "futures_basis_crowding_penalty").lower(),
+        "reason": "disabled",
+        "basis_bps": None,
+        "base_trade_probability": float(trade_probability),
+        "adjusted_trade_probability": float(trade_probability),
+        "strength": float(cfg.get("strength", 0.35) or 0.35),
+    }
+    if not enabled:
+        return float(trade_probability), payload
+
+    scoped_horizons = {
+        str(value).strip().lower()
+        for value in (cfg.get("horizons", []) if isinstance(cfg.get("horizons"), list) else [])
+        if str(value).strip()
+    }
+    current_horizon = str(horizon_label or "").strip().lower()
+    if scoped_horizons and current_horizon not in scoped_horizons:
+        payload["reason"] = "horizon_not_scoped"
+        return float(trade_probability), payload
+
+    scoped_regimes = {
+        str(value).strip().lower()
+        for value in (cfg.get("regime_states", []) if isinstance(cfg.get("regime_states"), list) else [])
+        if str(value).strip()
+    }
+    current_regime = str(regime_state or "").strip().lower()
+    if scoped_regimes and current_regime not in scoped_regimes:
+        payload["reason"] = "regime_not_scoped"
+        return float(trade_probability), payload
+
+    max_abs_ret_pred = cfg.get("max_abs_ret_pred")
+    if max_abs_ret_pred is not None and abs(float(ret_pred)) > float(max_abs_ret_pred):
+        payload["reason"] = "ret_pred_above_max"
+        return float(trade_probability), payload
+
+    close_value = finite_float_or_none(result.get("close"))
+    fut_close_value = finite_float_or_none(result.get("fut_close"))
+    if close_value is None or fut_close_value is None or close_value <= 0.0 or fut_close_value <= 0.0:
+        payload["reason"] = "missing_futures_basis"
+        return float(trade_probability), payload
+
+    basis_bps = ((float(fut_close_value) / float(close_value)) - 1.0) * 10_000.0
+    payload["basis_bps"] = float(basis_bps)
+    min_abs_basis_bps = abs(float(cfg.get("min_abs_basis_bps", 8.0) or 8.0))
+    same_side_crowding = (
+        signal_dir_only == 1 and basis_bps >= min_abs_basis_bps
+    ) or (
+        signal_dir_only == 0 and basis_bps <= -min_abs_basis_bps
+    )
+    if not same_side_crowding:
+        payload["reason"] = "no_same_side_crowding"
+        return float(trade_probability), payload
+
+    strength = max(0.0, min(float(cfg.get("strength", 0.35) or 0.35), 0.95))
+    adjusted_probability = 0.5 + (float(trade_probability) - 0.5) * (1.0 - strength)
+    payload["applied"] = abs(adjusted_probability - float(trade_probability)) > 1e-12
+    payload["adjusted_trade_probability"] = float(adjusted_probability)
+    payload["strength"] = float(strength)
+    payload["reason"] = "futures_basis_crowding_penalty" if payload["applied"] else "no_change"
+    return float(adjusted_probability), payload
 
 
 def lookup_raw_ev_fallback_threshold(
@@ -250,6 +357,10 @@ def apply_trade_decision_model(
         "residual_std": finite_float(residual_std, 0.0),
         "confidence_score": finite_float(result.get("confidence_score", 0.0), 0.0),
         "position_size": finite_float(result.get("position_size", 0.0), 0.0),
+        "funding_rate_zscore_24h": finite_float(result.get("funding_rate_zscore_24h", 0.0), 0.0),
+        "fut_close": finite_float(result.get("fut_close", 0.0), 0.0),
+        "fut_close_zscore_7h": finite_float(result.get("fut_close_zscore_7h", 0.0), 0.0),
+        "open_interest": finite_float(result.get("open_interest", 0.0), 0.0),
         "volatility_realized_24h": finite_float(vol_snapshot.get("volatility_realized_24h", 0.0), 0.0),
         "volatility_ewm_24h": finite_float(vol_snapshot.get("volatility_ewm_24h", 0.0), 0.0),
         "volatility_garch_like": finite_float(vol_snapshot.get("volatility_garch_like", 0.0), 0.0),
@@ -299,7 +410,18 @@ def apply_trade_decision_model(
     logit = intercept
     for name, coef in zip(feature_names, coefficients):
         logit += coef * float(feature_values.get(name, 0.0))
+    signal_dir_only = int(result.get("signal_dir_only", 0))
     trade_prob = sigmoid(logit)
+    trade_prob, derivatives_shadow_adjustment = apply_derivatives_shadow_adjustment(
+        trade_prob,
+        result=result,
+        horizon_label=horizon_label,
+        regime_state=regime_state,
+        ret_pred=ret_pred_value,
+        signal_dir_only=signal_dir_only,
+        policy=policy,
+        finite_float_or_none=finite_float_or_none,
+    )
 
     threshold, threshold_source = resolve_trade_decision_threshold(
         policy,
@@ -333,7 +455,6 @@ def apply_trade_decision_model(
     fee_cost = (float(fee_bps) + float(slippage_bps)) / 10_000.0
     edge_over_fee = (expected_net - fee_cost) if expected_net_valid else float("-inf")
     ret_pred = finite_float(result.get("ret_pred", 0.0), 0.0)
-    signal_dir_only = int(result.get("signal_dir_only", 0))
     aligned = ((signal_dir_only == 1 and ret_pred > 0.0) or (signal_dir_only == 0 and ret_pred < 0.0))
 
     trade_ok = trade_prob >= threshold
@@ -483,6 +604,7 @@ def apply_trade_decision_model(
             "triggered": bool(midband_veto_triggered),
             "reason": midband_veto_reason,
         },
+        "derivatives_shadow_adjustment": derivatives_shadow_adjustment,
         "feature_snapshot": {
             name: float(feature_values.get(name, 0.0))
             for name in feature_names

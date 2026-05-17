@@ -156,6 +156,39 @@ class SignalProgramSupportTests(unittest.TestCase):
         self.assertIn("checked_model_metadata_not_refreshed_after_derivatives_wiring", payload["readiness"]["blockers"])
         self.assertGreater(payload["dataset_derivatives_family_count"], 0)
 
+    def test_derivatives_audit_reads_runtime_support_from_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            models_root = root / "models"
+            models_root.mkdir(parents=True, exist_ok=True)
+            funding_dir = root / "funding"
+            funding_dir.mkdir(parents=True, exist_ok=True)
+            (funding_dir / "hourly_features.parquet").write_text("placeholder", encoding="utf-8")
+            (funding_dir / "source_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "source_support": {
+                            "funding_optional_source_supported": True,
+                            "open_interest_optional_source_supported": False,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            spot_dir = root / "spot_klines"
+            spot_dir.mkdir(parents=True, exist_ok=True)
+            (spot_dir / "btc.parquet").write_text("placeholder", encoding="utf-8")
+
+            payload = build_derivatives_family_audit(
+                config={"targets": [1]},
+                models_root=models_root,
+                funding_dir=funding_dir,
+                spot_dir=spot_dir,
+            )
+
+        self.assertTrue(payload["runtime_support"]["funding_optional_source_supported"])
+        self.assertFalse(payload["runtime_support"]["open_interest_optional_source_supported"])
+
     def test_derivatives_shadow_candidate_config_requires_derivatives_in_coverage(self) -> None:
         config = build_derivatives_shadow_candidate_config(
             {
@@ -168,9 +201,72 @@ class SignalProgramSupportTests(unittest.TestCase):
         )
 
         coverage = config["feature_coverage_policy"]
+        trade_decision = config["trade_decision_policy"]
+        regime_model_dirs = config["regime_model_dirs"]
+        regression_model_dirs = config["regression_model_dirs"]
         self.assertEqual(coverage["ignored_sources"], ["macro", "onchain"])
         self.assertEqual(coverage["ignored_columns"], ["macro_us10y"])
         self.assertNotIn("derivatives_shadow_validation", config)
+        self.assertEqual(
+            trade_decision["derivatives_shadow_adjustment"],
+            {
+                "enabled": True,
+                "mode": "futures_basis_crowding_penalty",
+                "horizons": ["1h", "4h", "8h", "12h"],
+                "regime_states": ["neutral", "chop"],
+                "min_abs_basis_bps": 8.0,
+                "max_abs_ret_pred": 0.01,
+                "strength": 0.35,
+            },
+        )
+        self.assertTrue(regime_model_dirs["enabled"])
+        self.assertEqual(regime_model_dirs["neutral"]["1h"], "artifacts/models/shadow_derivatives_xgb_dir1h_v1")
+        self.assertEqual(regime_model_dirs["chop"]["8h"], "artifacts/models/shadow_derivatives_xgb_dir8h_v1")
+        self.assertEqual(regression_model_dirs["1h"], "artifacts/models/shadow_derivatives_xgb_ret1h_v1")
+        self.assertEqual(regression_model_dirs["12h"], "artifacts/models/shadow_derivatives_xgb_ret12h_v1")
+
+    def test_derivatives_shadow_candidate_config_can_relax_mfe_headroom_in_shadow_only(self) -> None:
+        config = build_derivatives_shadow_candidate_config(
+            {
+                "execution_policy": {
+                    "minimum_rr_by_horizon": {"8": 1.75, "12": 1.75},
+                    "adaptive_take_profit": {"enabled": True, "min_rr_fraction_of_floor": 0.75},
+                    "analytics": {
+                        "regime_volatility_buckets": {
+                            "enabled": True,
+                            "max_projection_mfe_ratio": 1.25,
+                        }
+                    },
+                }
+            },
+            audit={"readiness": {"decision": "shadow_scaffold_ready", "next_action": "run_first_shadow_derivatives_validation"}},
+            relax_mfe_headroom=True,
+        )
+
+        execution_policy = config["execution_policy"]
+        self.assertEqual(execution_policy["minimum_rr_by_horizon"]["8"], 1.5)
+        self.assertEqual(execution_policy["minimum_rr_by_horizon"]["12"], 1.5)
+        self.assertEqual(execution_policy["adaptive_take_profit"]["min_rr_fraction_of_floor"], 0.65)
+        self.assertEqual(
+            execution_policy["analytics"]["regime_volatility_buckets"]["max_projection_mfe_ratio"],
+            1.5,
+        )
+
+    def test_derivatives_shadow_candidate_config_can_relax_1h_confluence_in_shadow_only(self) -> None:
+        config = build_derivatives_shadow_candidate_config(
+            {
+                "execution_policy": {
+                    "short_term_min_support_ratio": 0.8,
+                    "short_term_min_support_ratio_by_horizon": {},
+                }
+            },
+            audit={"readiness": {"decision": "shadow_scaffold_ready", "next_action": "run_first_shadow_derivatives_validation"}},
+            relax_1h_confluence=True,
+        )
+
+        execution_policy = config["execution_policy"]
+        self.assertEqual(execution_policy["short_term_min_support_ratio"], 0.8)
+        self.assertEqual(execution_policy["short_term_min_support_ratio_by_horizon"]["1"], 0.75)
 
     def test_signal_expansion_rollout_summary_keeps_macro_deprioritized(self) -> None:
         payload = build_signal_expansion_rollout_summary(

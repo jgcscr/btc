@@ -145,6 +145,30 @@ class DirectionFeatureReliabilityFilterTests(unittest.TestCase):
 
         self.assertEqual(filtered, ["feature_a"])
 
+    def test_unmentioned_derivatives_features_are_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_path = Path(tmpdir) / "feature_reliability.json"
+            payload_path.write_text(
+                json.dumps(
+                    {
+                        "accepted_features": ["feature_a"],
+                        "feature_scores": {
+                            "feature_a": {"score": 0.90},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            filtered = _filter_features_by_reliability(
+                ["feature_a", "funding_rate_zscore_24h", "fut_close"],
+                str(payload_path),
+                min_score=0.95,
+                target_horizon=1.0,
+            )
+
+        self.assertEqual(filtered, ["feature_a", "funding_rate_zscore_24h", "fut_close"])
+
 
 if __name__ == "__main__":
     unittest.main()

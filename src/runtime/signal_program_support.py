@@ -38,6 +38,20 @@ DEFAULT_DATASET_MULTI_PATH = Path("artifacts/datasets/btc_features_multi_horizon
 DEFAULT_DATASET_1H_PATH = Path("artifacts/datasets/btc_features_1h_splits.npz")
 DEFAULT_DATASET_1H_DIRECTION_PATH = Path("artifacts/datasets/btc_features_1h_direction_splits.npz")
 
+DERIVATIVES_SHADOW_DIRECTION_MODEL_DIRS: Dict[str, str] = {
+    "1h": "artifacts/models/shadow_derivatives_xgb_dir1h_v1",
+    "4h": "artifacts/models/shadow_derivatives_xgb_dir4h_v1",
+    "8h": "artifacts/models/shadow_derivatives_xgb_dir8h_v1",
+    "12h": "artifacts/models/shadow_derivatives_xgb_dir12h_v1",
+}
+
+DERIVATIVES_SHADOW_REGRESSION_MODEL_DIRS: Dict[str, str] = {
+    "1h": "artifacts/models/shadow_derivatives_xgb_ret1h_v1",
+    "4h": "artifacts/models/shadow_derivatives_xgb_ret4h_v1",
+    "8h": "artifacts/models/shadow_derivatives_xgb_ret8h_v1",
+    "12h": "artifacts/models/shadow_derivatives_xgb_ret12h_v1",
+}
+
 
 @dataclass(frozen=True)
 class DerivativesPolicySpec:
@@ -57,6 +71,20 @@ def _load_json(path: Path) -> Dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _load_derivatives_runtime_support(funding_dir: Path) -> Dict[str, Any]:
+    manifest = _load_json(funding_dir / "source_manifest.json") if funding_dir.exists() else None
+    support = manifest.get("source_support") if isinstance(manifest, Mapping) else None
+    if isinstance(support, Mapping):
+        return {
+            "funding_optional_source_supported": bool(support.get("funding_optional_source_supported", True)),
+            "open_interest_optional_source_supported": bool(support.get("open_interest_optional_source_supported", True)),
+        }
+    return {
+        "funding_optional_source_supported": True,
+        "open_interest_optional_source_supported": True,
+    }
 
 
 def _extract_go_hold(payload: Mapping[str, Any], family: str) -> str | None:
@@ -426,6 +454,7 @@ def build_derivatives_family_audit(
 
     funding_parquets = sorted(str(path) for path in funding_dir.glob("*.parquet")) if funding_dir.exists() else []
     spot_parquets = sorted(str(path) for path in spot_dir.glob("*.parquet")) if spot_dir.exists() else []
+    runtime_support = _load_derivatives_runtime_support(funding_dir)
 
     training_union = sorted(set(training_union))
     dataset_union = sorted(set(dataset_union))
@@ -487,9 +516,9 @@ def build_derivatives_family_audit(
             feature for features in by_horizon_features.values() for feature in features
         ),
         "runtime_support": {
-            "funding_optional_source_supported": True,
+            "funding_optional_source_supported": runtime_support["funding_optional_source_supported"],
             "funding_required_columns": ["funding_rate", "funding_rate_annualized"],
-            "open_interest_optional_source_supported": True,
+            "open_interest_optional_source_supported": runtime_support["open_interest_optional_source_supported"],
             "futures_columns_zero_imputed_when_missing": True,
             "derivatives_columns_currently_ignored_in_live_policy": ignored_derivatives_columns,
             "ignored_sources": [str(value) for value in ignored_sources],
@@ -543,6 +572,8 @@ def build_derivatives_shadow_candidate_config(
     base_config: Mapping[str, Any],
     *,
     audit: Mapping[str, Any],
+    relax_mfe_headroom: bool = False,
+    relax_1h_confluence: bool = False,
 ) -> Dict[str, Any]:
     config = deepcopy(dict(base_config))
     coverage = config.get("feature_coverage_policy")
@@ -567,6 +598,84 @@ def build_derivatives_shadow_candidate_config(
         column for column in ignored_columns if classify_feature_family(column) != "derivatives"
     ]
     config["feature_coverage_policy"] = coverage
+
+    trade_decision = config.get("trade_decision_policy")
+    if not isinstance(trade_decision, Mapping):
+        trade_decision = {}
+    trade_decision = dict(trade_decision)
+    trade_decision["derivatives_shadow_adjustment"] = {
+        "enabled": True,
+        "mode": "futures_basis_crowding_penalty",
+        "horizons": ["1h", "4h", "8h", "12h"],
+        "regime_states": ["neutral", "chop"],
+        "min_abs_basis_bps": 8.0,
+        "max_abs_ret_pred": 0.01,
+        "strength": 0.35,
+    }
+    config["trade_decision_policy"] = trade_decision
+
+    config["regime_model_dirs"] = {
+        "enabled": True,
+        "neutral": dict(DERIVATIVES_SHADOW_DIRECTION_MODEL_DIRS),
+        "chop": dict(DERIVATIVES_SHADOW_DIRECTION_MODEL_DIRS),
+        "trend_ignition": dict(DERIVATIVES_SHADOW_DIRECTION_MODEL_DIRS),
+    }
+    config["regression_model_dirs"] = {
+        "enabled": True,
+        **dict(DERIVATIVES_SHADOW_REGRESSION_MODEL_DIRS),
+    }
+
+    if relax_mfe_headroom:
+        execution_policy = config.get("execution_policy")
+        if not isinstance(execution_policy, Mapping):
+            execution_policy = {}
+        execution_policy = deepcopy(dict(execution_policy))
+
+        minimum_rr_by_horizon = execution_policy.get("minimum_rr_by_horizon")
+        if not isinstance(minimum_rr_by_horizon, Mapping):
+            minimum_rr_by_horizon = {}
+        minimum_rr_by_horizon = dict(minimum_rr_by_horizon)
+        minimum_rr_by_horizon["8"] = 1.5
+        minimum_rr_by_horizon["12"] = 1.5
+        execution_policy["minimum_rr_by_horizon"] = minimum_rr_by_horizon
+
+        adaptive_take_profit = execution_policy.get("adaptive_take_profit")
+        if not isinstance(adaptive_take_profit, Mapping):
+            adaptive_take_profit = {}
+        adaptive_take_profit = dict(adaptive_take_profit)
+        adaptive_take_profit["enabled"] = True
+        adaptive_take_profit["min_rr_fraction_of_floor"] = 0.65
+        execution_policy["adaptive_take_profit"] = adaptive_take_profit
+
+        analytics = execution_policy.get("analytics")
+        if not isinstance(analytics, Mapping):
+            analytics = {}
+        analytics = dict(analytics)
+        regime_volatility_buckets = analytics.get("regime_volatility_buckets")
+        if not isinstance(regime_volatility_buckets, Mapping):
+            regime_volatility_buckets = {}
+        regime_volatility_buckets = dict(regime_volatility_buckets)
+        regime_volatility_buckets["enabled"] = True
+        regime_volatility_buckets["max_projection_mfe_ratio"] = 1.5
+        analytics["regime_volatility_buckets"] = regime_volatility_buckets
+        execution_policy["analytics"] = analytics
+
+        config["execution_policy"] = execution_policy
+
+    if relax_1h_confluence:
+        execution_policy = config.get("execution_policy")
+        if not isinstance(execution_policy, Mapping):
+            execution_policy = {}
+        execution_policy = deepcopy(dict(execution_policy))
+
+        strict_support_by_horizon = execution_policy.get("short_term_min_support_ratio_by_horizon")
+        if not isinstance(strict_support_by_horizon, Mapping):
+            strict_support_by_horizon = {}
+        strict_support_by_horizon = dict(strict_support_by_horizon)
+        strict_support_by_horizon["1"] = 0.75
+        execution_policy["short_term_min_support_ratio_by_horizon"] = strict_support_by_horizon
+
+        config["execution_policy"] = execution_policy
 
     return config
 

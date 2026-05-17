@@ -160,6 +160,68 @@ def test_apply_trade_decision_model_allows_raw_ev_fallback_when_no_positive_oof_
     assert payload["proposed_trade_action"] == "long"
 
 
+def test_apply_trade_decision_model_applies_derivatives_shadow_adjustment_from_futures_basis() -> None:
+    payload = apply_trade_decision_model(
+        result={
+            "close": 100.0,
+            "fut_close": 101.0,
+            "p_up": 0.8,
+            "raw_p_up": 0.8,
+            "ret_pred": 0.002,
+            "expected_value": 0.02,
+            "signal_dir_only": 1,
+            "volatility": {"snapshot": {}},
+        },
+        horizon_label="4h",
+        regime_state="neutral",
+        residual_std=0.1,
+        policy={
+            "enabled": True,
+            "threshold": 0.7,
+            "use_oof_expected_value": False,
+            "replace_threshold_rule": True,
+            "require_direction_ret_alignment": True,
+            "enforce_positive_oof_envelope": False,
+            "min_expected_net": 0.0,
+            "min_edge_over_fee": 0.0,
+            "derivatives_shadow_adjustment": {
+                "enabled": True,
+                "mode": "futures_basis_crowding_penalty",
+                "horizons": ["4h"],
+                "regime_states": ["neutral"],
+                "min_abs_basis_bps": 8.0,
+                "max_abs_ret_pred": 0.01,
+                "strength": 0.8,
+            },
+            "model": {
+                "feature_columns": ["p_up"],
+                "coefficients": [4.0],
+                "intercept": -1.0,
+            },
+        },
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        regime_trend="trend",
+        regime_neutral="neutral",
+        regime_chop="chop",
+        resolve_trade_decision_threshold=lambda policy, **kwargs: resolve_trade_decision_threshold(
+            policy,
+            normalize_horizon_value=_normalize_horizon_value,
+            parse_horizon_label=_parse_horizon_label,
+            format_horizon_label=_format_horizon_label,
+            **kwargs,
+        ),
+        sigmoid=_sigmoid,
+        finite_float_or_none=_finite_float_or_none,
+        finite_float=_finite_float,
+    )
+
+    assert payload["triggered"] is False
+    assert payload["trade_probability"] < payload["derivatives_shadow_adjustment"]["base_trade_probability"]
+    assert payload["derivatives_shadow_adjustment"]["applied"] is True
+    assert payload["derivatives_shadow_adjustment"]["reason"] == "futures_basis_crowding_penalty"
+
+
 def test_apply_trade_decision_stage_blocks_on_upstream_reasons() -> None:
     summary = {
         "4h": {

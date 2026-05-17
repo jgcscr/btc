@@ -292,6 +292,29 @@ def normalize_trade_decision_policy_block(value: Mapping[str, Any], *, stderr_wr
                 "p_up_high": float(raw_value.get("p_up_high", 0.60)),
                 "high_inclusive": bool(raw_value.get("high_inclusive", False)),
             }
+        elif key == "derivatives_shadow_adjustment":
+            if not isinstance(raw_value, Mapping):
+                raise ValueError("trade_decision_policy.derivatives_shadow_adjustment must be a mapping.")
+            horizons_value = raw_value.get("horizons", [])
+            if isinstance(horizons_value, str):
+                horizons = [part.strip().lower() for part in horizons_value.split(",") if part.strip()]
+            else:
+                horizons = [str(item).strip().lower() for item in horizons_value if str(item).strip()]
+            normalized[key] = {
+                "enabled": bool(raw_value.get("enabled", False)),
+                "mode": str(raw_value.get("mode", "futures_basis_crowding_penalty")).strip().lower(),
+                "horizons": horizons,
+                "regime_states": [
+                    str(item).strip().lower()
+                    for item in raw_value.get("regime_states", [])
+                    if str(item).strip()
+                ],
+                "min_abs_basis_bps": float(raw_value.get("min_abs_basis_bps", 8.0)),
+                "max_abs_ret_pred": (
+                    float(raw_value.get("max_abs_ret_pred")) if raw_value.get("max_abs_ret_pred") is not None else None
+                ),
+                "strength": float(raw_value.get("strength", 0.35)),
+            }
         else:
             stderr_write(f"Warning: Unknown trade_decision_policy config key '{raw_key}' ignored.\n")
     return normalized
