@@ -1,0 +1,2690 @@
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+/workspaces/btc/src/runtime/refresh_support.py:260: FutureWarning: 'H' is deprecated and will be removed in a future version, please use 'h' instead.
+  ts_index = pd.date_range(end=datetime.now(timezone.utc), periods=periods, freq=freq_alias)
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+/workspaces/btc/.venv/lib/python3.12/site-packages/pandas/core/arraylike.py:399: RuntimeWarning: invalid value encountered in log
+  result = getattr(ufunc, method)(*inputs, **kwargs)
+Warning: direction_model_lgbm missing model columns cvd_ratio_6h, cvd_zscore_6h, intrabar_path_range, intrabar_quote_volume_sum, intrabar_realized_vol_15m...; filled with zeros for inference.
+/workspaces/btc/.venv/lib/python3.12/site-packages/sklearn/utils/validation.py:2691: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+Warning: direction_model_regime_logit missing model columns cvd_ratio_6h, cvd_zscore_6h, interaction_chop_volatility_4h, interaction_momentum_volatility_4h, interaction_regime_flow_6h...; filled with zeros for inference.
+Warning: sequence_model_24 missing model columns funding_rate_zscore_24h; filled with zeros for inference.
+/workspaces/btc/.venv/lib/python3.12/site-packages/sklearn/utils/validation.py:2691: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/workspaces/btc/.venv/lib/python3.12/site-packages/sklearn/utils/validation.py:2691: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/workspaces/btc/.venv/lib/python3.12/site-packages/sklearn/utils/validation.py:2691: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/workspaces/btc/.venv/lib/python3.12/site-packages/sklearn/utils/validation.py:2691: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/workspaces/btc/.venv/lib/python3.12/site-packages/sklearn/utils/validation.py:2691: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/workspaces/btc/.venv/lib/python3.12/site-packages/sklearn/utils/validation.py:2691: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+Loaded CLI defaults from config: configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml
+Loaded calibrated thresholds for horizons [0.25, 1, 4, 8, 12] from artifacts/models/calibrated_thresholds_merged.json.
+[run_refresh_and_predict] direction models (15m):
+[
+  {
+    "name": "transformer",
+    "type": "transformer",
+    "path": "artifacts/models/transformer_dir15m_v1",
+    "weight": 1.15
+  },
+  {
+    "name": "lstm",
+    "type": "lstm",
+    "path": "artifacts/models/lstm_dir15m_v1",
+    "weight": 0.25
+  },
+  {
+    "name": "bilstm",
+    "type": "bilstm",
+    "path": "artifacts/models/bilstm_dir15m_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "gru",
+    "type": "gru",
+    "path": "artifacts/models/gru_dir15m_v1",
+    "weight": 0.45
+  },
+  {
+    "name": "cnn_lstm",
+    "type": "cnn_lstm",
+    "path": "artifacts/models/cnn_lstm_dir15m_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "cnn_bilstm",
+    "type": "cnn_bilstm",
+    "path": "artifacts/models/cnn_bilstm_dir15m_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "garch_lstm",
+    "type": "garch_lstm",
+    "path": "artifacts/models/garch_lstm_dir15m_v1",
+    "weight": 0.55
+  },
+  {
+    "name": "lgbm",
+    "type": "lgbm",
+    "path": "artifacts/models/lgbm_dir1h_v1/lgbm_dir1h_model.joblib",
+    "weight": 1.2
+  },
+  {
+    "name": "xgb",
+    "type": "xgb",
+    "path": "artifacts/models/xgb_dir15m_v1/xgb_dir15m_model.json",
+    "weight": 1.5
+  },
+  {
+    "name": "regime_logit",
+    "type": "regime_logit",
+    "path": "artifacts/models/regime_logit_dir1h_v1/regime_logit_dir1h_model.joblib",
+    "weight": 0.5
+  }
+]
+[run_refresh_and_predict] direction models (1h):
+[
+  {
+    "name": "transformer",
+    "type": "transformer",
+    "path": "artifacts/models/transformer_dir1h_v1",
+    "weight": 1.15
+  },
+  {
+    "name": "lstm",
+    "type": "lstm",
+    "path": "artifacts/models/lstm_dir1h_v2",
+    "weight": 0.25
+  },
+  {
+    "name": "bilstm",
+    "type": "bilstm",
+    "path": "artifacts/models/bilstm_dir1h_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "gru",
+    "type": "gru",
+    "path": "artifacts/models/gru_dir1h_v1",
+    "weight": 0.45
+  },
+  {
+    "name": "cnn_lstm",
+    "type": "cnn_lstm",
+    "path": "artifacts/models/cnn_lstm_dir1h_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "cnn_bilstm",
+    "type": "cnn_bilstm",
+    "path": "artifacts/models/cnn_bilstm_dir1h_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "garch_lstm",
+    "type": "garch_lstm",
+    "path": "artifacts/models/garch_lstm_dir1h_v1",
+    "weight": 0.55
+  },
+  {
+    "name": "lgbm",
+    "type": "lgbm",
+    "path": "artifacts/models/lgbm_dir1h_v1/lgbm_dir1h_model.joblib",
+    "weight": 1.2
+  },
+  {
+    "name": "xgb",
+    "type": "xgb",
+    "path": "artifacts/models/xgb_dir1h_v1/xgb_dir1h_model.json",
+    "weight": 1.5
+  },
+  {
+    "name": "regime_logit",
+    "type": "regime_logit",
+    "path": "artifacts/models/regime_logit_dir1h_v1/regime_logit_dir1h_model.joblib",
+    "weight": 0.5
+  }
+]
+[run_refresh_and_predict] direction models (4h):
+[
+  {
+    "name": "transformer",
+    "type": "transformer",
+    "path": "artifacts/models/transformer_dir4h_v1",
+    "weight": 1.15
+  },
+  {
+    "name": "lstm",
+    "type": "lstm",
+    "path": "artifacts/models/lstm_dir4h_v1",
+    "weight": 0.25
+  },
+  {
+    "name": "bilstm",
+    "type": "bilstm",
+    "path": "artifacts/models/bilstm_dir4h_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "gru",
+    "type": "gru",
+    "path": "artifacts/models/gru_dir4h_v1",
+    "weight": 0.45
+  },
+  {
+    "name": "cnn_lstm",
+    "type": "cnn_lstm",
+    "path": "artifacts/models/cnn_lstm_dir4h_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "cnn_bilstm",
+    "type": "cnn_bilstm",
+    "path": "artifacts/models/cnn_bilstm_dir4h_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "garch_lstm",
+    "type": "garch_lstm",
+    "path": "artifacts/models/garch_lstm_dir4h_v1",
+    "weight": 0.55
+  },
+  {
+    "name": "lgbm",
+    "type": "lgbm",
+    "path": "artifacts/models/lgbm_dir1h_v1/lgbm_dir1h_model.joblib",
+    "weight": 1.2
+  },
+  {
+    "name": "xgb",
+    "type": "xgb",
+    "path": "artifacts/models/xgb_dir4h_v1/xgb_dir4h_model.json",
+    "weight": 1.5
+  },
+  {
+    "name": "regime_logit",
+    "type": "regime_logit",
+    "path": "artifacts/models/regime_logit_dir4h_v1/regime_logit_dir4h_model.joblib",
+    "weight": 0.5
+  }
+]
+[run_refresh_and_predict] direction models (12h):
+[
+  {
+    "name": "transformer",
+    "type": "transformer",
+    "path": "artifacts/models/transformer_dir12h_v1",
+    "weight": 1.15
+  },
+  {
+    "name": "lstm",
+    "type": "lstm",
+    "path": "artifacts/models/lstm_dir12h_v1",
+    "weight": 0.25
+  },
+  {
+    "name": "bilstm",
+    "type": "bilstm",
+    "path": "artifacts/models/bilstm_dir12h_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "gru",
+    "type": "gru",
+    "path": "artifacts/models/gru_dir12h_v1",
+    "weight": 0.45
+  },
+  {
+    "name": "cnn_lstm",
+    "type": "cnn_lstm",
+    "path": "artifacts/models/cnn_lstm_dir12h_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "cnn_bilstm",
+    "type": "cnn_bilstm",
+    "path": "artifacts/models/cnn_bilstm_dir12h_v1",
+    "weight": 0.0
+  },
+  {
+    "name": "garch_lstm",
+    "type": "garch_lstm",
+    "path": "artifacts/models/garch_lstm_dir12h_v1",
+    "weight": 0.55
+  },
+  {
+    "name": "lgbm",
+    "type": "lgbm",
+    "path": "artifacts/models/lgbm_dir1h_v1/lgbm_dir1h_model.joblib",
+    "weight": 1.2
+  },
+  {
+    "name": "xgb",
+    "type": "xgb",
+    "path": "artifacts/models/xgb_dir12h_v1/xgb_dir12h_model.json",
+    "weight": 1.5
+  },
+  {
+    "name": "regime_logit",
+    "type": "regime_logit",
+    "path": "artifacts/models/regime_logit_dir12h_v1/regime_logit_dir12h_model.joblib",
+    "weight": 0.5
+  }
+]
+{
+  "generated_at": "2026-05-16T21:03:19.149181+00:00",
+  "predictions": {
+    "15m": {
+      "timestamp": "2026-05-16T21:03:15.850651Z",
+      "horizon_hours": 0.25,
+      "close": 78206.0,
+      "entry_price": 78206.0,
+      "p_up": 0.15877373393708322,
+      "p_trend_ignition": 0.0,
+      "ignition_state": 0,
+      "ignition_cooldown_active": false,
+      "ret_pred": -0.00016621661779936403,
+      "projected_price": 78193.00194346481,
+      "signal_ensemble": 0,
+      "signal_dir_only": 0,
+      "direction_next": "down",
+      "trade_action": "hold",
+      "confidence_score": 0.7491261369335833,
+      "position_size": 0.0,
+      "confidence_min": 0.33,
+      "confidence_min_source": "default",
+      "position_size_cap": 0.0,
+      "p_up_components": {
+        "transformer": 0.0006906451308168471,
+        "lstm": 0.0034065325744450092,
+        "bilstm": 4.922438893117942e-05,
+        "gru": 1.5048739442136139e-05,
+        "cnn_lstm": 0.00034417101414874196,
+        "cnn_bilstm": 0.0006077311700209975,
+        "garch_lstm": 0.00018485628243070096,
+        "lgbm": 0.4884949806985396,
+        "xgb": 9.487128409091383e-05,
+        "regime_logit": 0.5201343395318889
+      },
+      "direction_ensemble": {
+        "selected_models": [
+          "bilstm",
+          "cnn_bilstm",
+          "cnn_lstm",
+          "garch_lstm",
+          "gru",
+          "lgbm",
+          "lstm",
+          "regime_logit",
+          "transformer",
+          "xgb"
+        ],
+        "selected_groups": [],
+        "missing_preferred_groups": [],
+        "effective_weights": {
+          "transformer": 1.2075,
+          "lstm": 0.2,
+          "bilstm": 0.0,
+          "gru": 0.36000000000000004,
+          "cnn_lstm": 0.0,
+          "cnn_bilstm": 0.0,
+          "garch_lstm": 0.5225,
+          "lgbm": 1.38,
+          "xgb": 1.7249999999999999,
+          "regime_logit": 0.5
+        },
+        "base_weights": {
+          "transformer": 1.2075,
+          "lstm": 0.2,
+          "bilstm": 0.0,
+          "gru": 0.36000000000000004,
+          "cnn_lstm": 0.0,
+          "cnn_bilstm": 0.0,
+          "garch_lstm": 0.5225,
+          "lgbm": 1.38,
+          "xgb": 1.7249999999999999,
+          "regime_logit": 0.5
+        },
+        "rejected_models": [],
+        "policy_applied": false,
+        "component_summary": {
+          "component_count": 10.0,
+          "component_group_count": 5.0,
+          "component_probability_std": 0.20158262560552662,
+          "component_probability_range": 0.5201192907924468,
+          "component_mean_abs_gap": 0.1611649680134955,
+          "component_max_abs_gap": 0.41873209945041345,
+          "component_entropy": 0.2056354567006883,
+          "component_agreement_ratio": 0.8888888888888888,
+          "component_disagreement_ratio": 0.1111111111111111,
+          "component_group_attention_p_up": 0.0006906451308168471,
+          "component_group_attention_count": 1.0,
+          "component_group_recurrent_p_up": 0.0008845415773976129,
+          "component_group_recurrent_count": 5.0,
+          "component_group_regime_p_up": 0.5201343395318889,
+          "component_group_regime_count": 1.0,
+          "component_group_tree_p_up": 0.24429492599131525,
+          "component_group_tree_count": 2.0,
+          "component_group_volatility_p_up": 0.00018485628243070096,
+          "component_group_volatility_count": 1.0,
+          "component_pairwise_count": 0.0,
+          "component_pairwise_correlation_mean": 0.0,
+          "component_pairwise_correlation_max": 0.0,
+          "component_pairwise_correlation_min": 0.0,
+          "component_pairwise_probability_gap_mean": 0.0,
+          "component_pairwise_probability_gap_max": 0.0,
+          "component_pairwise_probability_gap_min": 0.0,
+          "direction_ensemble_selected_count": 10.0,
+          "direction_ensemble_rejected_count": 0.0,
+          "direction_ensemble_missing_preferred_group_count": 0.0
+        }
+      },
+      "stop_loss": 78445.88935810744,
+      "take_profit": 77940.92976649756,
+      "expected_value": -0.002742647550872836,
+      "thresholds": {
+        "p_up_min": 0.4,
+        "ret_min": 0.00025,
+        "p_up_min_effective": 0.4,
+        "ret_min_effective": 0.00025,
+        "adaptive_scale": 1.0
+      },
+      "regime_state": "neutral",
+      "probability_calibration": {
+        "requested_key": "15m@neutral",
+        "applied_key": null,
+        "used_regime_key": false,
+        "fallback_to_base": false,
+        "raw_probability": 0.15877373393708322,
+        "resolved_probability": 0.15877373393708322,
+        "absolute_gap": 0.0,
+        "forecast_alignment_guard": null,
+        "raw_side": "down",
+        "resolved_side": "down",
+        "ret_pred_side": "down",
+        "projected_price_side": "down",
+        "forecast_consensus_side": "down",
+        "guard_applied": false
+      },
+      "regime_weight_overrides": {
+        "family_multipliers": {
+          "tree": 1.15,
+          "attention": 1.05,
+          "recurrent": 0.8,
+          "volatility": 0.95,
+          "regime": 1.0
+        }
+      },
+      "projected_high": null,
+      "projected_low": null,
+      "projected_high_confidence": 0.0,
+      "projected_low_confidence": 0.0,
+      "projected_high_rmse": null,
+      "projected_low_rmse": null,
+      "projected_high_residual_std": null,
+      "projected_low_residual_std": null,
+      "volatility": {
+        "mode": "ceiling",
+        "metric": "volatility_realized_24h",
+        "current": 0.0,
+        "ceiling": null,
+        "multiplier": 1.25,
+        "percentile": null,
+        "calm_percentile": null,
+        "extreme_percentile": null,
+        "triggered": false,
+        "hard_block": false,
+        "snapshot": {
+          "volatility_realized_24h": 0.0,
+          "volatility_ewm_24h": 6.532820243353632e-81,
+          "volatility_realized_72h": 0.0,
+          "volatility_ewm_72h": 1.024230215467846e-27,
+          "volatility_garch_like": 0.003162277660168382
+        },
+        "p_up_min_effective": 0.4,
+        "ret_min_effective": 0.00025
+      },
+      "volatility_flag": false,
+      "gate_trace": [
+        {
+          "stage": "trade_decision",
+          "reason": "threshold_or_envelope_veto",
+          "triggered": true,
+          "blocking": true
+        }
+      ],
+      "raw_p_up": 0.15877373393708322,
+      "raw_calibrated_probability_gap": 0.0,
+      "probability_alignment_gap": 0.0,
+      "raw_p_up_side": "down",
+      "resolved_p_up_side": "down",
+      "ret_pred_side": "down",
+      "projected_price_side": "down",
+      "forecast_consensus_side": "down",
+      "raw_p_up_ret_mismatch": 0.0,
+      "p_up_ret_mismatch": 0.0,
+      "raw_p_up_direction_mismatch": 0.0,
+      "p_up_direction_mismatch": 0.0,
+      "ret_projected_price_consensus": 1.0,
+      "probability_calibration_guard_applied": 0.0,
+      "probability_calibration_used_regime_key": 0.0,
+      "direction_output": {
+        "enabled": true,
+        "evaluated": true,
+        "direction": "down",
+        "probability": 0.15877373393708322,
+        "raw_probability": 0.15877373393708322,
+        "neutral_band": 0.04,
+        "source": "trade_probability",
+        "calibration": {
+          "requested_key": "15m@neutral",
+          "applied_key": null,
+          "used_regime_key": false,
+          "fallback_to_trade_probability": true,
+          "skipped_due_to_marginal_rerank": false
+        },
+        "marginal_rerank": {
+          "enabled": false,
+          "applied": false,
+          "weight_key": null,
+          "band": null,
+          "component_count": 0,
+          "components_used": {}
+        },
+        "probability_shrinkage": {
+          "enabled": true,
+          "applied": false,
+          "strength": 0.5,
+          "bypass_edge": 0.32
+        }
+      },
+      "direction_next_display": "down",
+      "component_count": 10.0,
+      "component_group_count": 5.0,
+      "component_probability_std": 0.20158262560552662,
+      "component_probability_range": 0.5201192907924468,
+      "component_mean_abs_gap": 0.1611649680134955,
+      "component_max_abs_gap": 0.41873209945041345,
+      "component_entropy": 0.2056354567006883,
+      "component_agreement_ratio": 0.8888888888888888,
+      "component_disagreement_ratio": 0.1111111111111111,
+      "component_group_attention_p_up": 0.0006906451308168471,
+      "component_group_attention_count": 1.0,
+      "component_group_recurrent_p_up": 0.0008845415773976129,
+      "component_group_recurrent_count": 5.0,
+      "component_group_regime_p_up": 0.5201343395318889,
+      "component_group_regime_count": 1.0,
+      "component_group_tree_p_up": 0.24429492599131525,
+      "component_group_tree_count": 2.0,
+      "component_group_volatility_p_up": 0.00018485628243070096,
+      "component_group_volatility_count": 1.0,
+      "component_pairwise_count": 0.0,
+      "component_pairwise_correlation_mean": 0.0,
+      "component_pairwise_correlation_max": 0.0,
+      "component_pairwise_correlation_min": 0.0,
+      "component_pairwise_probability_gap_mean": 0.0,
+      "component_pairwise_probability_gap_max": 0.0,
+      "component_pairwise_probability_gap_min": 0.0,
+      "direction_ensemble_selected_count": 10.0,
+      "direction_ensemble_rejected_count": 0.0,
+      "direction_ensemble_missing_preferred_group_count": 0.0,
+      "range_expansion_1h": -0.21209071652366007,
+      "distance_from_session_high_8h": 0.6941117701560279,
+      "distance_from_session_low_8h": -0.19060535933744918,
+      "vwap_deviation_8h": -0.010250697345252064,
+      "momentum_slope_2h": -0.06711267802255741,
+      "momentum_slope_4h": 0.37061945256187556,
+      "target_range_overrides": {
+        "stop_loss": null,
+        "take_profit": null
+      },
+      "risk_reward_ratio": 1.104968705546851,
+      "direction_only_fallback": {
+        "active": false,
+        "side": null,
+        "size_factor": 0.0,
+        "stop_loss_fallback": null,
+        "take_profit_fallback": null,
+        "reason": "not_configured",
+        "cooldown_active": false
+      },
+      "trade_decision": {
+        "enabled": true,
+        "triggered": false,
+        "proposed_signal_ensemble": 0,
+        "proposed_trade_action": "hold",
+        "trade_probability": 0.37464678482918085,
+        "threshold": 0.5495,
+        "threshold_source": "default",
+        "expected_net": 5.581419265544995e-05,
+        "expected_net_valid": true,
+        "expected_net_raw": -0.002742647550872836,
+        "expected_net_raw_calibrated": -0.0005974501478994852,
+        "expected_net_oof": 5.581419265544995e-05,
+        "oof_expected_value_mode": "max_with_raw_calibrated",
+        "use_oof_expected_value": true,
+        "positive_oof_envelope": {
+          "available": true,
+          "positive_bin_count": 5,
+          "populated_bin_count": 6,
+          "has_positive_bin": true,
+          "in_positive_bin": true,
+          "matched_populated_bin": true,
+          "matched_positive_bin": true,
+          "matched_bin_mean_ret_net": 5.581419265544995e-05,
+          "matched_bin_samples": 16,
+          "best_positive_mean_ret_net": 0.0008771958608121939
+        },
+        "positive_oof_envelope_mode": "populated_bin_sign",
+        "enforce_positive_oof_envelope": true,
+        "allow_raw_ev_fallback_when_no_positive_oof_bin": true,
+        "raw_ev_fallback_quantile": 0.9,
+        "raw_ev_fallback_threshold": null,
+        "raw_ev_fallback_pass": false,
+        "edge_over_fee": -0.00024418580734455,
+        "direction_ret_aligned": true,
+        "replace_threshold_rule": true,
+        "weak_band_veto": {
+          "enabled": false,
+          "triggered": false,
+          "reason": "disabled"
+        },
+        "midband_veto": {
+          "enabled": true,
+          "triggered": false,
+          "reason": "disabled"
+        },
+        "feature_snapshot": {
+          "p_up": 0.15877373393708322,
+          "raw_p_up": 0.15877373393708322,
+          "ret_pred": -0.00016621661779936403,
+          "expected_value_proxy": -2.6390833050398076e-05,
+          "abs_ret_pred": 0.00016621661779936403,
+          "raw_calibrated_probability_gap": 0.0,
+          "probability_alignment_gap": 0.0,
+          "raw_p_up_ret_mismatch": 0.0,
+          "p_up_ret_mismatch": 0.0,
+          "raw_p_up_direction_mismatch": 0.0,
+          "p_up_direction_mismatch": 0.0,
+          "ret_projected_price_consensus": 1.0,
+          "probability_calibration_guard_applied": 0.0,
+          "probability_calibration_used_regime_key": 0.0,
+          "confidence_score": 0.7491261369335833,
+          "position_size": 0.0,
+          "volatility_realized_24h": 0.0,
+          "volatility_ewm_24h": 6.532820243353632e-81,
+          "volatility_garch_like": 0.003162277660168382,
+          "range_expansion_1h": -0.21209071652366007,
+          "distance_from_session_high_8h": 0.6941117701560279,
+          "distance_from_session_low_8h": -0.19060535933744918,
+          "vwap_deviation_8h": -0.010250697345252064,
+          "momentum_slope_2h": -0.06711267802255741,
+          "momentum_slope_4h": 0.37061945256187556,
+          "confluence_support_ratio": 0.5,
+          "confluence_short_term_ratio": 0.0,
+          "confluence_mid_term_ratio": 0.0,
+          "confluence_direction_matches_dominant": 0.0,
+          "horizon_consensus_support_ratio": 0.0,
+          "horizon_directional_agreement_ratio": 0.0,
+          "horizon_directional_disagreement_count": 0.0,
+          "horizon_short_term_alignment_ratio": 0.0,
+          "horizon_mid_term_alignment_ratio": 0.0,
+          "horizon_weighted_p_up": 0.15877373393708322,
+          "horizon_weighted_ret_pred": -0.00016621661779936403,
+          "horizon_p_up_dispersion": 0.0,
+          "horizon_bias_conflict": 0.0,
+          "incumbent_signal_reference": 0.0,
+          "candidate_only_reference": 0.0,
+          "candidate_incumbent_disagreement": 0.0,
+          "regime_is_trend": 0.0,
+          "regime_is_neutral": 1.0,
+          "regime_is_chop": 0.0,
+          "component_count": 10.0,
+          "component_group_count": 5.0,
+          "component_probability_std": 0.20158262560552662,
+          "component_probability_range": 0.5201192907924468,
+          "component_mean_abs_gap": 0.1611649680134955,
+          "component_max_abs_gap": 0.41873209945041345,
+          "component_entropy": 0.2056354567006883,
+          "component_agreement_ratio": 0.8888888888888888,
+          "component_disagreement_ratio": 0.1111111111111111,
+          "component_group_attention_p_up": 0.0006906451308168471,
+          "component_group_attention_count": 1.0,
+          "component_group_recurrent_p_up": 0.0008845415773976129,
+          "component_group_recurrent_count": 5.0,
+          "component_group_regime_p_up": 0.5201343395318889,
+          "component_group_regime_count": 1.0,
+          "component_group_tree_p_up": 0.24429492599131525,
+          "component_group_tree_count": 2.0,
+          "component_group_volatility_p_up": 0.00018485628243070096,
+          "component_group_volatility_count": 1.0
+        }
+      },
+      "confidence_filter_triggered": false,
+      "abstention": {
+        "enabled": true,
+        "triggered": false,
+        "reason": "already_hold",
+        "expected_value_used": 5.581419265544995e-05,
+        "expected_value_source": "trade_decision_expected_net"
+      },
+      "uncertainty": {
+        "available": false
+      },
+      "forecast_coherence": {
+        "enabled": true,
+        "evaluated": false,
+        "exclude_from_voting": false,
+        "direction_side": "down",
+        "ret_pred_side": "down",
+        "projected_price_side": "down",
+        "p_up_side": "down",
+        "triggered": false,
+        "reasons": [],
+        "advisory_reasons": [],
+        "low_trust": false,
+        "consensus_relief_applied": false
+      },
+      "trust_status": "trusted",
+      "trust_reasons": [],
+      "excluded_from_voting": false,
+      "voting_weight_after_trust": 1.0,
+      "trust_hardening_action": "none",
+      "trust_hardening_changed_outcome": false,
+      "confluence": {
+        "enabled": true,
+        "dominant_direction": "neutral",
+        "dominant_ratio": 0.5,
+        "aligned_horizons": 1,
+        "total_horizons": 2,
+        "support_ratio": 0.5,
+        "short_term_ratio": null,
+        "mid_term_ratio": 0.0,
+        "triggered": false,
+        "reasons": []
+      },
+      "confluence_support_ratio": 0.5,
+      "confluence_short_term_ratio": null,
+      "confluence_mid_term_ratio": 0.0,
+      "confluence_direction_matches_dominant": 0.0,
+      "market_price": 78206.0,
+      "execution_prior_provenance": {
+        "analytics_source": "unavailable",
+        "matched_regime": null,
+        "volatility_bucket": null,
+        "bucket_threshold": null,
+        "sample_count": 0,
+        "stop_source": null,
+        "stop_adjustment_type": null,
+        "target_source": "existing_or_projection"
+      },
+      "bias_score": 0.0,
+      "execution_score": 0.0,
+      "bias_support_horizons": [],
+      "bias_support_is_8h_standalone": false,
+      "execution_plan": {
+        "enabled": true,
+        "bias_direction": "up",
+        "bias_alignment_ratio": 1.0,
+        "execution_alignment_ratio": 0.0,
+        "bias_score": 0.0,
+        "execution_score": 0.0,
+        "confluence_tier": "low",
+        "status": "rejected",
+        "reason": "bias_direction_conflict",
+        "side": "short",
+        "entry_mode": "disabled",
+        "pending_trade_action": "short",
+        "partial_take_profit": null,
+        "time_stop": null,
+        "trailing_stop": null,
+        "analytics": {
+          "available": false
+        },
+        "structure": null,
+        "stop_management": null
+      }
+    },
+    "1h": {
+      "timestamp": "2026-05-16T21:00:00Z",
+      "horizon_hours": 1.0,
+      "close": -2.409209548115267,
+      "entry_price": -2.409209548115267,
+      "p_up": 0.7818199989904381,
+      "p_trend_ignition": 0.0,
+      "ignition_state": 0,
+      "ignition_cooldown_active": false,
+      "ret_pred": -0.0006916063721291721,
+      "projected_price": -2.4075438994929894,
+      "signal_ensemble": 0,
+      "signal_dir_only": 1,
+      "direction_next": "up",
+      "trade_action": "hold",
+      "confidence_score": 0.4636118534239114,
+      "position_size": 0.02991310151281599,
+      "confidence_min": 0.33,
+      "confidence_min_source": "default",
+      "position_size_cap": 0.15,
+      "p_up_components": {
+        "transformer": 0.7356539964675903,
+        "lstm": 0.598292350769043,
+        "bilstm": 0.965981125831604,
+        "gru": 0.8230134844779968,
+        "cnn_lstm": 0.7903006076812744,
+        "cnn_bilstm": 0.8772854804992676,
+        "garch_lstm": 0.9535460472106934,
+        "lgbm": 0.5249666847139258,
+        "xgb": 0.7180582284927368,
+        "regime_logit": 0.587706747527647
+      },
+      "direction_ensemble": {
+        "selected_models": [
+          "xgb",
+          "transformer",
+          "regime_logit"
+        ],
+        "selected_groups": [
+          "tree",
+          "attention",
+          "regime"
+        ],
+        "missing_preferred_groups": [],
+        "effective_weights": {
+          "xgb": 1.5,
+          "transformer": 1.15,
+          "regime_logit": 0.5
+        },
+        "base_weights": {
+          "transformer": 1.15,
+          "lstm": 0.25,
+          "bilstm": 0.0,
+          "gru": 0.45,
+          "cnn_lstm": 0.0,
+          "cnn_bilstm": 0.0,
+          "garch_lstm": 0.55,
+          "lgbm": 1.2,
+          "xgb": 1.5,
+          "regime_logit": 0.5
+        },
+        "rejected_models": [
+          {
+            "name": "lgbm",
+            "reason": "group_cap:tree"
+          },
+          {
+            "name": "garch_lstm",
+            "reason": "active_cap"
+          },
+          {
+            "name": "gru",
+            "reason": "active_cap"
+          },
+          {
+            "name": "lstm",
+            "reason": "active_cap"
+          }
+        ],
+        "pairwise": [
+          {
+            "left": "xgb",
+            "right": "transformer",
+            "correlation": 0.1545370641032238,
+            "mean_abs_probability_gap": 0.1407018518075347,
+            "history_points": 96
+          },
+          {
+            "left": "xgb",
+            "right": "regime_logit",
+            "correlation": 0.32945103849182095,
+            "mean_abs_probability_gap": 0.31651809769978984,
+            "history_points": 96
+          },
+          {
+            "left": "transformer",
+            "right": "regime_logit",
+            "correlation": -0.14295742887374321,
+            "mean_abs_probability_gap": 0.35094356810371224,
+            "history_points": 96
+          }
+        ],
+        "policy_applied": true,
+        "component_summary": {
+          "component_count": 10.0,
+          "component_group_count": 5.0,
+          "component_probability_std": 0.1455666014512523,
+          "component_probability_range": 0.4410144411176782,
+          "component_mean_abs_gap": 0.12454487377298933,
+          "component_max_abs_gap": 0.23251379065325217,
+          "component_entropy": 0.7075909418125625,
+          "component_agreement_ratio": 1.0,
+          "component_disagreement_ratio": 0.0,
+          "component_group_attention_p_up": 0.7356539964675903,
+          "component_group_attention_count": 1.0,
+          "component_group_recurrent_p_up": 0.8109746098518371,
+          "component_group_recurrent_count": 5.0,
+          "component_group_regime_p_up": 0.587706747527647,
+          "component_group_regime_count": 1.0,
+          "component_group_tree_p_up": 0.6215124566033313,
+          "component_group_tree_count": 2.0,
+          "component_group_volatility_p_up": 0.9535460472106934,
+          "component_group_volatility_count": 1.0,
+          "component_pairwise_count": 3.0,
+          "component_pairwise_correlation_mean": 0.11367689124043386,
+          "component_pairwise_correlation_max": 0.32945103849182095,
+          "component_pairwise_correlation_min": -0.14295742887374321,
+          "component_pairwise_probability_gap_mean": 0.2693878392036789,
+          "component_pairwise_probability_gap_max": 0.35094356810371224,
+          "component_pairwise_probability_gap_min": 0.1407018518075347,
+          "direction_ensemble_selected_count": 3.0,
+          "direction_ensemble_rejected_count": 4.0,
+          "direction_ensemble_missing_preferred_group_count": 0.0
+        }
+      },
+      "stop_loss": -2.393943324699081,
+      "take_profit": -2.4212217424631386,
+      "expected_value": -0.0017767376242824459,
+      "thresholds": {
+        "p_up_min": 0.5,
+        "ret_min": 0.00025,
+        "p_up_min_effective": 0.5,
+        "ret_min_effective": 0.00025,
+        "adaptive_scale": 1.0
+      },
+      "regime_state": "neutral",
+      "probability_calibration": {
+        "requested_key": "1h@neutral",
+        "applied_key": "1h@neutral",
+        "used_regime_key": true,
+        "fallback_to_base": false,
+        "raw_probability": 0.7037913690287801,
+        "resolved_probability": 0.7818199989904381,
+        "absolute_gap": 0.07802862996165794,
+        "forecast_alignment_guard": null,
+        "raw_side": "up",
+        "resolved_side": "up",
+        "ret_pred_side": "down",
+        "projected_price_side": "neutral",
+        "forecast_consensus_side": "neutral",
+        "guard_applied": false
+      },
+      "regime_weight_overrides": {
+        "model_overrides": {
+          "transformer": 1.15,
+          "lstm": 0.25,
+          "bilstm": 0.0,
+          "gru": 0.45,
+          "cnn_lstm": 0.0,
+          "cnn_bilstm": 0.0,
+          "garch_lstm": 0.55,
+          "regime_logit": 0.5,
+          "lgbm": 1.2,
+          "xgb": 1.5
+        },
+        "family_multipliers": {
+          "tree": 1.15,
+          "attention": 1.05,
+          "recurrent": 0.8,
+          "volatility": 0.95,
+          "regime": 1.0
+        }
+      },
+      "projected_high": null,
+      "projected_low": null,
+      "projected_high_confidence": 0.0,
+      "projected_low_confidence": 0.0,
+      "projected_high_rmse": null,
+      "projected_low_rmse": null,
+      "projected_high_residual_std": null,
+      "projected_low_residual_std": null,
+      "volatility": {
+        "mode": "ceiling",
+        "metric": "volatility_realized_24h",
+        "current": 0.0,
+        "ceiling": null,
+        "multiplier": 1.25,
+        "percentile": null,
+        "calm_percentile": null,
+        "extreme_percentile": null,
+        "triggered": false,
+        "hard_block": false,
+        "snapshot": {
+          "volatility_realized_24h": 0.0,
+          "volatility_ewm_24h": 9.574786348678089e-75,
+          "volatility_realized_72h": 0.0,
+          "volatility_ewm_72h": 1.0115097946898095e-25,
+          "volatility_garch_like": 0.003162277660168382
+        },
+        "p_up_min_effective": 0.5,
+        "ret_min_effective": 0.00025
+      },
+      "volatility_flag": false,
+      "gate_trace": [
+        {
+          "stage": "forecast_coherence",
+          "reason": "direction_ret_mismatch|p_up_ret_mismatch",
+          "triggered": true,
+          "blocking": true
+        },
+        {
+          "stage": "trade_decision",
+          "reason": "forecast_coherence_gate",
+          "triggered": true,
+          "blocking": true
+        }
+      ],
+      "raw_p_up": 0.7037913690287801,
+      "raw_calibrated_probability_gap": 0.07802862996165794,
+      "probability_alignment_gap": 0.07802862996165794,
+      "raw_p_up_side": "up",
+      "resolved_p_up_side": "up",
+      "ret_pred_side": "down",
+      "projected_price_side": "neutral",
+      "forecast_consensus_side": "neutral",
+      "raw_p_up_ret_mismatch": 1.0,
+      "p_up_ret_mismatch": 1.0,
+      "raw_p_up_direction_mismatch": 0.0,
+      "p_up_direction_mismatch": 0.0,
+      "ret_projected_price_consensus": 0.0,
+      "probability_calibration_guard_applied": 0.0,
+      "probability_calibration_used_regime_key": 1.0,
+      "direction_output": {
+        "enabled": true,
+        "evaluated": true,
+        "direction": "neutral",
+        "probability": 1.0,
+        "raw_probability": 0.7037913690287801,
+        "neutral_band": 0.025,
+        "source": "direction_output_calibration",
+        "calibration": {
+          "requested_key": "1h@neutral",
+          "applied_key": "1h@neutral",
+          "used_regime_key": true,
+          "fallback_to_trade_probability": false,
+          "skipped_due_to_marginal_rerank": false
+        },
+        "marginal_rerank": {
+          "enabled": false,
+          "applied": false,
+          "weight_key": null,
+          "band": null,
+          "component_count": 0,
+          "components_used": {}
+        },
+        "probability_shrinkage": {
+          "enabled": true,
+          "applied": false,
+          "strength": 0.25,
+          "bypass_edge": 0.32
+        },
+        "coherence_override": {
+          "applied": true,
+          "reason": "forecast_coherence_gate",
+          "raw_direction": "up"
+        }
+      },
+      "direction_next_display": "neutral",
+      "component_count": 10.0,
+      "component_group_count": 5.0,
+      "component_probability_std": 0.1455666014512523,
+      "component_probability_range": 0.4410144411176782,
+      "component_mean_abs_gap": 0.12454487377298933,
+      "component_max_abs_gap": 0.23251379065325217,
+      "component_entropy": 0.7075909418125625,
+      "component_agreement_ratio": 1.0,
+      "component_disagreement_ratio": 0.0,
+      "component_group_attention_p_up": 0.7356539964675903,
+      "component_group_attention_count": 1.0,
+      "component_group_recurrent_p_up": 0.8109746098518371,
+      "component_group_recurrent_count": 5.0,
+      "component_group_regime_p_up": 0.587706747527647,
+      "component_group_regime_count": 1.0,
+      "component_group_tree_p_up": 0.6215124566033313,
+      "component_group_tree_count": 2.0,
+      "component_group_volatility_p_up": 0.9535460472106934,
+      "component_group_volatility_count": 1.0,
+      "component_pairwise_count": 3.0,
+      "component_pairwise_correlation_mean": 0.11367689124043386,
+      "component_pairwise_correlation_max": 0.32945103849182095,
+      "component_pairwise_correlation_min": -0.14295742887374321,
+      "component_pairwise_probability_gap_mean": 0.2693878392036789,
+      "component_pairwise_probability_gap_max": 0.35094356810371224,
+      "component_pairwise_probability_gap_min": 0.1407018518075347,
+      "direction_ensemble_selected_count": 3.0,
+      "direction_ensemble_rejected_count": 4.0,
+      "direction_ensemble_missing_preferred_group_count": 0.0,
+      "range_expansion_1h": -0.5763301057269563,
+      "distance_from_session_high_8h": 0.2819766279426957,
+      "distance_from_session_low_8h": -0.9076672517174145,
+      "vwap_deviation_8h": -0.3157417682181964,
+      "momentum_slope_2h": -0.6771760010023946,
+      "momentum_slope_4h": -0.21913580451113815,
+      "target_range_overrides": {
+        "stop_loss": null,
+        "take_profit": null
+      },
+      "risk_reward_ratio": 0.7868478025243342,
+      "direction_only_fallback": {
+        "active": false,
+        "side": null,
+        "size_factor": 0.0,
+        "stop_loss_fallback": null,
+        "take_profit_fallback": null,
+        "reason": "not_configured",
+        "cooldown_active": false
+      },
+      "trade_decision": {
+        "enabled": true,
+        "triggered": false,
+        "proposed_signal_ensemble": 0,
+        "proposed_trade_action": "hold",
+        "trade_probability": 0.4139077840485713,
+        "threshold": 0.5495,
+        "threshold_source": "default",
+        "expected_net": 5.581419265544995e-05,
+        "expected_net_valid": true,
+        "expected_net_raw": -0.0017767376242824459,
+        "expected_net_raw_calibrated": 1.721703700413944e-05,
+        "expected_net_oof": 5.581419265544995e-05,
+        "oof_expected_value_mode": "max_with_raw_calibrated",
+        "use_oof_expected_value": true,
+        "positive_oof_envelope": {
+          "available": true,
+          "positive_bin_count": 5,
+          "populated_bin_count": 6,
+          "has_positive_bin": true,
+          "in_positive_bin": true,
+          "matched_populated_bin": true,
+          "matched_positive_bin": true,
+          "matched_bin_mean_ret_net": 5.581419265544995e-05,
+          "matched_bin_samples": 16,
+          "best_positive_mean_ret_net": 0.0008771958608121939
+        },
+        "positive_oof_envelope_mode": "populated_bin_sign",
+        "enforce_positive_oof_envelope": true,
+        "allow_raw_ev_fallback_when_no_positive_oof_bin": true,
+        "raw_ev_fallback_quantile": 0.9,
+        "raw_ev_fallback_threshold": null,
+        "raw_ev_fallback_pass": false,
+        "edge_over_fee": -0.00024418580734455,
+        "direction_ret_aligned": false,
+        "replace_threshold_rule": true,
+        "weak_band_veto": {
+          "enabled": false,
+          "triggered": false,
+          "reason": "disabled"
+        },
+        "midband_veto": {
+          "enabled": true,
+          "triggered": false,
+          "reason": "disabled"
+        },
+        "feature_snapshot": {
+          "p_up": 0.7818199989904381,
+          "raw_p_up": 0.7037913690287801,
+          "ret_pred": -0.0006916063721291721,
+          "expected_value_proxy": -0.0005407116931598099,
+          "abs_ret_pred": 0.0006916063721291721,
+          "raw_calibrated_probability_gap": 0.07802862996165794,
+          "probability_alignment_gap": 0.07802862996165794,
+          "raw_p_up_ret_mismatch": 1.0,
+          "p_up_ret_mismatch": 1.0,
+          "raw_p_up_direction_mismatch": 0.0,
+          "p_up_direction_mismatch": 0.0,
+          "ret_projected_price_consensus": 0.0,
+          "probability_calibration_guard_applied": 0.0,
+          "probability_calibration_used_regime_key": 1.0,
+          "confidence_score": 0.4636118534239114,
+          "position_size": 0.02991310151281599,
+          "volatility_realized_24h": 0.0,
+          "volatility_ewm_24h": 9.574786348678089e-75,
+          "volatility_garch_like": 0.003162277660168382,
+          "range_expansion_1h": -0.5763301057269563,
+          "distance_from_session_high_8h": 0.2819766279426957,
+          "distance_from_session_low_8h": -0.9076672517174145,
+          "vwap_deviation_8h": -0.3157417682181964,
+          "momentum_slope_2h": -0.6771760010023946,
+          "momentum_slope_4h": -0.21913580451113815,
+          "confluence_support_ratio": 0.0,
+          "confluence_short_term_ratio": 0.0,
+          "confluence_mid_term_ratio": 0.0,
+          "confluence_direction_matches_dominant": 0.0,
+          "horizon_consensus_support_ratio": 0.0,
+          "horizon_directional_agreement_ratio": 0.0,
+          "horizon_directional_disagreement_count": 0.0,
+          "horizon_short_term_alignment_ratio": 0.0,
+          "horizon_mid_term_alignment_ratio": 0.0,
+          "horizon_weighted_p_up": 0.7818199989904381,
+          "horizon_weighted_ret_pred": -0.0006916063721291721,
+          "horizon_p_up_dispersion": 0.0,
+          "horizon_bias_conflict": 0.0,
+          "incumbent_signal_reference": 0.0,
+          "candidate_only_reference": 0.0,
+          "candidate_incumbent_disagreement": 0.0,
+          "regime_is_trend": 0.0,
+          "regime_is_neutral": 1.0,
+          "regime_is_chop": 0.0,
+          "component_count": 10.0,
+          "component_group_count": 5.0,
+          "component_probability_std": 0.1455666014512523,
+          "component_probability_range": 0.4410144411176782,
+          "component_mean_abs_gap": 0.12454487377298933,
+          "component_max_abs_gap": 0.23251379065325217,
+          "component_entropy": 0.7075909418125625,
+          "component_agreement_ratio": 1.0,
+          "component_disagreement_ratio": 0.0,
+          "component_group_attention_p_up": 0.7356539964675903,
+          "component_group_attention_count": 1.0,
+          "component_group_recurrent_p_up": 0.8109746098518371,
+          "component_group_recurrent_count": 5.0,
+          "component_group_regime_p_up": 0.587706747527647,
+          "component_group_regime_count": 1.0,
+          "component_group_tree_p_up": 0.6215124566033313,
+          "component_group_tree_count": 2.0,
+          "component_group_volatility_p_up": 0.9535460472106934,
+          "component_group_volatility_count": 1.0
+        },
+        "pre_upstream_gate_triggered": false,
+        "blocked": true,
+        "blocking_reason": "forecast_coherence_gate",
+        "upstream_gate_reasons": [
+          "forecast_coherence_gate"
+        ]
+      },
+      "confidence_filter_triggered": false,
+      "abstention": {
+        "enabled": true,
+        "triggered": false,
+        "reason": "already_hold",
+        "expected_value_used": 5.581419265544995e-05,
+        "expected_value_source": "trade_decision_expected_net"
+      },
+      "uncertainty": {
+        "available": false
+      },
+      "forecast_coherence": {
+        "enabled": true,
+        "evaluated": true,
+        "exclude_from_voting": true,
+        "direction_side": "up",
+        "ret_pred_side": "down",
+        "projected_price_side": "neutral",
+        "p_up_side": "up",
+        "triggered": true,
+        "reasons": [
+          "direction_ret_mismatch",
+          "p_up_ret_mismatch"
+        ],
+        "advisory_reasons": [],
+        "low_trust": false,
+        "consensus_relief_applied": false
+      },
+      "trust_status": "trusted",
+      "trust_reasons": [],
+      "excluded_from_voting": false,
+      "voting_weight_after_trust": 1.0,
+      "trust_hardening_action": "none",
+      "trust_hardening_changed_outcome": false,
+      "market_price": -2.409209548115267,
+      "execution_prior_provenance": {
+        "analytics_source": "unavailable",
+        "matched_regime": null,
+        "volatility_bucket": null,
+        "bucket_threshold": null,
+        "sample_count": 0,
+        "stop_source": null,
+        "stop_adjustment_type": null,
+        "target_source": "existing_or_projection"
+      },
+      "bias_score": 1.2195110147629544,
+      "execution_score": 1.2195110147629544,
+      "bias_support_horizons": [
+        "12h"
+      ],
+      "bias_support_is_8h_standalone": false,
+      "execution_plan": {
+        "enabled": true,
+        "bias_direction": "up",
+        "bias_alignment_ratio": 1.0,
+        "execution_alignment_ratio": 1.0,
+        "bias_score": 1.2195110147629544,
+        "execution_score": 1.2195110147629544,
+        "confluence_tier": "low",
+        "status": "rejected",
+        "reason": "forecast_coherence_gate",
+        "side": "long",
+        "entry_mode": "disabled",
+        "pending_trade_action": "long",
+        "partial_take_profit": null,
+        "time_stop": null,
+        "trailing_stop": null,
+        "analytics": {
+          "available": false
+        },
+        "structure": null,
+        "stop_management": null
+      }
+    },
+    "4h": {
+      "timestamp": "2026-05-16T21:00:00Z",
+      "horizon_hours": 4.0,
+      "close": -2.409209548115267,
+      "entry_price": -2.409209548115267,
+      "p_up": 0.8446259956028386,
+      "p_trend_ignition": 0.0,
+      "ignition_state": 0,
+      "ignition_cooldown_active": false,
+      "ret_pred": -0.002501611365005374,
+      "projected_price": -2.4031901743350845,
+      "signal_ensemble": 0,
+      "signal_dir_only": 1,
+      "direction_next": "up",
+      "trade_action": "hold",
+      "confidence_score": 0.5492493407591927,
+      "position_size": 0.11453323771002605,
+      "confidence_min": 0.33,
+      "confidence_min_source": "default",
+      "position_size_cap": 0.35,
+      "p_up_components": {
+        "transformer": 0.8837389349937439,
+        "lstm": 0.7620028853416443,
+        "bilstm": 0.5881580114364624,
+        "gru": 0.7919914126396179,
+        "cnn_lstm": 0.8920875787734985,
+        "cnn_bilstm": 0.8814767599105835,
+        "garch_lstm": 0.8595719933509827,
+        "lgbm": 0.5249666847139258,
+        "xgb": 0.7864280939102173,
+        "regime_logit": 0.6157424307353273
+      },
+      "direction_ensemble": {
+        "selected_models": [
+          "xgb",
+          "transformer",
+          "regime_logit",
+          "lgbm",
+          "garch_lstm"
+        ],
+        "selected_groups": [
+          "tree",
+          "attention",
+          "regime",
+          "tree",
+          "volatility"
+        ],
+        "missing_preferred_groups": [],
+        "effective_weights": {
+          "xgb": 1.5,
+          "transformer": 1.05,
+          "regime_logit": 0.55,
+          "lgbm": 1.0,
+          "garch_lstm": 0.65
+        },
+        "base_weights": {
+          "transformer": 1.05,
+          "lstm": 0.3,
+          "bilstm": 0.0,
+          "gru": 0.5,
+          "cnn_lstm": 0.0,
+          "cnn_bilstm": 0.0,
+          "garch_lstm": 0.65,
+          "lgbm": 1.0,
+          "xgb": 1.5,
+          "regime_logit": 0.55
+        },
+        "rejected_models": [
+          {
+            "name": "gru",
+            "reason": "active_cap"
+          },
+          {
+            "name": "lstm",
+            "reason": "active_cap"
+          }
+        ],
+        "pairwise": [
+          {
+            "left": "xgb",
+            "right": "transformer",
+            "correlation": 0.6814024812117887,
+            "mean_abs_probability_gap": 0.18817622816034904,
+            "history_points": 96
+          },
+          {
+            "left": "xgb",
+            "right": "regime_logit",
+            "correlation": 0.23896812841880263,
+            "mean_abs_probability_gap": 0.19080458437675296,
+            "history_points": 96
+          },
+          {
+            "left": "transformer",
+            "right": "regime_logit",
+            "correlation": 0.24492641054626824,
+            "mean_abs_probability_gap": 0.30024274961737535,
+            "history_points": 96
+          },
+          {
+            "left": "xgb",
+            "right": "lgbm",
+            "correlation": 0.24436803921183578,
+            "mean_abs_probability_gap": 0.23426864711244486,
+            "history_points": 96
+          },
+          {
+            "left": "transformer",
+            "right": "lgbm",
+            "correlation": 0.0284921850580188,
+            "mean_abs_probability_gap": 0.37010784658977824,
+            "history_points": 96
+          },
+          {
+            "left": "regime_logit",
+            "right": "lgbm",
+            "correlation": 0.15413013127720138,
+            "mean_abs_probability_gap": 0.12242498651122985,
+            "history_points": 96
+          },
+          {
+            "left": "xgb",
+            "right": "garch_lstm",
+            "correlation": 0.31599815638876866,
+            "mean_abs_probability_gap": 0.2863809149712324,
+            "history_points": 96
+          },
+          {
+            "left": "transformer",
+            "right": "garch_lstm",
+            "correlation": 0.37616687669712545,
+            "mean_abs_probability_gap": 0.17196280520875007,
+            "history_points": 96
+          },
+          {
+            "left": "regime_logit",
+            "right": "garch_lstm",
+            "correlation": 0.23000624491875987,
+            "mean_abs_probability_gap": 0.37011981593620497,
+            "history_points": 96
+          },
+          {
+            "left": "lgbm",
+            "right": "garch_lstm",
+            "correlation": 0.28156163263583334,
+            "mean_abs_probability_gap": 0.4362568150169805,
+            "history_points": 96
+          }
+        ],
+        "policy_applied": true,
+        "component_summary": {
+          "component_count": 10.0,
+          "component_group_count": 5.0,
+          "component_probability_std": 0.12834211196672618,
+          "component_probability_range": 0.3671208940595727,
+          "component_mean_abs_gap": 0.10939646177121713,
+          "component_max_abs_gap": 0.2336497938666745,
+          "component_entropy": 0.733682309289812,
+          "component_agreement_ratio": 1.0,
+          "component_disagreement_ratio": 0.0,
+          "component_group_attention_p_up": 0.8837389349937439,
+          "component_group_attention_count": 1.0,
+          "component_group_recurrent_p_up": 0.7831433296203614,
+          "component_group_recurrent_count": 5.0,
+          "component_group_regime_p_up": 0.6157424307353273,
+          "component_group_regime_count": 1.0,
+          "component_group_tree_p_up": 0.6556973893120716,
+          "component_group_tree_count": 2.0,
+          "component_group_volatility_p_up": 0.8595719933509827,
+          "component_group_volatility_count": 1.0,
+          "component_pairwise_count": 10.0,
+          "component_pairwise_correlation_mean": 0.2796020286364403,
+          "component_pairwise_correlation_max": 0.6814024812117887,
+          "component_pairwise_correlation_min": 0.0284921850580188,
+          "component_pairwise_probability_gap_mean": 0.26707453935010983,
+          "component_pairwise_probability_gap_max": 0.4362568150169805,
+          "component_pairwise_probability_gap_min": 0.12242498651122985,
+          "direction_ensemble_selected_count": 5.0,
+          "direction_ensemble_rejected_count": 2.0,
+          "direction_ensemble_missing_preferred_group_count": 0.0
+        }
+      },
+      "stop_loss": -2.4045261640512727,
+      "take_profit": -2.4141219667266816,
+      "expected_value": -0.003898092863402418,
+      "thresholds": {
+        "p_up_min": 0.4,
+        "ret_min": 0.00025,
+        "p_up_min_effective": 0.4,
+        "ret_min_effective": 0.00025,
+        "adaptive_scale": 1.0
+      },
+      "regime_state": "neutral",
+      "probability_calibration": {
+        "requested_key": "4h@neutral",
+        "applied_key": "4h@neutral",
+        "used_regime_key": true,
+        "fallback_to_base": false,
+        "raw_probability": 0.7431399662958424,
+        "resolved_probability": 0.8446259956028386,
+        "absolute_gap": 0.10148602930699613,
+        "forecast_alignment_guard": null,
+        "raw_side": "up",
+        "resolved_side": "up",
+        "ret_pred_side": "down",
+        "projected_price_side": "neutral",
+        "forecast_consensus_side": "neutral",
+        "guard_applied": false
+      },
+      "regime_weight_overrides": {
+        "model_overrides": {
+          "transformer": 1.05,
+          "lstm": 0.3,
+          "bilstm": 0.0,
+          "gru": 0.5,
+          "cnn_lstm": 0.0,
+          "cnn_bilstm": 0.0,
+          "garch_lstm": 0.65,
+          "regime_logit": 0.55,
+          "lgbm": 1.0,
+          "xgb": 1.5
+        },
+        "family_multipliers": {
+          "tree": 1.15,
+          "attention": 1.05,
+          "recurrent": 0.8,
+          "volatility": 0.95,
+          "regime": 1.0
+        }
+      },
+      "projected_high": -2.4141219667266816,
+      "projected_low": -2.4045261640512727,
+      "projected_high_confidence": 0.8203780520897443,
+      "projected_low_confidence": 0.795947563259056,
+      "projected_high_rmse": 0.0019799000583589077,
+      "projected_low_rmse": 0.0022822197061032057,
+      "projected_high_residual_std": 0.0019767393823713064,
+      "projected_low_residual_std": 0.0022818767465651035,
+      "volatility": {
+        "mode": "ceiling",
+        "metric": "volatility_realized_24h",
+        "current": 0.0,
+        "ceiling": null,
+        "multiplier": 1.25,
+        "percentile": null,
+        "calm_percentile": null,
+        "extreme_percentile": null,
+        "triggered": false,
+        "hard_block": false,
+        "snapshot": {
+          "volatility_realized_24h": 0.0,
+          "volatility_ewm_24h": 9.574786348678089e-75,
+          "volatility_realized_72h": 0.0,
+          "volatility_ewm_72h": 1.0115097946898095e-25,
+          "volatility_garch_like": 0.003162277660168382
+        },
+        "p_up_min_effective": 0.4,
+        "ret_min_effective": 0.00025
+      },
+      "volatility_flag": false,
+      "gate_trace": [
+        {
+          "stage": "forecast_coherence",
+          "reason": "direction_ret_mismatch|p_up_ret_mismatch",
+          "triggered": true,
+          "blocking": true
+        },
+        {
+          "stage": "trade_decision",
+          "reason": "forecast_coherence_gate",
+          "triggered": true,
+          "blocking": true
+        }
+      ],
+      "raw_p_up": 0.7431399662958424,
+      "raw_calibrated_probability_gap": 0.10148602930699613,
+      "probability_alignment_gap": 0.10148602930699613,
+      "raw_p_up_side": "up",
+      "resolved_p_up_side": "up",
+      "ret_pred_side": "down",
+      "projected_price_side": "neutral",
+      "forecast_consensus_side": "neutral",
+      "raw_p_up_ret_mismatch": 1.0,
+      "p_up_ret_mismatch": 1.0,
+      "raw_p_up_direction_mismatch": 0.0,
+      "p_up_direction_mismatch": 0.0,
+      "ret_projected_price_consensus": 0.0,
+      "probability_calibration_guard_applied": 0.0,
+      "probability_calibration_used_regime_key": 1.0,
+      "direction_output": {
+        "enabled": true,
+        "evaluated": false,
+        "direction": "neutral",
+        "probability": 0.8446259956028386,
+        "raw_probability": 0.7431399662958424,
+        "neutral_band": 0.0,
+        "source": "trade_probability",
+        "calibration": {
+          "requested_key": "4h@neutral",
+          "applied_key": null,
+          "used_regime_key": false,
+          "fallback_to_trade_probability": true,
+          "skipped_due_to_marginal_rerank": false
+        },
+        "marginal_rerank": {
+          "enabled": false,
+          "applied": false,
+          "weight_key": null,
+          "band": null,
+          "component_count": 0,
+          "components_used": {}
+        },
+        "coherence_override": {
+          "applied": true,
+          "reason": "forecast_coherence_gate",
+          "raw_direction": "up"
+        }
+      },
+      "direction_next_display": "neutral",
+      "component_count": 10.0,
+      "component_group_count": 5.0,
+      "component_probability_std": 0.12834211196672618,
+      "component_probability_range": 0.3671208940595727,
+      "component_mean_abs_gap": 0.10939646177121713,
+      "component_max_abs_gap": 0.2336497938666745,
+      "component_entropy": 0.733682309289812,
+      "component_agreement_ratio": 1.0,
+      "component_disagreement_ratio": 0.0,
+      "component_group_attention_p_up": 0.8837389349937439,
+      "component_group_attention_count": 1.0,
+      "component_group_recurrent_p_up": 0.7831433296203614,
+      "component_group_recurrent_count": 5.0,
+      "component_group_regime_p_up": 0.6157424307353273,
+      "component_group_regime_count": 1.0,
+      "component_group_tree_p_up": 0.6556973893120716,
+      "component_group_tree_count": 2.0,
+      "component_group_volatility_p_up": 0.8595719933509827,
+      "component_group_volatility_count": 1.0,
+      "component_pairwise_count": 10.0,
+      "component_pairwise_correlation_mean": 0.2796020286364403,
+      "component_pairwise_correlation_max": 0.6814024812117887,
+      "component_pairwise_correlation_min": 0.0284921850580188,
+      "component_pairwise_probability_gap_mean": 0.26707453935010983,
+      "component_pairwise_probability_gap_max": 0.4362568150169805,
+      "component_pairwise_probability_gap_min": 0.12242498651122985,
+      "direction_ensemble_selected_count": 5.0,
+      "direction_ensemble_rejected_count": 2.0,
+      "direction_ensemble_missing_preferred_group_count": 0.0,
+      "range_expansion_1h": -0.5763301057269563,
+      "distance_from_session_high_8h": 0.2819766279426957,
+      "distance_from_session_low_8h": -0.9076672517174145,
+      "vwap_deviation_8h": -0.3157417682181964,
+      "momentum_slope_2h": -0.6771760010023946,
+      "momentum_slope_4h": -0.21913580451113815,
+      "target_range_overrides": {
+        "stop_loss": {
+          "previous": -2.3757367780210883,
+          "updated": -2.4045261640512727,
+          "reason": "target_range_low"
+        },
+        "take_profit": {
+          "previous": -2.430960814956677,
+          "updated": -2.4141219667266816,
+          "reason": "target_range_high"
+        }
+      },
+      "risk_reward_ratio": 1.0489036440937818,
+      "direction_only_fallback": {
+        "active": false,
+        "side": null,
+        "size_factor": 0.0,
+        "stop_loss_fallback": null,
+        "take_profit_fallback": null,
+        "reason": "not_configured",
+        "cooldown_active": false
+      },
+      "trade_decision": {
+        "enabled": true,
+        "triggered": false,
+        "proposed_signal_ensemble": 0,
+        "proposed_trade_action": "hold",
+        "trade_probability": 0.41661968030252367,
+        "threshold": 0.5495,
+        "threshold_source": "default",
+        "expected_net": 5.581419265544995e-05,
+        "expected_net_valid": true,
+        "expected_net_raw": -0.003898092863402418,
+        "expected_net_raw_calibrated": -0.0006318816562681153,
+        "expected_net_oof": 5.581419265544995e-05,
+        "oof_expected_value_mode": "max_with_raw_calibrated",
+        "use_oof_expected_value": true,
+        "positive_oof_envelope": {
+          "available": true,
+          "positive_bin_count": 5,
+          "populated_bin_count": 6,
+          "has_positive_bin": true,
+          "in_positive_bin": true,
+          "matched_populated_bin": true,
+          "matched_positive_bin": true,
+          "matched_bin_mean_ret_net": 5.581419265544995e-05,
+          "matched_bin_samples": 16,
+          "best_positive_mean_ret_net": 0.0008771958608121939
+        },
+        "positive_oof_envelope_mode": "populated_bin_sign",
+        "enforce_positive_oof_envelope": true,
+        "allow_raw_ev_fallback_when_no_positive_oof_bin": true,
+        "raw_ev_fallback_quantile": 0.9,
+        "raw_ev_fallback_threshold": null,
+        "raw_ev_fallback_pass": false,
+        "edge_over_fee": -0.00024418580734455,
+        "direction_ret_aligned": false,
+        "replace_threshold_rule": true,
+        "weak_band_veto": {
+          "enabled": false,
+          "triggered": false,
+          "reason": "disabled"
+        },
+        "midband_veto": {
+          "enabled": true,
+          "triggered": false,
+          "reason": "disabled"
+        },
+        "feature_snapshot": {
+          "p_up": 0.8446259956028386,
+          "raw_p_up": 0.7431399662958424,
+          "ret_pred": -0.002501611365005374,
+          "expected_value_proxy": -0.00211292598977904,
+          "abs_ret_pred": 0.002501611365005374,
+          "raw_calibrated_probability_gap": 0.10148602930699613,
+          "probability_alignment_gap": 0.10148602930699613,
+          "raw_p_up_ret_mismatch": 1.0,
+          "p_up_ret_mismatch": 1.0,
+          "raw_p_up_direction_mismatch": 0.0,
+          "p_up_direction_mismatch": 0.0,
+          "ret_projected_price_consensus": 0.0,
+          "probability_calibration_guard_applied": 0.0,
+          "probability_calibration_used_regime_key": 1.0,
+          "confidence_score": 0.5492493407591927,
+          "position_size": 0.11453323771002605,
+          "volatility_realized_24h": 0.0,
+          "volatility_ewm_24h": 9.574786348678089e-75,
+          "volatility_garch_like": 0.003162277660168382,
+          "range_expansion_1h": -0.5763301057269563,
+          "distance_from_session_high_8h": 0.2819766279426957,
+          "distance_from_session_low_8h": -0.9076672517174145,
+          "vwap_deviation_8h": -0.3157417682181964,
+          "momentum_slope_2h": -0.6771760010023946,
+          "momentum_slope_4h": -0.21913580451113815,
+          "confluence_support_ratio": 0.0,
+          "confluence_short_term_ratio": 0.0,
+          "confluence_mid_term_ratio": 0.0,
+          "confluence_direction_matches_dominant": 0.0,
+          "horizon_consensus_support_ratio": 0.0,
+          "horizon_directional_agreement_ratio": 0.0,
+          "horizon_directional_disagreement_count": 0.0,
+          "horizon_short_term_alignment_ratio": 0.0,
+          "horizon_mid_term_alignment_ratio": 0.0,
+          "horizon_weighted_p_up": 0.8446259956028386,
+          "horizon_weighted_ret_pred": -0.002501611365005374,
+          "horizon_p_up_dispersion": 0.0,
+          "horizon_bias_conflict": 0.0,
+          "incumbent_signal_reference": 0.0,
+          "candidate_only_reference": 0.0,
+          "candidate_incumbent_disagreement": 0.0,
+          "regime_is_trend": 0.0,
+          "regime_is_neutral": 1.0,
+          "regime_is_chop": 0.0,
+          "component_count": 10.0,
+          "component_group_count": 5.0,
+          "component_probability_std": 0.12834211196672618,
+          "component_probability_range": 0.3671208940595727,
+          "component_mean_abs_gap": 0.10939646177121713,
+          "component_max_abs_gap": 0.2336497938666745,
+          "component_entropy": 0.733682309289812,
+          "component_agreement_ratio": 1.0,
+          "component_disagreement_ratio": 0.0,
+          "component_group_attention_p_up": 0.8837389349937439,
+          "component_group_attention_count": 1.0,
+          "component_group_recurrent_p_up": 0.7831433296203614,
+          "component_group_recurrent_count": 5.0,
+          "component_group_regime_p_up": 0.6157424307353273,
+          "component_group_regime_count": 1.0,
+          "component_group_tree_p_up": 0.6556973893120716,
+          "component_group_tree_count": 2.0,
+          "component_group_volatility_p_up": 0.8595719933509827,
+          "component_group_volatility_count": 1.0
+        },
+        "pre_upstream_gate_triggered": false,
+        "blocked": true,
+        "blocking_reason": "forecast_coherence_gate",
+        "upstream_gate_reasons": [
+          "forecast_coherence_gate"
+        ]
+      },
+      "confidence_filter_triggered": false,
+      "abstention": {
+        "enabled": true,
+        "triggered": false,
+        "reason": "already_hold",
+        "expected_value_used": 5.581419265544995e-05,
+        "expected_value_source": "trade_decision_expected_net"
+      },
+      "uncertainty": {
+        "available": false
+      },
+      "forecast_coherence": {
+        "enabled": true,
+        "evaluated": true,
+        "exclude_from_voting": true,
+        "direction_side": "up",
+        "ret_pred_side": "down",
+        "projected_price_side": "neutral",
+        "p_up_side": "up",
+        "triggered": true,
+        "reasons": [
+          "direction_ret_mismatch",
+          "p_up_ret_mismatch"
+        ],
+        "advisory_reasons": [],
+        "low_trust": false,
+        "consensus_relief_applied": false
+      },
+      "trust_status": "low_trust",
+      "trust_reasons": [
+        "metadata_train_val_gap"
+      ],
+      "excluded_from_voting": false,
+      "voting_weight_after_trust": 0.5,
+      "trust_hardening_action": "deweight",
+      "trust_hardening_changed_outcome": false,
+      "market_price": -2.409209548115267,
+      "execution_prior_provenance": {
+        "analytics_source": "unavailable",
+        "matched_regime": null,
+        "volatility_bucket": null,
+        "bucket_threshold": null,
+        "sample_count": 0,
+        "stop_source": null,
+        "stop_adjustment_type": null,
+        "target_source": "existing_or_projection"
+      },
+      "bias_score": 1.2195110147629544,
+      "execution_score": 1.2195110147629544,
+      "bias_support_horizons": [
+        "12h"
+      ],
+      "bias_support_is_8h_standalone": false,
+      "execution_plan": {
+        "enabled": true,
+        "bias_direction": "up",
+        "bias_alignment_ratio": 1.0,
+        "execution_alignment_ratio": 1.0,
+        "bias_score": 1.2195110147629544,
+        "execution_score": 1.2195110147629544,
+        "confluence_tier": "low",
+        "status": "rejected",
+        "reason": "forecast_coherence_gate",
+        "side": "long",
+        "entry_mode": "disabled",
+        "pending_trade_action": "long",
+        "partial_take_profit": null,
+        "time_stop": null,
+        "trailing_stop": null,
+        "analytics": {
+          "available": false
+        },
+        "structure": null,
+        "stop_management": null
+      }
+    },
+    "12h": {
+      "timestamp": "2026-05-16T21:00:00Z",
+      "horizon_hours": 12.0,
+      "close": -2.409209548115267,
+      "entry_price": -2.409209548115267,
+      "p_up": 0.9464431412208391,
+      "p_trend_ignition": 0.0,
+      "ignition_state": 0,
+      "ignition_cooldown_active": false,
+      "ret_pred": 0.028343578800559044,
+      "projected_price": -2.4784721063515587,
+      "signal_ensemble": 0,
+      "signal_dir_only": 1,
+      "direction_next": "up",
+      "trade_action": "hold",
+      "confidence_score": 0.9357317694650069,
+      "position_size": 0.2689629871878202,
+      "confidence_min": 0.33,
+      "confidence_min_source": "default",
+      "position_size_cap": 0.35,
+      "p_up_components": {
+        "transformer": 0.9831475615501404,
+        "lstm": 0.9965659976005554,
+        "bilstm": 0.9958730340003967,
+        "gru": 0.9848628640174866,
+        "cnn_lstm": 0.9434040188789368,
+        "cnn_bilstm": 0.9827151894569397,
+        "garch_lstm": 0.9806210398674011,
+        "lgbm": 0.5249666847139258,
+        "xgb": 0.5999224185943604,
+        "regime_logit": 0.5710541475608176
+      },
+      "direction_ensemble": {
+        "selected_models": [
+          "xgb",
+          "transformer",
+          "regime_logit",
+          "lgbm",
+          "garch_lstm"
+        ],
+        "selected_groups": [
+          "tree",
+          "attention",
+          "regime",
+          "tree",
+          "volatility"
+        ],
+        "missing_preferred_groups": [],
+        "effective_weights": {
+          "xgb": 1.5,
+          "transformer": 1.05,
+          "regime_logit": 0.55,
+          "lgbm": 1.0,
+          "garch_lstm": 0.65
+        },
+        "base_weights": {
+          "transformer": 1.05,
+          "lstm": 0.3,
+          "bilstm": 0.0,
+          "gru": 0.5,
+          "cnn_lstm": 0.0,
+          "cnn_bilstm": 0.0,
+          "garch_lstm": 0.65,
+          "lgbm": 1.0,
+          "xgb": 1.5,
+          "regime_logit": 0.55
+        },
+        "rejected_models": [
+          {
+            "name": "gru",
+            "reason": "active_cap"
+          },
+          {
+            "name": "lstm",
+            "reason": "active_cap"
+          }
+        ],
+        "pairwise": [
+          {
+            "left": "xgb",
+            "right": "transformer",
+            "correlation": 0.08653260245973865,
+            "mean_abs_probability_gap": 0.23650342334682742,
+            "history_points": 96
+          },
+          {
+            "left": "xgb",
+            "right": "regime_logit",
+            "correlation": 0.02198007444055876,
+            "mean_abs_probability_gap": 0.26249176222856146,
+            "history_points": 96
+          },
+          {
+            "left": "transformer",
+            "right": "regime_logit",
+            "correlation": -0.07664870899692022,
+            "mean_abs_probability_gap": 0.44386374776315335,
+            "history_points": 96
+          },
+          {
+            "left": "xgb",
+            "right": "lgbm",
+            "correlation": 0.23684803506012483,
+            "mean_abs_probability_gap": 0.2864893396112577,
+            "history_points": 96
+          },
+          {
+            "left": "transformer",
+            "right": "lgbm",
+            "correlation": 0.2465718684163189,
+            "mean_abs_probability_gap": 0.4716914391273514,
+            "history_points": 96
+          },
+          {
+            "left": "regime_logit",
+            "right": "lgbm",
+            "correlation": 0.17936333085784734,
+            "mean_abs_probability_gap": 0.10574082203458098,
+            "history_points": 96
+          },
+          {
+            "left": "xgb",
+            "right": "garch_lstm",
+            "correlation": 0.13229052119624557,
+            "mean_abs_probability_gap": 0.24433841866751513,
+            "history_points": 96
+          },
+          {
+            "left": "transformer",
+            "right": "garch_lstm",
+            "correlation": 0.15605695335516767,
+            "mean_abs_probability_gap": 0.09283897078906496,
+            "history_points": 96
+          },
+          {
+            "left": "regime_logit",
+            "right": "garch_lstm",
+            "correlation": 0.2636950807098808,
+            "mean_abs_probability_gap": 0.4663098038569822,
+            "history_points": 96
+          },
+          {
+            "left": "lgbm",
+            "right": "garch_lstm",
+            "correlation": 0.05456631516670637,
+            "mean_abs_probability_gap": 0.5044494485870449,
+            "history_points": 96
+          }
+        ],
+        "policy_applied": true,
+        "component_summary": {
+          "component_count": 10.0,
+          "component_group_count": 5.0,
+          "component_probability_std": 0.19174825986027733,
+          "component_probability_range": 0.4715993128866296,
+          "component_mean_abs_gap": 0.1745993272006369,
+          "component_max_abs_gap": 0.33134661091017015,
+          "component_entropy": 0.38404684549895274,
+          "component_agreement_ratio": 1.0,
+          "component_disagreement_ratio": 0.0,
+          "component_group_attention_p_up": 0.9831475615501404,
+          "component_group_attention_count": 1.0,
+          "component_group_recurrent_p_up": 0.980684220790863,
+          "component_group_recurrent_count": 5.0,
+          "component_group_regime_p_up": 0.5710541475608176,
+          "component_group_regime_count": 1.0,
+          "component_group_tree_p_up": 0.5624445516541431,
+          "component_group_tree_count": 2.0,
+          "component_group_volatility_p_up": 0.9806210398674011,
+          "component_group_volatility_count": 1.0,
+          "component_pairwise_count": 10.0,
+          "component_pairwise_correlation_mean": 0.13012560726656686,
+          "component_pairwise_correlation_max": 0.2636950807098808,
+          "component_pairwise_correlation_min": -0.07664870899692022,
+          "component_pairwise_probability_gap_mean": 0.31147171760123393,
+          "component_pairwise_probability_gap_max": 0.5044494485870449,
+          "component_pairwise_probability_gap_min": 0.09283897078906496,
+          "direction_ensemble_selected_count": 5.0,
+          "direction_ensemble_rejected_count": 2.0,
+          "direction_ensemble_missing_preferred_group_count": 0.0
+        }
+      },
+      "stop_loss": -2.4173328907606533,
+      "take_profit": -2.394993698485841,
+      "expected_value": 0.025744198046912005,
+      "thresholds": {
+        "p_up_min": 0.4,
+        "ret_min": 0.0,
+        "p_up_min_effective": 0.4,
+        "ret_min_effective": 0.0,
+        "adaptive_scale": 1.0
+      },
+      "regime_state": "neutral",
+      "probability_calibration": {
+        "requested_key": "12h@neutral",
+        "applied_key": "12h@neutral",
+        "used_regime_key": true,
+        "fallback_to_base": false,
+        "raw_probability": 0.7176081493274472,
+        "resolved_probability": 0.9464431412208391,
+        "absolute_gap": 0.22883499189339185,
+        "forecast_alignment_guard": null,
+        "raw_side": "up",
+        "resolved_side": "up",
+        "ret_pred_side": "up",
+        "projected_price_side": "neutral",
+        "forecast_consensus_side": "neutral",
+        "guard_applied": false
+      },
+      "regime_weight_overrides": {
+        "model_overrides": {
+          "transformer": 1.05,
+          "lstm": 0.3,
+          "bilstm": 0.0,
+          "gru": 0.5,
+          "cnn_lstm": 0.0,
+          "cnn_bilstm": 0.0,
+          "garch_lstm": 0.65,
+          "regime_logit": 0.55,
+          "lgbm": 1.0,
+          "xgb": 1.5
+        },
+        "family_multipliers": {
+          "tree": 1.15,
+          "attention": 1.05,
+          "recurrent": 0.8,
+          "volatility": 0.95,
+          "regime": 1.0
+        }
+      },
+      "projected_high": -2.419151634880833,
+      "projected_low": -2.394813914894078,
+      "projected_high_confidence": 0.7738008831697987,
+      "projected_low_confidence": 0.7254012607846823,
+      "projected_high_rmse": 0.002564406953752041,
+      "projected_low_rmse": 0.0032103031408041716,
+      "projected_high_residual_std": 0.0025593144819140434,
+      "projected_low_residual_std": 0.003210226772353053,
+      "volatility": {
+        "mode": "ceiling",
+        "metric": "volatility_realized_24h",
+        "current": 0.0,
+        "ceiling": null,
+        "multiplier": 1.25,
+        "percentile": null,
+        "calm_percentile": null,
+        "extreme_percentile": null,
+        "triggered": false,
+        "hard_block": false,
+        "snapshot": {
+          "volatility_realized_24h": 0.0,
+          "volatility_ewm_24h": 9.574786348678089e-75,
+          "volatility_realized_72h": 0.0,
+          "volatility_ewm_72h": 1.0115097946898095e-25,
+          "volatility_garch_like": 0.003162277660168382
+        },
+        "p_up_min_effective": 0.4,
+        "ret_min_effective": 0.0
+      },
+      "volatility_flag": false,
+      "gate_trace": [
+        {
+          "stage": "confluence",
+          "reason": "aligned_horizons_below_min|support_ratio_below_min",
+          "triggered": true,
+          "blocking": true
+        },
+        {
+          "stage": "trade_decision",
+          "reason": "confluence_gate",
+          "triggered": true,
+          "blocking": true
+        }
+      ],
+      "raw_p_up": 0.7176081493274472,
+      "raw_calibrated_probability_gap": 0.22883499189339185,
+      "probability_alignment_gap": 0.22883499189339185,
+      "raw_p_up_side": "up",
+      "resolved_p_up_side": "up",
+      "ret_pred_side": "up",
+      "projected_price_side": "neutral",
+      "forecast_consensus_side": "neutral",
+      "raw_p_up_ret_mismatch": 0.0,
+      "p_up_ret_mismatch": 0.0,
+      "raw_p_up_direction_mismatch": 0.0,
+      "p_up_direction_mismatch": 0.0,
+      "ret_projected_price_consensus": 0.0,
+      "probability_calibration_guard_applied": 0.0,
+      "probability_calibration_used_regime_key": 1.0,
+      "direction_output": {
+        "enabled": true,
+        "evaluated": false,
+        "direction": "up",
+        "probability": 0.9464431412208391,
+        "raw_probability": 0.7176081493274472,
+        "neutral_band": 0.0,
+        "source": "trade_probability",
+        "calibration": {
+          "requested_key": "12h@neutral",
+          "applied_key": null,
+          "used_regime_key": false,
+          "fallback_to_trade_probability": true,
+          "skipped_due_to_marginal_rerank": false
+        },
+        "marginal_rerank": {
+          "enabled": false,
+          "applied": false,
+          "weight_key": null,
+          "band": null,
+          "component_count": 0,
+          "components_used": {}
+        }
+      },
+      "direction_next_display": "up",
+      "component_count": 10.0,
+      "component_group_count": 5.0,
+      "component_probability_std": 0.19174825986027733,
+      "component_probability_range": 0.4715993128866296,
+      "component_mean_abs_gap": 0.1745993272006369,
+      "component_max_abs_gap": 0.33134661091017015,
+      "component_entropy": 0.38404684549895274,
+      "component_agreement_ratio": 1.0,
+      "component_disagreement_ratio": 0.0,
+      "component_group_attention_p_up": 0.9831475615501404,
+      "component_group_attention_count": 1.0,
+      "component_group_recurrent_p_up": 0.980684220790863,
+      "component_group_recurrent_count": 5.0,
+      "component_group_regime_p_up": 0.5710541475608176,
+      "component_group_regime_count": 1.0,
+      "component_group_tree_p_up": 0.5624445516541431,
+      "component_group_tree_count": 2.0,
+      "component_group_volatility_p_up": 0.9806210398674011,
+      "component_group_volatility_count": 1.0,
+      "component_pairwise_count": 10.0,
+      "component_pairwise_correlation_mean": 0.13012560726656686,
+      "component_pairwise_correlation_max": 0.2636950807098808,
+      "component_pairwise_correlation_min": -0.07664870899692022,
+      "component_pairwise_probability_gap_mean": 0.31147171760123393,
+      "component_pairwise_probability_gap_max": 0.5044494485870449,
+      "component_pairwise_probability_gap_min": 0.09283897078906496,
+      "direction_ensemble_selected_count": 5.0,
+      "direction_ensemble_rejected_count": 2.0,
+      "direction_ensemble_missing_preferred_group_count": 0.0,
+      "range_expansion_1h": -0.5763301057269563,
+      "distance_from_session_high_8h": 0.2819766279426957,
+      "distance_from_session_low_8h": -0.9076672517174145,
+      "vwap_deviation_8h": -0.3157417682181964,
+      "momentum_slope_2h": -0.6771760010023946,
+      "momentum_slope_4h": -0.21913580451113815,
+      "target_range_overrides": {
+        "stop_loss": {
+          "previous": -2.4043499256600205,
+          "updated": -2.394813914894078,
+          "reason": "target_range_low"
+        },
+        "take_profit": {
+          "previous": -2.52902456120949,
+          "updated": -2.419151634880833,
+          "reason": "target_range_high"
+        }
+      },
+      "risk_reward_ratio": 1.75,
+      "direction_only_fallback": {
+        "active": false,
+        "side": null,
+        "size_factor": 0.0,
+        "stop_loss_fallback": null,
+        "take_profit_fallback": null,
+        "reason": "not_configured",
+        "cooldown_active": false
+      },
+      "trade_decision": {
+        "enabled": true,
+        "triggered": false,
+        "proposed_signal_ensemble": 0,
+        "proposed_trade_action": "hold",
+        "trade_probability": 0.5371340889526554,
+        "threshold": 0.5495,
+        "threshold_source": "default",
+        "expected_net": 0.025744198046912005,
+        "expected_net_valid": true,
+        "expected_net_raw": 0.025744198046912005,
+        "expected_net_raw_calibrated": 0.0007609050474450834,
+        "expected_net_oof": 0.0002950617465323187,
+        "oof_expected_value_mode": "max_with_raw_calibrated",
+        "use_oof_expected_value": true,
+        "positive_oof_envelope": {
+          "available": true,
+          "positive_bin_count": 5,
+          "populated_bin_count": 6,
+          "has_positive_bin": true,
+          "in_positive_bin": true,
+          "matched_populated_bin": true,
+          "matched_positive_bin": true,
+          "matched_bin_mean_ret_net": 0.0002950617465323187,
+          "matched_bin_samples": 16,
+          "best_positive_mean_ret_net": 0.0008771958608121939
+        },
+        "positive_oof_envelope_mode": "populated_bin_sign",
+        "enforce_positive_oof_envelope": true,
+        "allow_raw_ev_fallback_when_no_positive_oof_bin": true,
+        "raw_ev_fallback_quantile": 0.9,
+        "raw_ev_fallback_threshold": null,
+        "raw_ev_fallback_pass": false,
+        "edge_over_fee": 0.025444198046912003,
+        "direction_ret_aligned": true,
+        "replace_threshold_rule": true,
+        "weak_band_veto": {
+          "enabled": false,
+          "triggered": false,
+          "reason": "disabled"
+        },
+        "midband_veto": {
+          "enabled": true,
+          "triggered": false,
+          "reason": "disabled"
+        },
+        "feature_snapshot": {
+          "p_up": 0.9464431412208391,
+          "raw_p_up": 0.7176081493274472,
+          "ret_pred": 0.028343578800559044,
+          "expected_value_proxy": 0.026825585753441482,
+          "abs_ret_pred": 0.028343578800559044,
+          "raw_calibrated_probability_gap": 0.22883499189339185,
+          "probability_alignment_gap": 0.22883499189339185,
+          "raw_p_up_ret_mismatch": 0.0,
+          "p_up_ret_mismatch": 0.0,
+          "raw_p_up_direction_mismatch": 0.0,
+          "p_up_direction_mismatch": 0.0,
+          "ret_projected_price_consensus": 0.0,
+          "probability_calibration_guard_applied": 0.0,
+          "probability_calibration_used_regime_key": 1.0,
+          "confidence_score": 0.9357317694650069,
+          "position_size": 0.3164270437503767,
+          "volatility_realized_24h": 0.0,
+          "volatility_ewm_24h": 9.574786348678089e-75,
+          "volatility_garch_like": 0.003162277660168382,
+          "range_expansion_1h": -0.5763301057269563,
+          "distance_from_session_high_8h": 0.2819766279426957,
+          "distance_from_session_low_8h": -0.9076672517174145,
+          "vwap_deviation_8h": -0.3157417682181964,
+          "momentum_slope_2h": -0.6771760010023946,
+          "momentum_slope_4h": -0.21913580451113815,
+          "confluence_support_ratio": 0.5,
+          "confluence_short_term_ratio": 0.0,
+          "confluence_mid_term_ratio": 1.0,
+          "confluence_direction_matches_dominant": 0.0,
+          "horizon_consensus_support_ratio": 0.0,
+          "horizon_directional_agreement_ratio": 0.0,
+          "horizon_directional_disagreement_count": 0.0,
+          "horizon_short_term_alignment_ratio": 0.0,
+          "horizon_mid_term_alignment_ratio": 0.0,
+          "horizon_weighted_p_up": 0.9464431412208391,
+          "horizon_weighted_ret_pred": 0.028343578800559044,
+          "horizon_p_up_dispersion": 0.0,
+          "horizon_bias_conflict": 0.0,
+          "incumbent_signal_reference": 0.0,
+          "candidate_only_reference": 0.0,
+          "candidate_incumbent_disagreement": 0.0,
+          "regime_is_trend": 0.0,
+          "regime_is_neutral": 1.0,
+          "regime_is_chop": 0.0,
+          "component_count": 10.0,
+          "component_group_count": 5.0,
+          "component_probability_std": 0.19174825986027733,
+          "component_probability_range": 0.4715993128866296,
+          "component_mean_abs_gap": 0.1745993272006369,
+          "component_max_abs_gap": 0.33134661091017015,
+          "component_entropy": 0.38404684549895274,
+          "component_agreement_ratio": 1.0,
+          "component_disagreement_ratio": 0.0,
+          "component_group_attention_p_up": 0.9831475615501404,
+          "component_group_attention_count": 1.0,
+          "component_group_recurrent_p_up": 0.980684220790863,
+          "component_group_recurrent_count": 5.0,
+          "component_group_regime_p_up": 0.5710541475608176,
+          "component_group_regime_count": 1.0,
+          "component_group_tree_p_up": 0.5624445516541431,
+          "component_group_tree_count": 2.0,
+          "component_group_volatility_p_up": 0.9806210398674011,
+          "component_group_volatility_count": 1.0
+        },
+        "pre_upstream_gate_triggered": false,
+        "blocked": true,
+        "blocking_reason": "confluence_gate",
+        "upstream_gate_reasons": [
+          "confluence_gate"
+        ]
+      },
+      "confidence_filter_triggered": false,
+      "abstention": {
+        "enabled": true,
+        "triggered": false,
+        "reason": "already_hold",
+        "expected_value_used": 0.025744198046912005,
+        "expected_value_source": "trade_decision_expected_net"
+      },
+      "uncertainty": {
+        "available": false
+      },
+      "forecast_coherence": {
+        "enabled": true,
+        "evaluated": true,
+        "exclude_from_voting": false,
+        "direction_side": "up",
+        "ret_pred_side": "up",
+        "projected_price_side": "neutral",
+        "p_up_side": "up",
+        "triggered": false,
+        "reasons": [],
+        "advisory_reasons": [],
+        "low_trust": false,
+        "consensus_relief_applied": false
+      },
+      "trust_status": "trusted",
+      "trust_reasons": [],
+      "excluded_from_voting": false,
+      "voting_weight_after_trust": 1.0,
+      "trust_hardening_action": "none",
+      "trust_hardening_changed_outcome": false,
+      "confluence": {
+        "enabled": true,
+        "dominant_direction": "neutral",
+        "dominant_ratio": 0.5,
+        "aligned_horizons": 1,
+        "total_horizons": 2,
+        "support_ratio": 0.5,
+        "short_term_ratio": null,
+        "mid_term_ratio": 1.0,
+        "triggered": true,
+        "reasons": [
+          "aligned_horizons_below_min",
+          "support_ratio_below_min"
+        ]
+      },
+      "confluence_support_ratio": 0.5,
+      "confluence_short_term_ratio": null,
+      "confluence_mid_term_ratio": 1.0,
+      "confluence_direction_matches_dominant": 0.0,
+      "market_price": -2.409209548115267,
+      "execution_prior_provenance": {
+        "analytics_source": "volatility_bucket",
+        "matched_regime": null,
+        "volatility_bucket": "low_vol",
+        "bucket_threshold": 0.0,
+        "sample_count": 0,
+        "stop_source": "atr_fallback",
+        "stop_adjustment_type": "atr_fallback",
+        "target_source": "existing_take"
+      },
+      "bias_score": 1.2195110147629544,
+      "execution_score": 1.2195110147629544,
+      "bias_support_horizons": [
+        "12h"
+      ],
+      "bias_support_is_8h_standalone": false,
+      "disagreement_severity": {
+        "enabled": true,
+        "score": 0.2,
+        "triggered": false,
+        "pullback_only": false,
+        "reasons": [
+          "alignment_gap"
+        ],
+        "short_term_direction": "neutral",
+        "mid_term_direction": "up",
+        "short_term_alignment_ratio": 0.0,
+        "mid_term_alignment_ratio": 1.0
+      },
+      "execution_plan": {
+        "enabled": true,
+        "bias_direction": "up",
+        "bias_alignment_ratio": 1.0,
+        "execution_alignment_ratio": 1.0,
+        "bias_score": 1.2195110147629544,
+        "execution_score": 1.2195110147629544,
+        "confluence_tier": "medium",
+        "status": "bias_only_ready",
+        "reason": "confluence_gate",
+        "side": "long",
+        "entry_mode": "pullback",
+        "pending_trade_action": "long",
+        "partial_take_profit": {
+          "enabled": true,
+          "tp1_price": -2.401086205469881,
+          "tp1_size_fraction": 0.5,
+          "tp2_price": -2.394993698485841,
+          "move_stop_to_break_even": true
+        },
+        "time_stop": {
+          "enabled": true,
+          "bars": 2,
+          "reason": "stagnation_exit"
+        },
+        "trailing_stop": {
+          "enabled": true,
+          "activation_price": -2.401086205469881,
+          "trail_buffer": 0.012185013968079559
+        },
+        "analytics": {
+          "available": false,
+          "sample_count": 0,
+          "mae_distance": null,
+          "mfe_distance": null,
+          "peak_step_p50": null,
+          "adverse_step_p50": null,
+          "source": "volatility_bucket",
+          "matched_regime": null,
+          "volatility_bucket": "low_vol",
+          "bucket_threshold": 0.0
+        },
+        "structure": {
+          "session_high": -2.3972679728950825,
+          "session_low": -2.392886321198621,
+          "swing_high": -2.403564709292621,
+          "swing_low": -2.392886321198621,
+          "vwap": -2.409209548115267,
+          "atr_distance": 0.016246685290772746
+        },
+        "stop_management": {
+          "source": "atr_fallback",
+          "adjustment": {
+            "applied": true,
+            "type": "atr_fallback",
+            "reason": "no_valid_stop_candidates",
+            "risk_unit_before": null,
+            "risk_unit_after": 0.008123342645386373
+          },
+          "target_range_refinement": null,
+          "stop_scaling": {
+            "applied": false,
+            "reason": "not_triggered",
+            "multiplier": 1.0,
+            "risk_unit_before": 0.008123342645386373,
+            "risk_unit_after": 0.008123342645386373
+          }
+        },
+        "preferred_entry_price": -2.409209548115267,
+        "entry_zone_low": -2.41327121943796,
+        "entry_zone_high": -2.405147876792574,
+        "entry_ready": true,
+        "vwap_reference": -2.409209548115267,
+        "pullback_quality": {
+          "enabled": false,
+          "score": 1.0,
+          "min_score": 0.0,
+          "triggered": false,
+          "vwap_deviation_atr": 0.0,
+          "range_expansion_1h": -0.5763301057269563,
+          "candle_expansion_ratio": 1.0
+        },
+        "disagreement_severity": {
+          "enabled": true,
+          "score": 0.2,
+          "triggered": false,
+          "pullback_only": false,
+          "reasons": [
+            "alignment_gap"
+          ],
+          "short_term_direction": "neutral",
+          "mid_term_direction": "up",
+          "short_term_alignment_ratio": 0.0,
+          "mid_term_alignment_ratio": 1.0
+        },
+        "target_management": {
+          "source": "existing_take",
+          "adapted_to_mfe_headroom": false,
+          "analytics_available": false,
+          "original_rr_floor": 1.75,
+          "effective_rr_floor": 1.75,
+          "analytic_mfe_reward": -0.0,
+          "projection_reward": 0.0,
+          "selected_reward": 0.014215849629426153,
+          "dynamic_rr_floor_applied": false,
+          "dynamic_realized_rr_ratio": null
+        }
+      }
+    }
+  },
+  "execution_prior_summary": {
+    "analytics_source_counts": {
+      "unavailable": 3,
+      "volatility_bucket": 1
+    },
+    "stop_source_counts": {
+      "unknown": 3,
+      "atr_fallback": 1
+    },
+    "target_source_counts": {
+      "existing_or_projection": 3,
+      "existing_take": 1
+    }
+  },
+  "blocked_trade_analytics": {
+    "total_horizons": 4,
+    "ready_total": 0,
+    "waiting_pullback_total": 0,
+    "bias_only_total": 1,
+    "blocked_total": 4,
+    "status_counts": {
+      "rejected": 3,
+      "bias_only_ready": 1
+    },
+    "reason_counts": {
+      "bias_direction_conflict": 1,
+      "forecast_coherence_gate": 2,
+      "confluence_gate": 1
+    },
+    "gate_stage_counts": {
+      "trade_decision": 4,
+      "forecast_coherence": 2,
+      "confluence": 1
+    },
+    "gate_reason_counts": {
+      "threshold_or_envelope_veto": 1,
+      "direction_ret_mismatch|p_up_ret_mismatch": 2,
+      "forecast_coherence_gate": 2,
+      "aligned_horizons_below_min|support_ratio_below_min": 1,
+      "confluence_gate": 1
+    },
+    "by_horizon": {
+      "15m": {
+        "status_counts": {
+          "rejected": 1
+        },
+        "reason_counts": {
+          "bias_direction_conflict": 1
+        },
+        "trade_action": "hold",
+        "gate_stage_counts": {
+          "trade_decision": 1
+        },
+        "gate_reason_counts": {
+          "threshold_or_envelope_veto": 1
+        }
+      },
+      "1h": {
+        "status_counts": {
+          "rejected": 1
+        },
+        "reason_counts": {
+          "forecast_coherence_gate": 1
+        },
+        "trade_action": "hold",
+        "gate_stage_counts": {
+          "forecast_coherence": 1,
+          "trade_decision": 1
+        },
+        "gate_reason_counts": {
+          "direction_ret_mismatch|p_up_ret_mismatch": 1,
+          "forecast_coherence_gate": 1
+        }
+      },
+      "4h": {
+        "status_counts": {
+          "rejected": 1
+        },
+        "reason_counts": {
+          "forecast_coherence_gate": 1
+        },
+        "trade_action": "hold",
+        "gate_stage_counts": {
+          "forecast_coherence": 1,
+          "trade_decision": 1
+        },
+        "gate_reason_counts": {
+          "direction_ret_mismatch|p_up_ret_mismatch": 1,
+          "forecast_coherence_gate": 1
+        }
+      },
+      "12h": {
+        "status_counts": {
+          "bias_only_ready": 1
+        },
+        "reason_counts": {
+          "confluence_gate": 1
+        },
+        "trade_action": "hold",
+        "gate_stage_counts": {
+          "confluence": 1,
+          "trade_decision": 1
+        },
+        "gate_reason_counts": {
+          "aligned_horizons_below_min|support_ratio_below_min": 1,
+          "confluence_gate": 1
+        }
+      }
+    }
+  },
+  "prompt_ready_summary": {
+    "market_outlook_strategy": {
+      "selected_direction": "Long",
+      "preferred_horizon": "12h",
+      "confidence_level": "High",
+      "pending_trade_action": "long",
+      "tradeable": false,
+      "execution_state": "bias_only_ready"
+    },
+    "trade_execution_plan_usd": {
+      "entry_point": -2.409209548115267,
+      "stop_loss": -2.4173328907606533,
+      "take_profit": -2.394993698485841,
+      "risk_reward_ratio": 1.75
+    },
+    "analysis_summary": {
+      "trend_forecast": [
+        "15m: down, projected price $78,193.00 (bias_direction_conflict)",
+        "1h: up, projected price $-2.41 (coherence blocked)",
+        "4h: up, projected range $-2.40 to $-2.41 (coherence blocked)",
+        "12h: up, projected range $-2.39 to $-2.42 (bias ready, confluence gate)"
+      ],
+      "rationale": "Preferred horizon 12h carries the strongest post-policy bias. The horizon is structurally aligned, but the upstream action remains hold. Current blocker: confluence_gate.",
+      "blocking_factors": [
+        "bias_direction_conflict",
+        "direction_ret_mismatch",
+        "p_up_ret_mismatch"
+      ]
+    },
+    "operator_summary_compact": {
+      "market_bias": "Long",
+      "preferred_horizon": "12h",
+      "recommended_operator_action": "bias_only",
+      "primary_blocker": "bias_direction_conflict",
+      "support_horizons": [
+        "1h",
+        "4h",
+        "12h"
+      ],
+      "max_disagreement_score": 0.2,
+      "caution_flags": []
+    },
+    "formatted_response": "Market Outlook & Strategy\nSelected Direction: Long\nPreferred Horizon: 12h\nConfidence Level: High\nPending Trade Action: Long\n\nTrade Execution Plan (USD)\nEntry Point: $-2.41\nStop Loss: $-2.42\nTake Profit: $-2.39\nRisk/Reward Ratio: 1.75\n\nAnalysis Summary\nTrend Forecast: 15m: down, projected price $78,193.00 (bias_direction_conflict); 1h: up, projected price $-2.41 (coherence blocked); 4h: up, projected range $-2.40 to $-2.41 (coherence blocked); 12h: up, projected range $-2.39 to $-2.42 (bias ready, confluence gate)\nRationale: Preferred horizon 12h carries the strongest post-policy bias. The horizon is structurally aligned, but the upstream action remains hold. Current blocker: confluence_gate."
+  }
+}
