@@ -121,6 +121,39 @@ This wrapper:
 - records pipeline events under `artifacts/runtime_runs/<run-id>/`
 - still delegates actual workflow steps to `src.scripts.run_reliability_workflow`
 
+### Downtrend Bias Remediation
+
+Use this workflow when the live or research stack shows persistent long bias during a drawdown and you want a recent-history calibration candidate without replacing the full default calibration map.
+
+Recommended command:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_downtrend_bias_remediation \
+  --lookback-hours 1080 \
+  --auto-expand-lookback \
+  --max-lookback-hours 4320
+```
+
+Current behavior:
+
+- builds a recent labeled multi-horizon backtest from prediction history and archived runtime runs
+- audits probability-branch alignment and marginal direction calibration before fitting a recent-history candidate
+- trains a raw candidate calibration artifact, then filters it by allowed horizons and merges those overrides onto the baseline calibration map from `artifacts/models/platt_calibration.json`
+- defaults the remediation overlay to `4h` and `8h` horizons so unsafe `12h` overrides are not emitted into the deployable candidate by default
+
+Important outputs:
+
+- merged deployable candidate: `artifacts/analysis/downtrend_bias_remediation/recent_downtrend_calibration_candidate.json`
+- raw trainer output before filtering/merge: `artifacts/analysis/downtrend_bias_remediation/recent_downtrend_calibration_candidate_raw.json`
+- coverage and suppression diagnostics: `artifacts/analysis/downtrend_bias_remediation/recent_downtrend_calibration_coverage.json`
+- workflow manifest: `artifacts/analysis/downtrend_bias_remediation/workflow_manifest.json`
+
+Operator note:
+
+- the merged candidate is the artifact you should pass to `--platt-calibration` for shadow or replay validation
+- do not use the raw candidate directly for partial remediation, because omitted horizons would otherwise lose their baseline calibration entries
+- when you want realized-row validation of the overlay candidate, write calibrated labeled CSVs and compare them with `src.scripts.evaluate_calibration_robustness`; the current remediation workflow already writes the labeled input needed for that comparison
+
 ### Legacy Full-Surface Refresh Script
 
 Use this only when you need options not exposed by the narrower wrappers:

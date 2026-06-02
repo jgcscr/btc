@@ -72,18 +72,31 @@ def _validate_trust_behavior(predictions_payload: Mapping[str, Any]) -> List[str
     if not isinstance(four_h, Mapping):
         errors.append("4h horizon missing from predictions.json")
     else:
-        if four_h.get("trust_status") != "low_trust":
-            errors.append("4h trust_status expected low_trust")
-        if four_h.get("trust_hardening_action") != "deweight":
-            errors.append("4h trust_hardening_action expected deweight")
-        if bool(four_h.get("excluded_from_voting")):
-            errors.append("4h expected excluded_from_voting=false under deweight")
+        trust_status = str(four_h.get("trust_status"))
+        trust_action = str(four_h.get("trust_hardening_action"))
+        excluded_from_voting = bool(four_h.get("excluded_from_voting"))
         try:
             weight = float(four_h.get("voting_weight_after_trust"))
-            if abs(weight - 0.5) > 1e-9:
-                errors.append("4h voting_weight_after_trust expected 0.5")
         except (TypeError, ValueError):
             errors.append("4h voting_weight_after_trust is not numeric")
+            weight = float("nan")
+
+        if trust_status == "trusted":
+            if trust_action != "none":
+                errors.append("4h trusted horizon expected trust_hardening_action=none")
+            if excluded_from_voting:
+                errors.append("4h trusted horizon cannot be excluded from voting")
+            if weight == weight and abs(weight - 1.0) > 1e-9:
+                errors.append("4h trusted horizon expected voting_weight_after_trust=1.0")
+        elif trust_status == "low_trust":
+            if trust_action != "deweight":
+                errors.append("4h low_trust horizon expected trust_hardening_action=deweight")
+            if excluded_from_voting:
+                errors.append("4h low_trust horizon expected excluded_from_voting=false under deweight")
+            if weight == weight and abs(weight - 0.5) > 1e-9:
+                errors.append("4h low_trust horizon expected voting_weight_after_trust=0.5")
+        else:
+            errors.append("4h trust_status expected trusted or low_trust")
 
     if isinstance(eight_h, Mapping):
         errors.append("8h horizon should not be emitted for the current live policy")

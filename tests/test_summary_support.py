@@ -15,9 +15,11 @@ from src.runtime.summary_support import (
     format_usd_value,
     prompt_direction_label,
     prompt_effective_direction,
+    prompt_entry_vetoed_for_preferred_horizon,
     resolve_degradation_monitoring_policy,
     select_prompt_candidate_entries,
     select_prompt_preferred_entry,
+    suppress_long_bias_for_short_term_downtrend,
     write_prediction_summary,
 )
 from src.runtime.horizon_support import horizon_sort_key
@@ -215,6 +217,78 @@ def test_runtime_summary_wrappers_use_builtin_helpers() -> None:
     assert prompt_payload["market_outlook_strategy"]["preferred_horizon"] == "1h"
     assert degradation_payload["enabled"] is True
     assert degradation_payload["by_horizon"]["1h"]["samples"] == 1
+
+
+def test_prompt_entry_vetoed_for_preferred_horizon_blocks_flip_divergence_and_hard_reasons() -> None:
+    blocked_entry = {
+        "execution_plan": {"status": "rejected", "reason": "forecast_coherence_gate"},
+        "forecast_coherence": {"triggered": True},
+    }
+    flip_entry = {
+        "execution_plan": {"status": "rejected", "reason": "low_execution_confluence"},
+        "raw_p_up": 0.38,
+        "p_up": 0.79,
+    }
+
+    assert prompt_entry_vetoed_for_preferred_horizon(blocked_entry, finite_float_or_none=_finite_float_or_none) is True
+    assert prompt_entry_vetoed_for_preferred_horizon(flip_entry, finite_float_or_none=_finite_float_or_none) is True
+
+
+def test_select_prompt_preferred_entry_suppresses_long_bias_when_short_term_stack_is_weak() -> None:
+    summary = {
+        "15m": {
+            "horizon_hours": 0.25,
+            "direction_next_display": "down",
+            "close": 100.0,
+            "projected_price": 99.0,
+            "confidence_score": 0.8,
+            "execution_plan": {"status": "rejected", "reason": "low_execution_confluence", "confluence_tier": "low"},
+            "forecast_coherence": {"triggered": False},
+        },
+        "1h": {
+            "horizon_hours": 1.0,
+            "direction_next_display": "neutral",
+            "close": 100.0,
+            "projected_price": 99.2,
+            "confidence_score": 0.4,
+            "execution_plan": {"status": "rejected", "reason": "low_execution_confluence", "confluence_tier": "low"},
+            "forecast_coherence": {"triggered": False},
+        },
+        "4h": {
+            "horizon_hours": 4.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.41,
+            "p_up": 0.68,
+            "close": 100.0,
+            "projected_low": 98.5,
+            "confidence_score": 0.7,
+            "execution_plan": {"status": "rejected", "reason": "low_execution_confluence", "confluence_tier": "medium"},
+            "forecast_coherence": {"triggered": False},
+        },
+        "12h": {
+            "horizon_hours": 12.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.39,
+            "p_up": 0.82,
+            "close": 100.0,
+            "projected_low": 97.5,
+            "confidence_score": 0.8,
+            "execution_plan": {"status": "rejected", "reason": "low_execution_confluence", "confluence_tier": "medium"},
+            "forecast_coherence": {"triggered": False},
+        },
+    }
+
+    assert suppress_long_bias_for_short_term_downtrend(summary, finite_float_or_none=_finite_float_or_none) is True
+    preferred_label, preferred_entry, side_profile = select_prompt_preferred_entry(
+        summary,
+        coerce_result_horizon=coerce_result_horizon,
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+    assert preferred_label == "15m"
+    assert preferred_entry is not None
+    assert prompt_effective_direction(preferred_entry) == "down"
+    assert side_profile is not None
 
 
 def test_runtime_scalar_helpers_reject_non_finite_values() -> None:

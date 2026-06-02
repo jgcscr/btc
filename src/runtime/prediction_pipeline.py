@@ -14,6 +14,37 @@ PreparedBundle = tuple[PreparedData, int, float, str]
 SummaryPayload = Dict[str, Dict[str, Any]]
 
 
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _prediction_timestamp_is_stale(
+    signal_ts: str | None,
+    reference_ts: str | None,
+    *,
+    horizon_hours: float,
+    min_allowed_lag_hours: float = 24.0,
+    horizon_lag_multiplier: float = 3.0,
+) -> bool:
+    signal_dt = _parse_iso_timestamp(signal_ts)
+    reference_dt = _parse_iso_timestamp(reference_ts)
+    if signal_dt is None or reference_dt is None:
+        return False
+    lag_hours = (reference_dt - signal_dt).total_seconds() / 3600.0
+    if lag_hours <= 0.0:
+        return False
+    allowed_lag_hours = max(float(min_allowed_lag_hours), float(horizon_hours) * float(horizon_lag_multiplier))
+    return lag_hours > allowed_lag_hours
+
+
 def _active_direction_model_names(direction_configs: Sequence[Mapping[str, Any]]) -> list[str]:
     ordered: list[str] = []
     for entry in direction_configs:
@@ -563,6 +594,12 @@ def _build_prediction_summary(
     execution_contexts: Dict[str, Dict[str, Any]] = {}
     pending_trend_ts: Optional[str] = None
     pending_direction_fallback_ts: Optional[str] = None
+    prepared_timestamps = [bundle[3] for bundle in state.prepared_bundles.values() if len(bundle) >= 4]
+    freshest_prepared_ts = max(
+        prepared_timestamps,
+        key=lambda value: _parse_iso_timestamp(value) or datetime.min.replace(tzinfo=timezone.utc),
+        default=state.stub_ts,
+    )
 
     for horizon in state.normalized_targets:
         profile_key = state.target_profiles.get(horizon)
@@ -576,6 +613,11 @@ def _build_prediction_summary(
 
         candidate = state.resolved_profiles[profile_key]
         prepared, index, close, ts_iso = state.prepared_bundles[profile_key]
+        if _prediction_timestamp_is_stale(ts_iso, freshest_prepared_ts, horizon_hours=float(horizon)):
+            deps.stderr_write(
+                f"Warning: skipping {deps.format_horizon_label(horizon)} horizon because prepared timestamp {ts_iso} is stale versus freshest bundle {freshest_prepared_ts}.\n"
+            )
+            continue
         volatility_snapshot = state.volatility_snapshots.get(profile_key, {})
         row_features = prepared.df_all.iloc[index]
         label = deps.format_horizon_label(horizon)

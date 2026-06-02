@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 from typing import Dict, Any, List
@@ -138,6 +139,104 @@ def _fit_calibrator(p: np.ndarray, y: np.ndarray, method: str) -> Dict[str, Any]
     raise ValueError(f"Unsupported calibration method: {method}")
 
 
+def _apply_calibrator(p: np.ndarray, params: Dict[str, Any]) -> np.ndarray:
+    method = str(params.get("method") or "platt").strip().lower()
+    p_clip = np.clip(np.asarray(p, dtype=float), 1e-6, 1.0 - 1e-6)
+    if method == "platt":
+        a = float(params.get("a", 1.0))
+        b = float(params.get("b", 0.0))
+        z = a * np.log(p_clip / (1.0 - p_clip)) + b
+        return 1.0 / (1.0 + np.exp(-z))
+    if method == "beta":
+        a = float(params.get("a", 1.0))
+        b = float(params.get("b", -1.0))
+        c = float(params.get("c", 0.0))
+        z = a * np.log(p_clip) + b * np.log(1.0 - p_clip) + c
+        return 1.0 / (1.0 + np.exp(-z))
+    if method == "isotonic":
+        x = np.asarray(params.get("x", []), dtype=float)
+        y = np.asarray(params.get("y", []), dtype=float)
+        if x.size >= 2 and y.size == x.size:
+            return np.interp(p_clip, x, y, left=y[0], right=y[-1])
+    return p_clip
+
+
+def _coerce_horizon_hours(label: str) -> float | None:
+    raw = str(label or "").strip().lower()
+    if not raw:
+        return None
+    if raw.endswith("m"):
+        try:
+            minutes = float(raw[:-1])
+        except ValueError:
+            return None
+        return minutes / 60.0
+    if raw.endswith("h"):
+        try:
+            return float(raw[:-1])
+        except ValueError:
+            return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _bearish_remap_guard(
+    p: np.ndarray,
+    y: np.ndarray,
+    params: Dict[str, Any],
+    *,
+    horizon_label: str,
+    higher_horizon_min_hours: float,
+    min_bearish_rows: int,
+    neutral_band: float,
+    max_allowed_uplift: float,
+) -> Dict[str, Any]:
+    horizon_hours = _coerce_horizon_hours(horizon_label)
+    if horizon_hours is None or horizon_hours < float(higher_horizon_min_hours):
+        return {"applied": False, "accepted": True, "reason": "below_higher_horizon_threshold"}
+
+    raw_probability = np.asarray(p, dtype=float)
+    labels = np.asarray(y, dtype=int)
+    bearish_mask = (labels == 0) & (raw_probability < (0.5 - float(neutral_band)))
+    bearish_rows = int(np.sum(bearish_mask))
+    if bearish_rows < int(min_bearish_rows):
+        return {
+            "applied": False,
+            "accepted": True,
+            "reason": "insufficient_bearish_rows",
+            "bearish_rows": bearish_rows,
+        }
+
+    calibrated_probability = _apply_calibrator(raw_probability[bearish_mask], params)
+    bullish_flip_mask = calibrated_probability > (0.5 + float(neutral_band))
+    bullish_flip_count = int(np.sum(bullish_flip_mask))
+    uplift = calibrated_probability - raw_probability[bearish_mask]
+    uplift_violation_mask = uplift > float(max_allowed_uplift)
+    uplift_violation_count = int(np.sum(uplift_violation_mask))
+    accepted = bullish_flip_count == 0 and uplift_violation_count == 0
+    return {
+        "applied": True,
+        "accepted": accepted,
+        "reason": (
+            "pass"
+            if accepted
+            else "bullish_remap_on_bearish_aligned_rows"
+            if bullish_flip_count > 0
+            else "excessive_bullish_uplift_on_bearish_aligned_rows"
+        ),
+        "bearish_rows": bearish_rows,
+        "bullish_flip_count": bullish_flip_count,
+        "bullish_flip_rate": float(bullish_flip_count / bearish_rows) if bearish_rows else 0.0,
+        "uplift_violation_count": uplift_violation_count,
+        "uplift_violation_rate": float(uplift_violation_count / bearish_rows) if bearish_rows else 0.0,
+        "max_uplift_on_bearish_rows": float(np.max(uplift)) if uplift.size else None,
+        "mean_uplift_on_bearish_rows": float(np.mean(uplift)) if uplift.size else None,
+        "max_calibrated_probability_on_bearish_rows": float(np.max(calibrated_probability)) if calibrated_probability.size else None,
+    }
+
+
 def _summarize_regime_calibration_coverage_from_labeled_csv(
     path: str,
     *,
@@ -205,6 +304,11 @@ def _fit_regime_calibration_from_labeled_csv(
     regime_col: str,
     min_rows: int,
     method: str,
+    higher_horizon_min_hours: float = 4.0,
+    bearish_guard_min_rows: int = 3,
+    bearish_guard_neutral_band: float = 0.0,
+    bearish_guard_max_allowed_uplift: float = 0.05,
+    suppressed_entries: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     df = pd.read_csv(path)
     required = {"p_up", "y_true"}
@@ -230,7 +334,30 @@ def _fit_regime_calibration_from_labeled_csv(
             pp_r = p_r[m_r].to_numpy(dtype=float)
             if yy_r.size < min_rows or np.unique(yy_r).size <= 1:
                 continue
-            out[f"{horizon}@{regime}"] = _fit_calibrator(pp_r, yy_r, method)
+            params = _fit_calibrator(pp_r, yy_r, method)
+            guard = _bearish_remap_guard(
+                pp_r,
+                yy_r,
+                params,
+                horizon_label=str(horizon),
+                higher_horizon_min_hours=higher_horizon_min_hours,
+                min_bearish_rows=bearish_guard_min_rows,
+                neutral_band=bearish_guard_neutral_band,
+                max_allowed_uplift=bearish_guard_max_allowed_uplift,
+            )
+            if not bool(guard.get("accepted", True)):
+                if suppressed_entries is not None:
+                    suppressed_entries.append(
+                        {
+                            "key": f"{horizon}@{regime}",
+                            "scope": "regime",
+                            "horizon": str(horizon),
+                            "regime_state": str(regime),
+                            **guard,
+                        }
+                    )
+                continue
+            out[f"{horizon}@{regime}"] = params
     return out
 
 
@@ -239,6 +366,11 @@ def _fit_base_horizon_calibration_from_labeled_csv(
     *,
     min_rows: int,
     method: str,
+    higher_horizon_min_hours: float = 4.0,
+    bearish_guard_min_rows: int = 3,
+    bearish_guard_neutral_band: float = 0.0,
+    bearish_guard_max_allowed_uplift: float = 0.05,
+    suppressed_entries: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     df = pd.read_csv(path)
     required = {"p_up", "y_true"}
@@ -258,7 +390,29 @@ def _fit_base_horizon_calibration_from_labeled_csv(
         pp_r = p_r[mask].to_numpy(dtype=float)
         if yy_r.size < min_rows or np.unique(yy_r).size <= 1:
             continue
-        out[str(horizon)] = _fit_calibrator(pp_r, yy_r, method)
+        params = _fit_calibrator(pp_r, yy_r, method)
+        guard = _bearish_remap_guard(
+            pp_r,
+            yy_r,
+            params,
+            horizon_label=str(horizon),
+            higher_horizon_min_hours=higher_horizon_min_hours,
+            min_bearish_rows=bearish_guard_min_rows,
+            neutral_band=bearish_guard_neutral_band,
+            max_allowed_uplift=bearish_guard_max_allowed_uplift,
+        )
+        if not bool(guard.get("accepted", True)):
+            if suppressed_entries is not None:
+                suppressed_entries.append(
+                    {
+                        "key": str(horizon),
+                        "scope": "base",
+                        "horizon": str(horizon),
+                        **guard,
+                    }
+                )
+            continue
+        out[str(horizon)] = params
     return out
 
 
@@ -353,6 +507,30 @@ def main() -> None:
         default=None,
         help="Optional JSON path for regime-calibration coverage diagnostics.",
     )
+    parser.add_argument(
+        "--bearish-remap-guard-min-rows",
+        type=int,
+        default=3,
+        help="Minimum bearish aligned rows (y_true=0 with raw p_up<0.5) required before higher-horizon remap suppression is enforced.",
+    )
+    parser.add_argument(
+        "--bearish-remap-guard-neutral-band",
+        type=float,
+        default=0.0,
+        help="Neutral band around 0.5 used by the higher-horizon bearish remap guard.",
+    )
+    parser.add_argument(
+        "--bearish-remap-guard-min-hours",
+        type=float,
+        default=4.0,
+        help="Minimum horizon in hours where the bearish remap guard is enforced for labeled-input calibration fits.",
+    )
+    parser.add_argument(
+        "--bearish-remap-guard-max-allowed-uplift",
+        type=float,
+        default=0.05,
+        help="Maximum allowed calibrated uplift on bearish aligned rows before a higher-horizon labeled-input calibration entry is suppressed.",
+    )
     args = parser.parse_args()
     regime_min_rows = max(int(args.min_regime_rows), int(args.min_regime_rows_floor))
 
@@ -361,6 +539,7 @@ def main() -> None:
         "enabled": bool(args.labeled_input),
         "reason": "no_labeled_input" if not args.labeled_input else "pending",
     }
+    suppressed_entries: List[Dict[str, Any]] = []
     if not args.skip_model_fit:
         for horizon in args.horizons:
             if horizon < 1:
@@ -409,6 +588,11 @@ def main() -> None:
                 args.labeled_input,
                 min_rows=regime_min_rows,
                 method=args.method,
+                higher_horizon_min_hours=float(args.bearish_remap_guard_min_hours),
+                bearish_guard_min_rows=max(int(args.bearish_remap_guard_min_rows), 1),
+                bearish_guard_neutral_band=max(float(args.bearish_remap_guard_neutral_band), 0.0),
+                bearish_guard_max_allowed_uplift=max(float(args.bearish_remap_guard_max_allowed_uplift), 0.0),
+                suppressed_entries=suppressed_entries,
             )
             if base_extra:
                 output.update(base_extra)
@@ -423,12 +607,28 @@ def main() -> None:
             regime_col=args.regime_col,
             min_rows=regime_min_rows,
             method=args.method,
+            higher_horizon_min_hours=float(args.bearish_remap_guard_min_hours),
+            bearish_guard_min_rows=max(int(args.bearish_remap_guard_min_rows), 1),
+            bearish_guard_neutral_band=max(float(args.bearish_remap_guard_neutral_band), 0.0),
+            bearish_guard_max_allowed_uplift=max(float(args.bearish_remap_guard_max_allowed_uplift), 0.0),
+            suppressed_entries=suppressed_entries,
         )
         if extra:
             output.update(extra)
             print(f"Added {len(extra)} horizon/regime calibration entries from labeled input.")
         elif coverage_payload.get("reason") == "ready":
             coverage_payload["reason"] = "ready_but_no_entries_emitted"
+        coverage_payload["bearish_remap_guard"] = {
+            "enabled": True,
+            "min_rows": max(int(args.bearish_remap_guard_min_rows), 1),
+            "neutral_band": max(float(args.bearish_remap_guard_neutral_band), 0.0),
+            "min_hours": float(args.bearish_remap_guard_min_hours),
+            "max_allowed_uplift": max(float(args.bearish_remap_guard_max_allowed_uplift), 0.0),
+            "suppressed_entries": suppressed_entries,
+            "suppressed_entry_count": int(len(suppressed_entries)),
+        }
+        if suppressed_entries:
+            print(f"Suppressed {len(suppressed_entries)} labeled-input calibration entries via bearish remap guard.")
 
     os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
     with open(args.output_path, "w", encoding="utf-8") as handle:

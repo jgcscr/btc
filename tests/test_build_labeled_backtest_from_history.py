@@ -187,6 +187,45 @@ class BuildLabeledBacktestFromHistoryTests(unittest.TestCase):
         self.assertEqual(loaded.iloc[0]["horizon"], "4h")
         self.assertEqual(loaded.iloc[0]["regime_state"], "trend_ignition")
 
+    def test_load_history_rows_can_include_archived_runtime_runs(self) -> None:
+        runtime_payload = {
+            "generated_at": "2026-01-03T00:05:00Z",
+            "predictions": {
+                "4h": {
+                    "timestamp": "2026-01-03T00:00:00Z",
+                    "p_up": 0.63,
+                    "ret_pred": 0.02,
+                    "signal_dir_only": 1.0,
+                    "expected_value": 0.004,
+                    "regime_state": "neutral",
+                }
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            history_path = tmp_path / "artifacts" / "predictions" / "history.json"
+            runtime_path = tmp_path / "artifacts" / "runtime_runs" / "research-20260103T000500-test" / "predictions.json"
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            runtime_path.parent.mkdir(parents=True, exist_ok=True)
+            history_path.write_text("[]", encoding="utf-8")
+            runtime_path.write_text(json.dumps(runtime_payload), encoding="utf-8")
+
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(tmp_path)
+                loaded = _load_history_rows(
+                    Path("artifacts/predictions/history.json"),
+                    "4h",
+                    include_runtime_runs=True,
+                )
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded.iloc[0]["horizon"], "4h")
+        self.assertEqual(loaded.iloc[0]["regime_state"], "neutral")
+
     def test_build_multi_horizon_history_labels_support_non_1h_only_requests(self) -> None:
         history_payload = [
             {
@@ -312,13 +351,21 @@ class BuildLabeledBacktestFromHistoryTests(unittest.TestCase):
             tmp_path = Path(tmp_dir)
             backtest_path = tmp_path / "backtest.csv"
             history_path = tmp_path / "history.json"
+            ohlcv_path = tmp_path / "ohlcv.csv"
             backtest.to_csv(backtest_path, index=False)
             history_path.write_text(json.dumps(history_payload), encoding="utf-8")
+            pd.DataFrame(
+                {
+                    "ts": ["2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z", "2026-01-01T02:00:00Z"],
+                    "close": [100.0, 101.0, 102.0],
+                }
+            ).to_csv(ohlcv_path, index=False)
 
             labeled, meta = _build_from_backtest(
                 backtest_csv=backtest_path,
                 history_path=history_path,
                 horizon="1h",
+                spot_ohlcv_path=ohlcv_path,
                 fold_size=2,
                 lookback_rows=None,
                 lookback_hours=None,

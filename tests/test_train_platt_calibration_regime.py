@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.scripts.train_platt_calibration import (
     _fit_base_horizon_calibration_from_labeled_csv,
@@ -177,6 +178,75 @@ class TrainPlattCalibrationRegimeTests(unittest.TestCase):
         self.assertEqual(payload["1h"]["method"], "isotonic")
         self.assertIn("x", payload["1h"])
         self.assertIn("y", payload["1h"])
+
+    def test_bearish_remap_guard_suppresses_higher_horizon_base_key(self) -> None:
+        rows = ["p_up,y_true,horizon"]
+        rows.extend(
+            [
+                "0.10,0,12h",
+                "0.11,0,12h",
+                "0.12,0,12h",
+                "0.99,1,12h",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            csv_path = Path(tmp_dir) / "labeled.csv"
+            csv_path.write_text("\n".join(rows), encoding="utf-8")
+            suppressed_entries: list[dict[str, object]] = []
+
+            with patch(
+                "src.scripts.train_platt_calibration._fit_calibrator",
+                return_value={"method": "isotonic", "x": [0.10, 0.12], "y": [0.8, 0.9]},
+            ):
+                payload = _fit_base_horizon_calibration_from_labeled_csv(
+                    str(csv_path),
+                    min_rows=3,
+                    method="isotonic",
+                    higher_horizon_min_hours=4.0,
+                    bearish_guard_min_rows=3,
+                    suppressed_entries=suppressed_entries,
+                )
+
+        self.assertNotIn("12h", payload)
+        self.assertEqual(len(suppressed_entries), 1)
+        self.assertEqual(suppressed_entries[0]["key"], "12h")
+        self.assertEqual(suppressed_entries[0]["reason"], "bullish_remap_on_bearish_aligned_rows")
+
+    def test_bearish_remap_guard_suppresses_higher_horizon_regime_key(self) -> None:
+        rows = ["p_up,y_true,regime_state,horizon"]
+        rows.extend(
+            [
+                "0.10,0,chop,8h",
+                "0.11,0,chop,8h",
+                "0.12,0,chop,8h",
+                "0.99,1,chop,8h",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            csv_path = Path(tmp_dir) / "labeled.csv"
+            csv_path.write_text("\n".join(rows), encoding="utf-8")
+            suppressed_entries: list[dict[str, object]] = []
+
+            with patch(
+                "src.scripts.train_platt_calibration._fit_calibrator",
+                return_value={"method": "isotonic", "x": [0.10, 0.12], "y": [0.8, 0.9]},
+            ):
+                payload = _fit_regime_calibration_from_labeled_csv(
+                    str(csv_path),
+                    regime_col="regime_state",
+                    min_rows=3,
+                    method="isotonic",
+                    higher_horizon_min_hours=4.0,
+                    bearish_guard_min_rows=3,
+                    suppressed_entries=suppressed_entries,
+                )
+
+        self.assertNotIn("8h@chop", payload)
+        self.assertEqual(len(suppressed_entries), 1)
+        self.assertEqual(suppressed_entries[0]["key"], "8h@chop")
+        self.assertEqual(suppressed_entries[0]["reason"], "bullish_remap_on_bearish_aligned_rows")
 
 
 if __name__ == "__main__":

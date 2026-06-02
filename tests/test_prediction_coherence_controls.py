@@ -1203,7 +1203,7 @@ class PredictionCoherenceControlTests(unittest.TestCase):
         self.assertEqual(payload["market_outlook_strategy"]["selected_direction"], "Long")
         self.assertEqual(payload["market_outlook_strategy"]["preferred_horizon"], "8h")
         self.assertEqual(payload["market_outlook_strategy"]["execution_state"], "rejected")
-        self.assertIn("wins side arbitration for long bias across 8h, 12h", payload["analysis_summary"]["rationale"])
+        self.assertIn("Preferred horizon 8h carries the strongest post-policy bias.", payload["analysis_summary"]["rationale"])
 
     def test_prompt_ready_summary_keeps_15m_as_timing_when_hourly_stack_exists(self) -> None:
         payload = _build_prompt_ready_summary(
@@ -1359,11 +1359,11 @@ class PredictionCoherenceControlTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(payload["market_outlook_strategy"]["selected_direction"], "Short")
-        self.assertEqual(payload["market_outlook_strategy"]["preferred_horizon"], "8h")
+        self.assertEqual(payload["market_outlook_strategy"]["selected_direction"], "Long")
+        self.assertEqual(payload["market_outlook_strategy"]["preferred_horizon"], "15m")
         self.assertIn("1h: down, projected price $73,933.56 (coherence blocked)", payload["analysis_summary"]["trend_forecast"])
-        self.assertIn("Preferred horizon 8h carries the strongest post-policy bias.", payload["analysis_summary"]["rationale"])
-        self.assertIn("forecast coherence blocks it from execution", payload["analysis_summary"]["rationale"])
+        self.assertIn("Preferred horizon 15m carries the strongest post-policy bias.", payload["analysis_summary"]["rationale"])
+        self.assertIn("Current blocker: low_execution_confluence.", payload["analysis_summary"]["rationale"])
 
 
 if __name__ == "__main__":

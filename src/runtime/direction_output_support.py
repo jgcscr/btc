@@ -192,7 +192,7 @@ def resolve_trade_probability_for_horizon(
 
     if (
         consensus_side is not None
-        and calibration_used_regime_key
+        and calibration_key is not None
         and raw_side == consensus_side
         and calibrated_side != consensus_side
     ):
@@ -215,11 +215,12 @@ def resolve_trade_probability_for_horizon(
 
         guard_payload = {
             "applied": True,
-            "reason": "regime_calibration_conflicts_with_forecast_consensus",
+            "reason": "calibration_conflicts_with_forecast_consensus",
             "forecast_side": consensus_side,
             "raw_side": raw_side,
             "regime_calibrated_side": calibrated_side,
             "original_applied_key": calibration_key,
+            "original_used_regime_key": bool(calibration_used_regime_key),
             "fallback_source": fallback_source,
             "raw_probability": float(raw_probability),
             "regime_calibrated_probability": float(probability),

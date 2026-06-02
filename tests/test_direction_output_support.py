@@ -115,3 +115,32 @@ def test_resolve_trade_probability_for_horizon_uses_base_calibration_when_regime
     assert guard_payload is not None
     assert guard_payload["applied"] is True
     assert guard_payload["fallback_source"] == "base_horizon_calibration"
+
+
+def test_resolve_trade_probability_for_horizon_blocks_base_calibration_flip_against_bearish_consensus() -> None:
+    probability, calibration_key, calibration_used_regime_key, guard_payload = resolve_trade_probability_for_horizon(
+        platt_calibration={
+            "12h": {"method": "isotonic", "x": [0.37, 0.37], "y": [0.79, 0.79]},
+        },
+        label="12h",
+        regime_state="chop",
+        raw_probability=0.37,
+        close=100.0,
+        projected_price=96.0,
+        ret_pred=-0.02,
+        neutral_band=0.02,
+        regime_calibration_min_platt_slope=0.05,
+        apply_probability_calibration=apply_probability_calibration,
+        direction_from_ret_pred=_direction_from_ret_pred,
+        direction_from_projected_price=_direction_from_projected_price,
+        direction_from_probability=_direction_from_probability,
+    )
+
+    assert probability == 0.37
+    assert calibration_key is None
+    assert calibration_used_regime_key is False
+    assert guard_payload is not None
+    assert guard_payload["applied"] is True
+    assert guard_payload["fallback_source"] == "raw_probability"
+    assert guard_payload["original_applied_key"] == "12h"
+    assert guard_payload["original_used_regime_key"] is False

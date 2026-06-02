@@ -887,6 +887,7 @@ def resolve_execution_target_reward(
     adapted = False
     status = "pass"
     reason = "pass"
+    adapted_reward = None
     if analytics_available and analytic_mfe_reward > 0.0:
         feasible_reward = max(analytic_mfe_reward, projection_reward)
         if feasible_reward < min_reward:
@@ -895,12 +896,13 @@ def resolve_execution_target_reward(
             feasible_rr = feasible_reward / max(risk_unit, 1e-8)
             if bool(adaptive_cfg.get("enabled", False)) and feasible_rr >= adaptive_rr_floor:
                 min_reward = feasible_reward
+                adapted_reward = feasible_reward
                 adapted = True
                 status = "pass"
             else:
-                status = "blocked"
+                status = "rejected"
                 reason = "insufficient_mfe_headroom"
-    selected_reward = max(existing_reward, projection_reward, min_reward)
+    selected_reward = float(adapted_reward) if adapted_reward is not None else max(existing_reward, projection_reward, min_reward)
     if side == "long":
         selected_take = planned_entry + selected_reward
     else:

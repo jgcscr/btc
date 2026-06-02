@@ -168,6 +168,78 @@ def prompt_effective_direction(entry: Mapping[str, Any]) -> str:
     return direction_display
 
 
+def prompt_has_calibration_flip_divergence(
+    entry: Mapping[str, Any],
+    *,
+    finite_float_or_none: Callable[[Any], float | None],
+    gap_min: float = 0.12,
+) -> bool:
+    trust_reasons = entry.get("trust_reasons") if isinstance(entry.get("trust_reasons"), Sequence) else []
+    if any(str(reason) == "calibration_flip_divergence" for reason in trust_reasons):
+        return True
+    raw_probability = finite_float_or_none(entry.get("raw_p_up"))
+    resolved_probability = finite_float_or_none(entry.get("p_up"))
+    if raw_probability is None or resolved_probability is None:
+        calibration = entry.get("probability_calibration") if isinstance(entry.get("probability_calibration"), Mapping) else {}
+        raw_probability = raw_probability if raw_probability is not None else finite_float_or_none(calibration.get("raw_probability"))
+        resolved_probability = (
+            resolved_probability if resolved_probability is not None else finite_float_or_none(calibration.get("resolved_probability"))
+        )
+    if raw_probability is None or resolved_probability is None:
+        return False
+    raw_side = prompt_direction_label(
+        "up" if raw_probability > 0.5 else "down" if raw_probability < 0.5 else "neutral"
+    )
+    resolved_side = prompt_direction_label(
+        "up" if resolved_probability > 0.5 else "down" if resolved_probability < 0.5 else "neutral"
+    )
+    return raw_side != "Neutral" and resolved_side != "Neutral" and raw_side != resolved_side and abs(resolved_probability - raw_probability) >= gap_min
+
+
+def prompt_entry_vetoed_for_preferred_horizon(
+    entry: Mapping[str, Any],
+    *,
+    finite_float_or_none: Callable[[Any], float | None],
+) -> bool:
+    plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
+    veto_reasons = {"forecast_coherence_gate", "bias_direction_conflict"}
+    if str(plan.get("reason") or "") in veto_reasons:
+        return True
+    if prompt_has_calibration_flip_divergence(entry, finite_float_or_none=finite_float_or_none):
+        return True
+    return False
+
+
+def suppress_long_bias_for_short_term_downtrend(
+    summary: Mapping[str, Mapping[str, Any]],
+    *,
+    finite_float_or_none: Callable[[Any], float | None],
+) -> bool:
+    short_15m = summary.get("15m") if isinstance(summary.get("15m"), Mapping) else None
+    short_1h = summary.get("1h") if isinstance(summary.get("1h"), Mapping) else None
+    mid_4h = summary.get("4h") if isinstance(summary.get("4h"), Mapping) else None
+    if short_15m is None or short_1h is None or mid_4h is None:
+        return False
+
+    direction_15m = prompt_effective_direction(short_15m)
+    direction_1h = prompt_effective_direction(short_1h)
+    if direction_15m not in {"down", "neutral"} or direction_1h not in {"down", "neutral"}:
+        return False
+
+    raw_probability_4h = finite_float_or_none(mid_4h.get("raw_p_up"))
+    if raw_probability_4h is None or raw_probability_4h >= 0.45:
+        return False
+
+    close_1h = finite_float_or_none(short_1h.get("close") or short_1h.get("market_price"))
+    projected_1h = finite_float_or_none(short_1h.get("projected_price"))
+    close_4h = finite_float_or_none(mid_4h.get("close") or mid_4h.get("market_price"))
+    projected_low_4h = finite_float_or_none(mid_4h.get("projected_low"))
+    if close_1h is None or projected_1h is None or close_4h is None or projected_low_4h is None:
+        return False
+
+    return projected_1h < close_1h and projected_low_4h < close_4h
+
+
 def build_prompt_forecast_clause(
     label: str,
     entry: Mapping[str, Any],
@@ -271,7 +343,7 @@ def select_prompt_candidate_entries(
     finite_float_or_none: Callable[[Any], float | None],
 ) -> list[tuple[tuple[int, int, int, float, float, float, float, float, float, float], str, Mapping[str, Any]]]:
     ranked_entries: list[tuple[tuple[int, int, int, float, float, float, float, float, float, float], str, Mapping[str, Any]]] = []
-    directional_hourly_or_higher_present = False
+    eligible_directional_hourly_or_higher_present = False
     for label, entry in summary.items():
         if not isinstance(entry, Mapping):
             continue
@@ -286,10 +358,14 @@ def select_prompt_candidate_entries(
             finite_float_or_none=finite_float_or_none,
         )
         ranked_entries.append((rank, label, entry))
-        if direction_display in {"up", "down"} and horizon >= 1.0:
-            directional_hourly_or_higher_present = True
+        if (
+            direction_display in {"up", "down"}
+            and horizon >= 1.0
+            and not prompt_entry_vetoed_for_preferred_horizon(entry, finite_float_or_none=finite_float_or_none)
+        ):
+            eligible_directional_hourly_or_higher_present = True
 
-    if directional_hourly_or_higher_present:
+    if eligible_directional_hourly_or_higher_present:
         filtered_entries = []
         for rank, label, entry in ranked_entries:
             horizon = coerce_result_horizon(entry.get("horizon_hours"))
@@ -316,7 +392,13 @@ def select_prompt_preferred_entry(
         "up": [],
         "down": [],
     }
+    suppress_long_bias = suppress_long_bias_for_short_term_downtrend(
+        summary,
+        finite_float_or_none=finite_float_or_none,
+    )
     for rank, label, entry in ranked_entries:
+        if prompt_entry_vetoed_for_preferred_horizon(entry, finite_float_or_none=finite_float_or_none):
+            continue
         direction_display = prompt_effective_direction(entry)
         if direction_display in side_entries:
             side_entries[direction_display].append((rank, label, entry))
@@ -324,6 +406,8 @@ def select_prompt_preferred_entry(
     side_profiles: list[tuple[tuple[int, int, int, int, int, int, float, float, float, float], str, tuple[tuple[int, int, int, float, float, float, float, float, float, float], str, Mapping[str, Any]], Dict[str, Any]]] = []
     for side, entries in side_entries.items():
         if not entries:
+            continue
+        if side == "up" and suppress_long_bias:
             continue
         ordered_entries = sorted(entries, key=lambda item: item[0])
         ready_like_count = 0
@@ -382,9 +466,14 @@ def select_prompt_preferred_entry(
         _best_rank, best_label, best_entry = best_entry_tuple
         return best_label, best_entry, side_profile
 
-    ranked_entries.sort(key=lambda item: item[0])
-    if ranked_entries:
-        _rank, preferred_label, preferred_entry = ranked_entries[0]
+    eligible_ranked_entries = [
+        (rank, label, entry)
+        for rank, label, entry in ranked_entries
+        if not prompt_entry_vetoed_for_preferred_horizon(entry, finite_float_or_none=finite_float_or_none)
+    ]
+    eligible_ranked_entries.sort(key=lambda item: item[0])
+    if eligible_ranked_entries:
+        _rank, preferred_label, preferred_entry = eligible_ranked_entries[0]
         return preferred_label, preferred_entry, None
     return None, None, None
 
@@ -438,6 +527,9 @@ def build_operator_summary_compact(
             caution_flags.append("8h_standalone_bias")
         if disagreement.get("triggered"):
             caution_flags.append("short_term_disagreement")
+
+    if suppress_long_bias_for_short_term_downtrend(summary, finite_float_or_none=finite_float_or_none):
+        caution_flags.append("short_term_downtrend_fail_safe")
 
     if preferred_entry is not None:
         plan = preferred_entry.get("execution_plan") if isinstance(preferred_entry.get("execution_plan"), Mapping) else {}

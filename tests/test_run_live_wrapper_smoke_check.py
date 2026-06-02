@@ -33,6 +33,18 @@ def test_validate_trust_behavior_accepts_expected_low_trust_mapping() -> None:
     assert _validate_trust_behavior(payload) == []
 
 
+def test_validate_trust_behavior_accepts_remediated_trusted_4h_mapping() -> None:
+    payload = {
+        "predictions": {
+            "1h": _base_prediction_entry(),
+            "12h": _base_prediction_entry(),
+            "4h": _base_prediction_entry(),
+        }
+    }
+
+    assert _validate_trust_behavior(payload) == []
+
+
 def test_validate_trust_behavior_flags_wrong_4h_and_8h_actions() -> None:
     payload = {
         "predictions": {
@@ -56,7 +68,7 @@ def test_validate_trust_behavior_flags_wrong_4h_and_8h_actions() -> None:
     }
 
     errors = _validate_trust_behavior(payload)
-    assert any("4h trust_hardening_action expected deweight" in err for err in errors)
+    assert any("4h low_trust horizon expected trust_hardening_action=deweight" in err for err in errors)
     assert any("8h horizon should not be emitted" in err for err in errors)
 
 

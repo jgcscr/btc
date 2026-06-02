@@ -276,6 +276,7 @@ def train_transformer(args: argparse.Namespace) -> None:
         if best_state is not None:
             model.load_state_dict(best_state["model_state_dict"])
 
+        train_metrics = evaluate(model, train_loader, device, criterion)
         test_metrics = evaluate(model, test_loader, device, criterion)
         print(
             "Test metrics: loss={loss:.6f} acc={acc:.4f} f1={f1:.4f} auc={auc}".format(
@@ -342,6 +343,7 @@ def train_transformer(args: argparse.Namespace) -> None:
             dataset_path=args.dataset_path,
             model_path=model_path,
             metrics={
+                "train": asdict(train_metrics),
                 "val": asdict(best_metrics) if best_metrics else {},
                 "test": asdict(test_metrics),
             },
@@ -354,6 +356,7 @@ def train_transformer(args: argparse.Namespace) -> None:
             extra_fields={
                 "preset": args.preset,
                 "best_epoch": best_state["epoch"] if best_state else args.epochs,
+                "train_metrics": asdict(train_metrics),
                 "val_metrics": asdict(best_metrics) if best_metrics else None,
                 "test_metrics": asdict(test_metrics),
                 "history": history,

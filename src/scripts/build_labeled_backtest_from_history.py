@@ -182,14 +182,30 @@ def _resolve_spot_ohlcv_files(path: Path) -> List[Path]:
     return candidates
 
 
-def _load_prediction_entries(path: Path, *, include_reliability_snapshots: bool = False) -> List[Dict[str, object]]:
+def _load_prediction_entries(
+    path: Path,
+    *,
+    include_reliability_snapshots: bool = False,
+    include_runtime_runs: bool = False,
+) -> List[Dict[str, object]]:
     sources: List[Path] = []
     if include_reliability_snapshots:
         sources.extend(sorted(Path("artifacts/reliability").glob("*/summary/live_predictions_snapshot.json")))
+    if include_runtime_runs:
+        sources.extend(sorted(Path("artifacts/runtime_runs").glob("*/predictions.json")))
     sources.append(path)
 
-    entries: List[Dict[str, object]] = []
+    unique_sources: List[Path] = []
+    seen_sources: set[Path] = set()
     for source in sources:
+        resolved = source.resolve()
+        if resolved in seen_sources:
+            continue
+        seen_sources.add(resolved)
+        unique_sources.append(source)
+
+    entries: List[Dict[str, object]] = []
+    for source in unique_sources:
         if not source.exists():
             continue
         payload = json.loads(source.read_text(encoding="utf-8"))
@@ -207,10 +223,15 @@ def _load_history_rows(
     horizon: str,
     *,
     include_reliability_snapshots: bool = False,
+    include_runtime_runs: bool = False,
 ) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"History not found: {path}")
-    payload = _load_prediction_entries(path, include_reliability_snapshots=include_reliability_snapshots)
+    payload = _load_prediction_entries(
+        path,
+        include_reliability_snapshots=include_reliability_snapshots,
+        include_runtime_runs=include_runtime_runs,
+    )
 
     rows: List[Dict[str, object]] = []
     for entry in payload:
@@ -489,6 +510,7 @@ def _build_from_backtest(
     lookback_rows: Optional[int],
     lookback_hours: Optional[int],
     include_reliability_snapshots: bool = False,
+    include_runtime_runs: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     backtest = _load_backtest_rows(backtest_csv)
     backtest = _apply_time_filters(backtest, lookback_rows=lookback_rows, lookback_hours=lookback_hours)
@@ -502,6 +524,7 @@ def _build_from_backtest(
             history_path,
             horizon,
             include_reliability_snapshots=include_reliability_snapshots,
+            include_runtime_runs=include_runtime_runs,
         )
         backtest_hours = set(pd.to_datetime(labeled["ts"], utc=True, errors="coerce").dt.floor("h").dropna())
         history_hours = set(pd.to_datetime(history_df["ts_hour"], utc=True, errors="coerce").dropna())
@@ -514,6 +537,7 @@ def _build_from_backtest(
                 lookback_rows=lookback_rows,
                 lookback_hours=lookback_hours,
                 include_reliability_snapshots=include_reliability_snapshots,
+                include_runtime_runs=include_runtime_runs,
             )
             fallback_meta["fallback_reason"] = "no_history_overlap"
             fallback_meta["fallback_backtest_source_path"] = str(backtest_csv)
@@ -543,11 +567,13 @@ def _build_from_history(
     lookback_rows: Optional[int],
     lookback_hours: Optional[int],
     include_reliability_snapshots: bool = False,
+    include_runtime_runs: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     history_df = _load_history_rows(
         history_path,
         horizon,
         include_reliability_snapshots=include_reliability_snapshots,
+        include_runtime_runs=include_runtime_runs,
     )
     history_df = _apply_time_filters(history_df, lookback_rows=lookback_rows, lookback_hours=lookback_hours)
     ohlcv_df = _load_ohlcv(spot_ohlcv_path, horizons=[horizon])
@@ -587,6 +613,7 @@ def _build_multi_horizon_from_history(
     lookback_rows: Optional[int],
     lookback_hours: Optional[int],
     include_reliability_snapshots: bool = False,
+    include_runtime_runs: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     normalized_horizons = [_format_horizon_label(_parse_horizon_hours(horizon)) for horizon in horizons]
     ohlcv_df = _load_ohlcv(spot_ohlcv_path, horizons=normalized_horizons)
@@ -598,6 +625,7 @@ def _build_multi_horizon_from_history(
             history_path,
             horizon,
             include_reliability_snapshots=include_reliability_snapshots,
+            include_runtime_runs=include_runtime_runs,
         )
         history_df = _apply_time_filters(history_df, lookback_rows=lookback_rows, lookback_hours=lookback_hours)
         close_next_col, ret_col = _realized_column_names(horizon)
@@ -675,6 +703,11 @@ def main() -> None:
         action="store_true",
         help="Also merge archived artifacts/reliability/*/summary/live_predictions_snapshot.json entries into the history source.",
     )
+    parser.add_argument(
+        "--include-runtime-runs",
+        action="store_true",
+        help="Also merge archived artifacts/runtime_runs/*/predictions.json entries into the history source.",
+    )
     parser.add_argument("--horizon", type=str, default="1h")
     parser.add_argument(
         "--horizons",
@@ -736,6 +769,7 @@ def main() -> None:
             lookback_rows=lookback_rows,
             lookback_hours=lookback_hours,
             include_reliability_snapshots=args.include_reliability_snapshots,
+            include_runtime_runs=args.include_runtime_runs,
         )
     elif args.prefer_backtest:
         try:
@@ -750,6 +784,7 @@ def main() -> None:
                 lookback_rows=lookback_rows,
                 lookback_hours=lookback_hours,
                 include_reliability_snapshots=args.include_reliability_snapshots,
+                include_runtime_runs=args.include_runtime_runs,
             )
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             print(f"Warning: backtest-source build unavailable ({exc}); falling back to history+OHLCV.")
@@ -761,6 +796,7 @@ def main() -> None:
                 lookback_rows=lookback_rows,
                 lookback_hours=lookback_hours,
                 include_reliability_snapshots=args.include_reliability_snapshots,
+                include_runtime_runs=args.include_runtime_runs,
             )
     else:
         labeled, meta = _build_from_history(
@@ -771,6 +807,7 @@ def main() -> None:
             lookback_rows=lookback_rows,
             lookback_hours=lookback_hours,
             include_reliability_snapshots=args.include_reliability_snapshots,
+            include_runtime_runs=args.include_runtime_runs,
         )
 
     if len(labeled) < int(args.min_rows):
@@ -791,6 +828,7 @@ def main() -> None:
         "min_rows": int(args.min_rows),
         "requested_horizons": normalized_horizons,
         "include_reliability_snapshots": bool(args.include_reliability_snapshots),
+        "include_runtime_runs": bool(args.include_runtime_runs),
         "columns": [str(c) for c in labeled.columns],
     }
     args.meta_output.parent.mkdir(parents=True, exist_ok=True)
