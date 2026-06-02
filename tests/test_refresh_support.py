@@ -283,3 +283,29 @@ def test_load_prepared_offline_rehydrates_npz_and_uses_close_snapshot(tmp_path: 
         "periods_per_hour": 4,
         "rows": 3,
     }
+
+
+def test_load_prepared_offline_reconstructs_close_from_scaler_when_close_snapshot_missing(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "dataset.npz"
+    np.savez_compressed(
+        dataset_path,
+        X_train=np.array([[1.0, -0.5]], dtype=float),
+        X_val=np.array([[2.0, 0.25]], dtype=float),
+        X_test=np.array([[3.0, 1.5]], dtype=float),
+        feature_names=np.array(["feature_a", "close"]),
+        scaler_mean=np.array([10.0, 200.0], dtype=float),
+        scaler_scale=np.array([2.0, 20.0], dtype=float),
+    )
+
+    prepared, index, close, ts_iso = load_prepared_offline(
+        dataset_path,
+        base_horizon=1.0,
+        prepare_data_for_signals_from_ohlcv_fn=lambda df_features, **kwargs: SimpleNamespace(df_all=df_features),
+        format_ts_iso_fn=lambda value: value.isoformat(),
+        stderr_write=lambda message: (_ for _ in ()).throw(AssertionError(message)),
+    )
+
+    assert prepared.df_all.iloc[index]["close"] == 1.5
+    assert index == 2
+    assert close == pytest.approx(260.0)
+    assert ts_iso.endswith("+00:00")

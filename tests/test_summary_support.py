@@ -1,6 +1,7 @@
 import json
 
 from src.runtime.summary_support import (
+    apply_short_term_downtrend_fail_safe,
     build_stub_summary,
     build_prompt_forecast_clause,
     build_execution_prior_summary,
@@ -289,6 +290,170 @@ def test_select_prompt_preferred_entry_suppresses_long_bias_when_short_term_stac
     assert preferred_entry is not None
     assert prompt_effective_direction(preferred_entry) == "down"
     assert side_profile is not None
+
+
+def test_apply_short_term_downtrend_fail_safe_blocks_long_entries() -> None:
+    summary = {
+        "15m": {
+            "horizon_hours": 0.25,
+            "direction_next_display": "down",
+            "close": 100.0,
+            "projected_price": 99.0,
+            "trade_action": "hold",
+            "signal_ensemble": 0,
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "rejected", "reason": "low_execution_confluence", "side": "short"},
+            "gate_trace": [],
+        },
+        "1h": {
+            "horizon_hours": 1.0,
+            "direction_next_display": "neutral",
+            "close": 100.0,
+            "projected_price": 99.2,
+            "trade_action": "hold",
+            "signal_ensemble": 0,
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "rejected", "reason": "low_execution_confluence", "side": "short"},
+            "gate_trace": [],
+        },
+        "4h": {
+            "horizon_hours": 4.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.41,
+            "p_up": 0.68,
+            "close": 100.0,
+            "projected_low": 98.5,
+            "trade_action": "long",
+            "signal_ensemble": 1,
+            "position_size": 0.7,
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "ready", "reason": "pass", "pending_trade_action": "long", "side": "long"},
+            "gate_trace": [],
+        },
+        "12h": {
+            "horizon_hours": 12.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.39,
+            "p_up": 0.82,
+            "close": 100.0,
+            "projected_low": 97.5,
+            "trade_action": "long",
+            "signal_ensemble": 1,
+            "position_size": 0.9,
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "waiting_pullback", "reason": "pass", "pending_trade_action": "long", "side": "long"},
+            "gate_trace": [],
+        },
+    }
+
+    updated = apply_short_term_downtrend_fail_safe(summary)
+
+    assert updated["4h"]["trade_action"] == "hold"
+    assert updated["4h"]["signal_ensemble"] == 0
+    assert updated["4h"]["position_size"] == 0.0
+    assert updated["4h"]["execution_plan"]["status"] == "rejected"
+    assert updated["4h"]["execution_plan"]["reason"] == "short_term_downtrend_fail_safe"
+    assert updated["4h"]["execution_plan"]["pending_trade_action"] == "hold"
+    assert updated["4h"]["downtrend_fail_safe"]["applied"] is True
+    assert updated["4h"]["gate_trace"][-1]["stage"] == "downtrend_fail_safe"
+    assert updated["12h"]["trade_action"] == "hold"
+    assert updated["12h"]["execution_plan"]["reason"] == "short_term_downtrend_fail_safe"
+
+    prompt_summary = build_prompt_ready_summary(
+        updated,
+        select_prompt_preferred_entry=lambda payload: select_prompt_preferred_entry(
+            payload,
+            coerce_result_horizon=coerce_result_horizon,
+            finite_float_or_none=_finite_float_or_none,
+        ),
+        horizon_sort_key=_horizon_sort_key,
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+    assert prompt_summary["market_outlook_strategy"]["selected_direction"] == "Short"
+    assert prompt_summary["market_outlook_strategy"]["preferred_horizon"] == "15m"
+
+
+def test_prompt_summary_neutralizes_confluence_gated_long_bias_during_short_term_downtrend() -> None:
+    summary = {
+        "15m": {
+            "horizon_hours": 0.25,
+            "direction_next_display": "down",
+            "close": 100.0,
+            "projected_price": 98.5,
+            "confidence_score": 0.6,
+            "execution_plan": {"status": "rejected", "reason": "bias_direction_conflict", "side": "short"},
+            "forecast_coherence": {"triggered": False},
+        },
+        "1h": {
+            "horizon_hours": 1.0,
+            "direction_next_display": "neutral",
+            "direction_next": "down",
+            "close": 100.0,
+            "projected_price": 99.0,
+            "confidence_score": 0.55,
+            "execution_plan": {"status": "rejected", "reason": "forecast_coherence_gate", "side": "short"},
+            "forecast_coherence": {"triggered": True, "reasons": ["p_up_ret_mismatch"]},
+        },
+        "4h": {
+            "horizon_hours": 4.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.72,
+            "p_up": 0.81,
+            "close": 100.0,
+            "projected_low": 99.6,
+            "entry_price": 100.0,
+            "stop_loss": 97.0,
+            "take_profit": 105.0,
+            "risk_reward_ratio": 1.67,
+            "confidence_score": 0.7,
+            "execution_plan": {"status": "bias_only_ready", "reason": "confluence_gate", "pending_trade_action": "long", "side": "long"},
+            "forecast_coherence": {"triggered": False},
+        },
+        "12h": {
+            "horizon_hours": 12.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.84,
+            "p_up": 0.88,
+            "close": 100.0,
+            "projected_low": 99.4,
+            "entry_price": 100.0,
+            "stop_loss": 96.0,
+            "take_profit": 108.0,
+            "risk_reward_ratio": 2.0,
+            "confidence_score": 0.8,
+            "execution_plan": {"status": "bias_only_ready", "reason": "confluence_gate", "pending_trade_action": "long", "side": "long"},
+            "forecast_coherence": {"triggered": False},
+        },
+    }
+
+    assert suppress_long_bias_for_short_term_downtrend(summary, finite_float_or_none=_finite_float_or_none) is True
+
+    preferred_label, preferred_entry, side_profile = select_prompt_preferred_entry(
+        summary,
+        coerce_result_horizon=coerce_result_horizon,
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+    assert preferred_label is None
+    assert preferred_entry is None
+    assert side_profile is None
+
+    result = build_prompt_ready_summary(
+        summary,
+        select_prompt_preferred_entry=lambda payload: select_prompt_preferred_entry(
+            payload,
+            coerce_result_horizon=coerce_result_horizon,
+            finite_float_or_none=_finite_float_or_none,
+        ),
+        horizon_sort_key=_horizon_sort_key,
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+    assert result["market_outlook_strategy"]["selected_direction"] == "Neutral"
+    assert result["market_outlook_strategy"]["preferred_horizon"] is None
+    assert result["operator_summary_compact"]["market_bias"] == "Neutral"
+    assert "short_term_downtrend_fail_safe" in result["operator_summary_compact"]["caution_flags"]
 
 
 def test_runtime_scalar_helpers_reject_non_finite_values() -> None:

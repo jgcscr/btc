@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Mapping
 
+from src.runtime.summary_support import apply_short_term_downtrend_fail_safe
+
 
 SummaryPayload = Dict[str, Dict[str, Any]]
 ExecutionContexts = Mapping[str, Dict[str, Any]]
@@ -45,5 +47,7 @@ def apply_post_prediction_policies(
 
     if execution_policy.get("enabled"):
         summary = apply_execution_policy(summary, execution_contexts, execution_policy)
+
+    summary = apply_short_term_downtrend_fail_safe(summary)
 
     return summary

@@ -88,6 +88,11 @@ The live wrapper constrains the CLI surface intentionally:
 - supported provider: `binanceus`
 - writes trade-ready artifacts unless `--no-write-artifacts` is supplied
 
+Current safety note:
+
+- offline and `--dry-run` executions now reconstruct raw higher-horizon `close` values from scaler statistics when cached NPZ bundles do not contain `close_all`; this avoids negative `close` and projected-price artifacts leaking from scaled features into `artifacts/predictions/latest.json`
+- prompt/operator summaries now suppress higher-horizon long bias when `15m` and `1h` remain short-term down/neutral with falling projected prices and the only higher-horizon long case is confluence-gated or already blocked by the short-term downtrend fail-safe
+
 ### Reliability Workflow
 
 Recommended runtime reliability command:
@@ -197,6 +202,10 @@ Important runtime modules for agents:
 - `src/runtime/reliability_shadow_policy_command_builders.py`: shared policy-aligned shadow candidate/companion/overlap bundle builder used across shadow veto and official-shadow variants
 - `src/runtime/prediction_dependency_support.py`: runtime-owned dependency wiring for the prediction pipeline; most normalization, policy resolution, horizon handling, and post-processing hooks now come from runtime modules rather than the legacy script
 
+Recent operator-safety change:
+
+- `src/runtime/post_prediction_pipeline.py` now applies a short-term downtrend fail-safe after execution policy, so executable long actions are rewritten to `hold` before prompt summaries are written when the short-term stack is bearish enough to invalidate higher-horizon long bias
+
 Current deliberate legacy boundaries:
 
 - `src/scripts/run_refresh_and_predict.py` still owns `parse_args(...)` and remains the broad CLI/config compatibility surface
@@ -252,6 +261,10 @@ Read these first after any runtime refresh or cadence run:
 - `artifacts/runtime_runs/<run-id>/trade_ready.json` only when the run used `--write-artifacts` or a profile with `write_artifacts: true`
 - `artifacts/runtime_runs/latest.json`
 - `artifacts/runtime_runs/latest_by_mode/<mode>.json`
+
+Current interpretation note for operators:
+
+- if `prompt_ready_summary.operator_summary_compact.caution_flags` includes `short_term_downtrend_fail_safe`, treat any higher-horizon directional upside in the per-horizon forecast clauses as informational only; the summary layer should fall back to `Neutral` or a short-horizon bearish bias instead of surfacing a standalone long recommendation
 
 Read these first after a reliability run:
 

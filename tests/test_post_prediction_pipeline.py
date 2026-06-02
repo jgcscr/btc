@@ -121,3 +121,66 @@ def test_apply_post_prediction_policies_skips_disabled_optional_stages() -> None
     )
 
     assert calls == ["trade", "post"]
+
+
+def test_apply_post_prediction_policies_applies_downtrend_fail_safe_after_execution() -> None:
+    summary = {
+        "15m": {
+            "horizon_hours": 0.25,
+            "direction_next_display": "down",
+            "close": 100.0,
+            "projected_price": 99.0,
+            "trade_action": "hold",
+            "signal_ensemble": 0,
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "rejected", "reason": "low_execution_confluence", "side": "short"},
+            "gate_trace": [],
+        },
+        "1h": {
+            "horizon_hours": 1.0,
+            "direction_next_display": "neutral",
+            "close": 100.0,
+            "projected_price": 99.2,
+            "trade_action": "hold",
+            "signal_ensemble": 0,
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "rejected", "reason": "low_execution_confluence", "side": "short"},
+            "gate_trace": [],
+        },
+        "4h": {
+            "horizon_hours": 4.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.41,
+            "close": 100.0,
+            "projected_low": 98.5,
+            "trade_action": "long",
+            "signal_ensemble": 1,
+            "position_size": 0.5,
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "ready", "reason": "pass", "pending_trade_action": "long", "side": "long"},
+            "gate_trace": [],
+        },
+    }
+
+    result = apply_post_prediction_policies(
+        summary,
+        {"4h": {"prepared": object()}},
+        forecast_coherence_policy={"enabled": False},
+        trust_hardening_policy={"enabled": False},
+        confluence_policy={"enabled": False},
+        trade_decision_policy={"enabled": True},
+        confidence_min=0.0,
+        abstention_policy={"enabled": False},
+        uncertainty_policy={"enabled": False},
+        execution_policy={"enabled": True},
+        apply_forecast_coherence_policy=lambda payload, policy: payload,
+        apply_trust_hardening_stage=lambda payload, policy: payload,
+        apply_confluence_policy=lambda payload, policy: payload,
+        apply_trade_decision_stage=lambda payload, execution_contexts, policy: payload,
+        apply_post_trade_gates=lambda payload, confidence_min, abstention_policy, uncertainty_policy: payload,
+        apply_execution_policy=lambda payload, execution_contexts, policy: payload,
+    )
+
+    assert result["4h"]["trade_action"] == "hold"
+    assert result["4h"]["signal_ensemble"] == 0
+    assert result["4h"]["execution_plan"]["reason"] == "short_term_downtrend_fail_safe"

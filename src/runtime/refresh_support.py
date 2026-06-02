@@ -235,6 +235,8 @@ def load_prepared_offline(
         raise FileNotFoundError(f"Dataset not found for offline preparation: {dataset_path}")
 
     close_snapshot: np.ndarray | None = None
+    scaler_mean: np.ndarray | None = None
+    scaler_scale: np.ndarray | None = None
     with np.load(dataset_path, allow_pickle=True) as dataset_npz:
         if "feature_names" not in dataset_npz.files:
             raise KeyError("Dataset NPZ missing feature_names for offline preparation.")
@@ -242,6 +244,10 @@ def load_prepared_offline(
         arrays = [dataset_npz[key] for key in ("X_train", "X_val", "X_test") if key in dataset_npz.files]
         if "close_all" in dataset_npz.files:
             close_snapshot = np.asarray(dataset_npz["close_all"], dtype=float)
+        if "scaler_mean" in dataset_npz.files:
+            scaler_mean = np.asarray(dataset_npz["scaler_mean"], dtype=float)
+        if "scaler_scale" in dataset_npz.files:
+            scaler_scale = np.asarray(dataset_npz["scaler_scale"], dtype=float)
 
     if not arrays:
         raise RuntimeError("Dataset NPZ does not contain any feature splits for offline preparation.")
@@ -281,6 +287,15 @@ def load_prepared_offline(
             stderr_write(
                 "Warning: close_all array length mismatch in offline dataset; falling back to scaled close values.\n"
             )
+    elif (
+        "close" in feature_names
+        and scaler_mean is not None
+        and scaler_scale is not None
+        and len(scaler_mean) == len(feature_names)
+        and len(scaler_scale) == len(feature_names)
+    ):
+        close_index = feature_names.index("close")
+        close = float(df_features.iloc[index, close_index] * scaler_scale[close_index] + scaler_mean[close_index])
     ts_iso = format_ts_iso_fn(ts_value)
     return prepared, index, close, ts_iso
 

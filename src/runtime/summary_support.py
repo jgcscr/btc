@@ -202,7 +202,7 @@ def prompt_entry_vetoed_for_preferred_horizon(
     finite_float_or_none: Callable[[Any], float | None],
 ) -> bool:
     plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
-    veto_reasons = {"forecast_coherence_gate", "bias_direction_conflict"}
+    veto_reasons = {"forecast_coherence_gate", "bias_direction_conflict", "short_term_downtrend_fail_safe"}
     if str(plan.get("reason") or "") in veto_reasons:
         return True
     if prompt_has_calibration_flip_divergence(entry, finite_float_or_none=finite_float_or_none):
@@ -226,18 +226,90 @@ def suppress_long_bias_for_short_term_downtrend(
     if direction_15m not in {"down", "neutral"} or direction_1h not in {"down", "neutral"}:
         return False
 
-    raw_probability_4h = finite_float_or_none(mid_4h.get("raw_p_up"))
-    if raw_probability_4h is None or raw_probability_4h >= 0.45:
-        return False
-
+    close_15m = finite_float_or_none(short_15m.get("close") or short_15m.get("market_price"))
+    projected_15m = finite_float_or_none(short_15m.get("projected_price"))
     close_1h = finite_float_or_none(short_1h.get("close") or short_1h.get("market_price"))
     projected_1h = finite_float_or_none(short_1h.get("projected_price"))
-    close_4h = finite_float_or_none(mid_4h.get("close") or mid_4h.get("market_price"))
-    projected_low_4h = finite_float_or_none(mid_4h.get("projected_low"))
-    if close_1h is None or projected_1h is None or close_4h is None or projected_low_4h is None:
+    if close_15m is None or projected_15m is None or close_1h is None or projected_1h is None:
+        return False
+    if projected_15m >= close_15m or projected_1h >= close_1h:
+        return False
+    if direction_15m != "down" and direction_1h != "down":
         return False
 
-    return projected_1h < close_1h and projected_low_4h < close_4h
+    raw_probability_4h = finite_float_or_none(mid_4h.get("raw_p_up"))
+    close_4h = finite_float_or_none(mid_4h.get("close") or mid_4h.get("market_price"))
+    projected_low_4h = finite_float_or_none(mid_4h.get("projected_low"))
+    if (
+        raw_probability_4h is not None
+        and raw_probability_4h < 0.45
+        and close_4h is not None
+        and projected_low_4h is not None
+        and projected_low_4h < close_4h
+    ):
+        return True
+
+    for entry in summary.values():
+        if not isinstance(entry, Mapping):
+            continue
+        plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
+        fail_safe = entry.get("downtrend_fail_safe") if isinstance(entry.get("downtrend_fail_safe"), Mapping) else {}
+        if bool(fail_safe.get("applied")) or str(plan.get("reason") or "") == "short_term_downtrend_fail_safe":
+            return True
+
+    for label in ("4h", "8h", "12h"):
+        entry = summary.get(label)
+        if not isinstance(entry, Mapping) or prompt_effective_direction(entry) != "up":
+            continue
+        plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
+        if str(plan.get("status") or "") == "bias_only_ready" and str(plan.get("reason") or "") == "confluence_gate":
+            return True
+
+    return False
+
+
+def apply_short_term_downtrend_fail_safe(summary: SummaryPayload) -> SummaryPayload:
+    if not suppress_long_bias_for_short_term_downtrend(summary, finite_float_or_none=finite_float_or_none):
+        return summary
+
+    for entry in summary.values():
+        direction = prompt_effective_direction(entry)
+        trade_action = str(entry.get("trade_action") or "hold").lower()
+        plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
+        pending_trade_action = str(plan.get("pending_trade_action") or "").lower()
+        side = str(plan.get("side") or "").lower()
+        if direction != "up" and trade_action != "long" and pending_trade_action != "long" and side != "long":
+            continue
+
+        entry["trade_action"] = "hold"
+        entry["signal_ensemble"] = 0
+        if finite_float_or_none(entry.get("position_size")) is not None:
+            entry["position_size"] = 0.0
+
+        if isinstance(entry.get("execution_plan"), Mapping):
+            updated_plan = dict(entry["execution_plan"])
+            updated_plan["status"] = "rejected"
+            updated_plan["reason"] = "short_term_downtrend_fail_safe"
+            updated_plan["pending_trade_action"] = "hold"
+            entry["execution_plan"] = updated_plan
+
+        gate_trace = entry.get("gate_trace")
+        if isinstance(gate_trace, list):
+            gate_trace.append(
+                {
+                    "stage": "downtrend_fail_safe",
+                    "reason": "short_term_downtrend_fail_safe",
+                    "triggered": True,
+                    "blocking": True,
+                }
+            )
+
+        entry["downtrend_fail_safe"] = {
+            "applied": True,
+            "reason": "short_term_downtrend_fail_safe",
+        }
+
+    return summary
 
 
 def build_prompt_forecast_clause(
@@ -470,6 +542,7 @@ def select_prompt_preferred_entry(
         (rank, label, entry)
         for rank, label, entry in ranked_entries
         if not prompt_entry_vetoed_for_preferred_horizon(entry, finite_float_or_none=finite_float_or_none)
+        and not (suppress_long_bias and prompt_effective_direction(entry) == "up")
     ]
     eligible_ranked_entries.sort(key=lambda item: item[0])
     if eligible_ranked_entries:
