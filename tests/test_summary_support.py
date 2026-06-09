@@ -1,6 +1,7 @@
 import json
 
 from src.runtime.summary_support import (
+    apply_prompt_trust_degradation,
     apply_short_term_downtrend_fail_safe,
     build_stub_summary,
     build_prompt_forecast_clause,
@@ -100,6 +101,9 @@ def _resolve_degradation_monitoring_policy(policy):
         "max_blocked_ratio": 0.8,
         "min_confidence": 0.5,
         "min_expected_net": 0.0,
+        "min_directional_samples": 2,
+        "max_long_wrong_ratio": 0.65,
+        "max_long_wrong_streak": 2,
     }
     if policy:
         resolved.update(policy)
@@ -326,6 +330,7 @@ def test_apply_short_term_downtrend_fail_safe_blocks_long_entries() -> None:
             "trade_action": "long",
             "signal_ensemble": 1,
             "position_size": 0.7,
+            "direction_output": {"direction": "up", "probability": 0.68},
             "forecast_coherence": {"triggered": False},
             "execution_plan": {"status": "ready", "reason": "pass", "pending_trade_action": "long", "side": "long"},
             "gate_trace": [],
@@ -340,6 +345,7 @@ def test_apply_short_term_downtrend_fail_safe_blocks_long_entries() -> None:
             "trade_action": "long",
             "signal_ensemble": 1,
             "position_size": 0.9,
+            "direction_output": {"direction": "up", "probability": 0.82},
             "forecast_coherence": {"triggered": False},
             "execution_plan": {"status": "waiting_pullback", "reason": "pass", "pending_trade_action": "long", "side": "long"},
             "gate_trace": [],
@@ -351,12 +357,17 @@ def test_apply_short_term_downtrend_fail_safe_blocks_long_entries() -> None:
     assert updated["4h"]["trade_action"] == "hold"
     assert updated["4h"]["signal_ensemble"] == 0
     assert updated["4h"]["position_size"] == 0.0
+    assert updated["4h"]["direction_next_display"] == "neutral"
+    assert updated["4h"]["direction_output"]["direction"] == "neutral"
+    assert updated["4h"]["direction_output"]["downtrend_fail_safe_override"]["raw_direction"] == "up"
     assert updated["4h"]["execution_plan"]["status"] == "rejected"
     assert updated["4h"]["execution_plan"]["reason"] == "short_term_downtrend_fail_safe"
     assert updated["4h"]["execution_plan"]["pending_trade_action"] == "hold"
     assert updated["4h"]["downtrend_fail_safe"]["applied"] is True
     assert updated["4h"]["gate_trace"][-1]["stage"] == "downtrend_fail_safe"
     assert updated["12h"]["trade_action"] == "hold"
+    assert updated["12h"]["direction_next_display"] == "neutral"
+    assert updated["12h"]["direction_output"]["direction"] == "neutral"
     assert updated["12h"]["execution_plan"]["reason"] == "short_term_downtrend_fail_safe"
 
     prompt_summary = build_prompt_ready_summary(
@@ -372,6 +383,100 @@ def test_apply_short_term_downtrend_fail_safe_blocks_long_entries() -> None:
 
     assert prompt_summary["market_outlook_strategy"]["selected_direction"] == "Short"
     assert prompt_summary["market_outlook_strategy"]["preferred_horizon"] == "15m"
+
+
+def test_apply_short_term_downtrend_fail_safe_handles_1h_bearish_reversal_with_4h_coherence_block() -> None:
+    summary = {
+        "15m": {
+            "horizon_hours": 0.25,
+            "direction_next_display": "up",
+            "close": 100.0,
+            "projected_price": 101.0,
+            "trade_action": "hold",
+            "signal_ensemble": 0,
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "rejected", "reason": "low_execution_confluence", "side": "long"},
+            "gate_trace": [],
+        },
+        "1h": {
+            "horizon_hours": 1.0,
+            "direction_next_display": "down",
+            "close": 100.0,
+            "projected_price": 98.0,
+            "trade_action": "hold",
+            "signal_ensemble": 0,
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "rejected", "reason": "bias_direction_conflict", "side": "short"},
+            "gate_trace": [],
+        },
+        "4h": {
+            "horizon_hours": 4.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.49,
+            "p_up": 0.12,
+            "close": 100.0,
+            "projected_low": 97.5,
+            "trade_action": "hold",
+            "signal_ensemble": 0,
+            "direction_output": {"direction": "up", "probability": 0.12},
+            "forecast_coherence": {"triggered": True, "reasons": ["p_up_ret_mismatch"]},
+            "execution_plan": {"status": "rejected", "reason": "forecast_coherence_gate", "pending_trade_action": "long", "side": "long"},
+            "gate_trace": [],
+        },
+        "8h": {
+            "horizon_hours": 8.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.78,
+            "p_up": 0.66,
+            "close": 100.0,
+            "projected_low": 99.2,
+            "trade_action": "hold",
+            "signal_ensemble": 0,
+            "direction_output": {"direction": "up", "probability": 0.66},
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "rejected", "reason": "insufficient_mfe_headroom", "pending_trade_action": "long", "side": "long"},
+            "gate_trace": [],
+        },
+        "12h": {
+            "horizon_hours": 12.0,
+            "direction_next_display": "up",
+            "raw_p_up": 0.48,
+            "p_up": 0.67,
+            "close": 100.0,
+            "projected_low": 98.8,
+            "trade_action": "hold",
+            "signal_ensemble": 0,
+            "direction_output": {"direction": "up", "probability": 0.67},
+            "forecast_coherence": {"triggered": False},
+            "execution_plan": {"status": "bias_only_ready", "reason": "confluence_gate", "pending_trade_action": "long", "side": "long"},
+            "gate_trace": [],
+        },
+    }
+
+    assert suppress_long_bias_for_short_term_downtrend(summary, finite_float_or_none=_finite_float_or_none) is True
+
+    updated = apply_short_term_downtrend_fail_safe(summary)
+
+    assert updated["4h"]["direction_next_display"] == "neutral"
+    assert updated["4h"]["direction_output"]["direction"] == "neutral"
+    assert updated["8h"]["direction_next_display"] == "neutral"
+    assert updated["8h"]["direction_output"]["direction"] == "neutral"
+    assert updated["12h"]["direction_next_display"] == "neutral"
+    assert updated["12h"]["execution_plan"]["reason"] == "short_term_downtrend_fail_safe"
+
+    prompt_summary = build_prompt_ready_summary(
+        updated,
+        select_prompt_preferred_entry=lambda payload: select_prompt_preferred_entry(
+            payload,
+            coerce_result_horizon=coerce_result_horizon,
+            finite_float_or_none=_finite_float_or_none,
+        ),
+        horizon_sort_key=_horizon_sort_key,
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+    assert prompt_summary["market_outlook_strategy"]["selected_direction"] == "Neutral"
+    assert prompt_summary["market_outlook_strategy"]["preferred_horizon"] is None
 
 
 def test_prompt_summary_neutralizes_confluence_gated_long_bias_during_short_term_downtrend() -> None:
@@ -469,7 +574,99 @@ def test_runtime_scalar_helpers_reject_non_finite_values() -> None:
         "max_blocked_ratio": 0.85,
         "min_expected_net": 0.0,
         "min_confidence": 1.0,
+        "min_directional_samples": 3,
+        "max_long_wrong_ratio": 0.65,
+        "max_long_wrong_streak": 3,
     }
+
+
+def test_build_degradation_monitoring_flags_recent_long_miss_streak() -> None:
+    history = [
+        {
+            "predictions": {
+                "4h": {
+                    "close": 100.0,
+                    "direction_next_display": "up",
+                    "confidence_score": 0.7,
+                    "trade_decision": {"expected_net": 0.2},
+                    "execution_plan": {"status": "bias_only_ready", "reason": "confluence_gate"},
+                }
+            }
+        },
+        {
+            "predictions": {
+                "4h": {
+                    "close": 95.0,
+                    "direction_next_display": "up",
+                    "confidence_score": 0.68,
+                    "trade_decision": {"expected_net": 0.15},
+                    "execution_plan": {"status": "bias_only_ready", "reason": "confluence_gate"},
+                }
+            }
+        },
+        {
+            "predictions": {
+                "4h": {
+                    "close": 90.0,
+                    "direction_next_display": "up",
+                    "confidence_score": 0.66,
+                    "trade_decision": {"expected_net": 0.1},
+                    "execution_plan": {"status": "bias_only_ready", "reason": "confluence_gate"},
+                }
+            }
+        },
+    ]
+
+    payload = build_degradation_monitoring(
+        history,
+        policy={"enabled": True, "min_snapshots": 2, "min_directional_samples": 2, "max_long_wrong_streak": 2},
+        resolve_degradation_monitoring_policy=_resolve_degradation_monitoring_policy,
+        horizon_sort_key=_horizon_sort_key,
+        finite_float_or_none=_finite_float_or_none,
+    )
+
+    assert payload["by_horizon"]["4h"]["long_wrong_count"] == 2
+    assert payload["by_horizon"]["4h"]["long_wrong_streak"] == 2
+    assert "recent_long_miss_streak" in payload["by_horizon"]["4h"]["reasons"]
+
+
+def test_apply_prompt_trust_degradation_neutralizes_long_bias_after_recent_miss_streak() -> None:
+    prompt_summary = {
+        "market_outlook_strategy": {
+            "selected_direction": "Long",
+            "preferred_horizon": "4h",
+            "confidence_level": "High",
+            "tradeable": True,
+            "execution_state": "ready",
+            "pending_trade_action": "long",
+        },
+        "analysis_summary": {
+            "rationale": "Preferred horizon 4h carries the strongest post-policy bias.",
+            "blocking_factors": [],
+        },
+        "operator_summary_compact": {
+            "market_bias": "Long",
+            "recommended_operator_action": "bias_only",
+            "primary_blocker": None,
+            "caution_flags": [],
+        },
+    }
+
+    updated = apply_prompt_trust_degradation(
+        prompt_summary,
+        {
+            "by_horizon": {
+                "4h": {
+                    "reasons": ["recent_long_miss_rate_high", "recent_long_miss_streak"],
+                }
+            }
+        },
+    )
+
+    assert updated["market_outlook_strategy"]["selected_direction"] == "Neutral"
+    assert updated["market_outlook_strategy"]["execution_state"] == "degraded_trust_hold"
+    assert updated["operator_summary_compact"]["recommended_operator_action"] == "hold"
+    assert "recent_long_miss_streak" in updated["analysis_summary"]["blocking_factors"]
 
 
 def test_build_blocked_trade_analytics_counts_rejections_and_gates():

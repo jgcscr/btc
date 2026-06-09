@@ -554,6 +554,90 @@ def classify_execution_tier(
     return "low"
 
 
+def _reference_horizon_confirmation(
+    summary: Mapping[str, Mapping[str, Any]],
+    contexts: Mapping[str, Mapping[str, Any]],
+    *,
+    horizon: float,
+    market_price: float,
+) -> Dict[str, Any]:
+    target_label = f"{int(horizon)}h" if float(horizon).is_integer() else f"{horizon:g}h"
+    entry = summary.get(target_label) if isinstance(summary.get(target_label), Mapping) else None
+    context = contexts.get(target_label) if isinstance(contexts.get(target_label), Mapping) else None
+    if entry is None or context is None:
+        return {
+            "label": target_label,
+            "confirmed": False,
+            "reason": "missing_reference_horizon",
+        }
+
+    prepared = context.get("prepared")
+    index = int(context.get("index", 0) or 0)
+    residual_std = float(context.get("residual_std", 0.0) or 0.0)
+    direction = direction_vote(entry)
+    projected_price = finite_float(entry.get("projected_price"), market_price)
+    atr_distance = compute_atr_like_price_distance(
+        prepared.df_all,
+        index=index,
+        fallback_close=market_price,
+        fallback_return_std=residual_std,
+    )
+    structure = compute_recent_structure(
+        prepared.df_all,
+        index=index,
+        session_lookback_bars=8,
+        swing_lookback_bars=6,
+        atr_distance=atr_distance,
+        fallback_price=market_price,
+    )
+    vwap = float(structure.get("vwap", market_price))
+    confirmed = direction == "up" and projected_price >= market_price and market_price >= vwap
+    reasons: list[str] = []
+    if direction != "up":
+        reasons.append("direction_not_up")
+    if projected_price < market_price:
+        reasons.append("projection_below_market")
+    if market_price < vwap:
+        reasons.append("below_vwap_reclaim")
+    return {
+        "label": target_label,
+        "confirmed": bool(confirmed),
+        "reason": "pass" if confirmed else "|".join(reasons),
+        "direction": direction,
+        "projected_price": float(projected_price),
+        "market_price": float(market_price),
+        "vwap": float(vwap),
+    }
+
+
+def _evaluate_long_confirmation(
+    summary: Mapping[str, Mapping[str, Any]],
+    contexts: Mapping[str, Mapping[str, Any]],
+    *,
+    side: str,
+    market_price: float,
+    policy: Mapping[str, Any],
+) -> Dict[str, Any]:
+    cfg = policy.get("long_confirmation") if isinstance(policy.get("long_confirmation"), Mapping) else {}
+    enabled = bool(cfg.get("enabled", False))
+    if not enabled or side != "long":
+        return {"enabled": enabled, "confirmed": True, "required_horizons": [], "checks": []}
+
+    required_horizons = [float(value) for value in (cfg.get("required_horizons") or [1.0, 4.0])]
+    checks = [
+        _reference_horizon_confirmation(summary, contexts, horizon=required, market_price=market_price)
+        for required in required_horizons
+    ]
+    confirmed = all(bool(check.get("confirmed")) for check in checks)
+    return {
+        "enabled": True,
+        "confirmed": bool(confirmed),
+        "required_horizons": required_horizons,
+        "checks": checks,
+        "blocking_reason": "long_confirmation_pending" if not confirmed else "pass",
+    }
+
+
 def build_entry_zone(
     *,
     market_price: float,
@@ -1026,6 +1110,19 @@ def resolve_execution_policy(
             minimum=0.0,
         ),
         "require_bias_alignment": bool(cfg.get("require_bias_alignment", True)),
+        "long_confirmation": {
+            "enabled": bool((cfg.get("long_confirmation") or {}).get("enabled", False)) if isinstance(cfg.get("long_confirmation"), Mapping) else False,
+            "required_horizons": sorted(
+                {
+                    normalize_horizon_value(value)
+                    for value in (
+                        ((cfg.get("long_confirmation") or {}).get("required_horizons") or [1.0, 4.0])
+                        if isinstance(cfg.get("long_confirmation"), Mapping)
+                        else [1.0, 4.0]
+                    )
+                }
+            ),
+        },
         "immediate_entry_min_support_ratio": max(min(float(cfg.get("immediate_entry_min_support_ratio") or 0.8), 1.0), 0.0),
         "pullback_entry_min_support_ratio": max(min(float(cfg.get("pullback_entry_min_support_ratio") or 0.6), 1.0), 0.0),
         "immediate_entry_min_mid_ratio": max(min(float(cfg.get("immediate_entry_min_mid_ratio") or 0.67), 1.0), 0.0),
@@ -1355,6 +1452,20 @@ def apply_execution_policy(
             plan["status"] = "rejected"
             plan["reason"] = "short_term_disagreement"
         elif disagreement_severity.get("pullback_only") and entry_mode == "immediate":
+            entry_mode = "pullback"
+            planned_entry = preferred_entry
+
+        long_confirmation = _evaluate_long_confirmation(
+            summary,
+            contexts,
+            side=side,
+            market_price=market_price,
+            policy=policy,
+        )
+        plan["long_confirmation"] = long_confirmation
+        if not bool(long_confirmation.get("confirmed", True)) and plan["reason"] == "pass":
+            plan["status"] = "bias_only_ready"
+            plan["reason"] = str(long_confirmation.get("blocking_reason") or "long_confirmation_pending")
             entry_mode = "pullback"
             planned_entry = preferred_entry
 

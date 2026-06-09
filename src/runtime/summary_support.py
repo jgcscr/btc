@@ -223,13 +223,36 @@ def suppress_long_bias_for_short_term_downtrend(
 
     direction_15m = prompt_effective_direction(short_15m)
     direction_1h = prompt_effective_direction(short_1h)
+    close_1h = finite_float_or_none(short_1h.get("close") or short_1h.get("market_price"))
+    projected_1h = finite_float_or_none(short_1h.get("projected_price"))
+    raw_probability_4h = finite_float_or_none(mid_4h.get("raw_p_up"))
+    resolved_probability_4h = finite_float_or_none(mid_4h.get("p_up"))
+    close_4h = finite_float_or_none(mid_4h.get("close") or mid_4h.get("market_price"))
+    projected_low_4h = finite_float_or_none(mid_4h.get("projected_low"))
+    plan_4h = mid_4h.get("execution_plan") if isinstance(mid_4h.get("execution_plan"), Mapping) else {}
+    coherence_4h = mid_4h.get("forecast_coherence") if isinstance(mid_4h.get("forecast_coherence"), Mapping) else {}
+    if (
+        direction_1h == "down"
+        and close_1h is not None
+        and projected_1h is not None
+        and projected_1h < close_1h
+        and resolved_probability_4h is not None
+        and resolved_probability_4h < 0.45
+        and close_4h is not None
+        and projected_low_4h is not None
+        and projected_low_4h < close_4h
+        and (
+            bool(coherence_4h.get("triggered"))
+            or str(plan_4h.get("reason") or "") == "forecast_coherence_gate"
+        )
+    ):
+        return True
+
     if direction_15m not in {"down", "neutral"} or direction_1h not in {"down", "neutral"}:
         return False
 
     close_15m = finite_float_or_none(short_15m.get("close") or short_15m.get("market_price"))
     projected_15m = finite_float_or_none(short_15m.get("projected_price"))
-    close_1h = finite_float_or_none(short_1h.get("close") or short_1h.get("market_price"))
-    projected_1h = finite_float_or_none(short_1h.get("projected_price"))
     if close_15m is None or projected_15m is None or close_1h is None or projected_1h is None:
         return False
     if projected_15m >= close_15m or projected_1h >= close_1h:
@@ -237,9 +260,6 @@ def suppress_long_bias_for_short_term_downtrend(
     if direction_15m != "down" and direction_1h != "down":
         return False
 
-    raw_probability_4h = finite_float_or_none(mid_4h.get("raw_p_up"))
-    close_4h = finite_float_or_none(mid_4h.get("close") or mid_4h.get("market_price"))
-    projected_low_4h = finite_float_or_none(mid_4h.get("projected_low"))
     if (
         raw_probability_4h is not None
         and raw_probability_4h < 0.45
@@ -283,8 +303,20 @@ def apply_short_term_downtrend_fail_safe(summary: SummaryPayload) -> SummaryPayl
 
         entry["trade_action"] = "hold"
         entry["signal_ensemble"] = 0
+        entry["direction_next_display"] = "neutral"
         if finite_float_or_none(entry.get("position_size")) is not None:
             entry["position_size"] = 0.0
+
+        direction_output = entry.get("direction_output")
+        if isinstance(direction_output, Mapping):
+            updated_direction_output = dict(direction_output)
+            updated_direction_output["downtrend_fail_safe_override"] = {
+                "applied": True,
+                "reason": "short_term_downtrend_fail_safe",
+                "raw_direction": direction_output.get("direction"),
+            }
+            updated_direction_output["direction"] = "neutral"
+            entry["direction_output"] = updated_direction_output
 
         if isinstance(entry.get("execution_plan"), Mapping):
             updated_plan = dict(entry["execution_plan"])
@@ -855,7 +887,11 @@ def build_degradation_monitoring(
         blocked = 0
         confidence_values: list[float] = []
         expected_net_values: list[float] = []
-        for entry in rows:
+        long_signal_count = 0
+        long_wrong_count = 0
+        long_wrong_streak = 0
+        current_wrong_streak = 0
+        for index, entry in enumerate(rows):
             plan = entry.get("execution_plan") if isinstance(entry.get("execution_plan"), Mapping) else {}
             status = str(plan.get("status") or "unknown")
             if status in {"ready", "waiting_pullback", "bias_only_ready"}:
@@ -870,11 +906,27 @@ def build_degradation_monitoring(
             if expected_net is not None:
                 expected_net_values.append(expected_net)
 
+            current_close = finite_float_or_none(entry.get("close") or entry.get("market_price"))
+            next_close = None
+            if index + 1 < len(rows):
+                next_close = finite_float_or_none(rows[index + 1].get("close") or rows[index + 1].get("market_price"))
+            if prompt_effective_direction(entry) == "up" and current_close is not None and next_close is not None:
+                long_signal_count += 1
+                if next_close < current_close:
+                    long_wrong_count += 1
+                    current_wrong_streak += 1
+                    long_wrong_streak = max(long_wrong_streak, current_wrong_streak)
+                else:
+                    current_wrong_streak = 0
+            elif prompt_effective_direction(entry) == "up":
+                current_wrong_streak = 0
+
         sample_count = len(rows)
         ready_ratio = ready_like / max(sample_count, 1)
         blocked_ratio = blocked / max(sample_count, 1)
         avg_confidence = float(sum(confidence_values) / max(len(confidence_values), 1)) if confidence_values else None
         avg_expected_net = float(sum(expected_net_values) / max(len(expected_net_values), 1)) if expected_net_values else None
+        long_wrong_ratio = long_wrong_count / max(long_signal_count, 1) if long_signal_count else None
         reasons: list[str] = []
         if ready_ratio < float(resolved_policy.get("min_ready_ratio", 0.1)):
             reasons.append("ready_ratio_below_floor")
@@ -884,6 +936,11 @@ def build_degradation_monitoring(
             reasons.append("confidence_below_floor")
         if avg_expected_net is not None and avg_expected_net < float(resolved_policy.get("min_expected_net", 0.0)):
             reasons.append("expected_net_below_floor")
+        if long_signal_count >= int(resolved_policy.get("min_directional_samples", 3)):
+            if long_wrong_ratio is not None and long_wrong_ratio > float(resolved_policy.get("max_long_wrong_ratio", 0.65)):
+                reasons.append("recent_long_miss_rate_high")
+            if long_wrong_streak >= int(resolved_policy.get("max_long_wrong_streak", 3)):
+                reasons.append("recent_long_miss_streak")
 
         alarm = bool(reasons)
         by_horizon[horizon_label] = {
@@ -892,6 +949,10 @@ def build_degradation_monitoring(
             "blocked_ratio": float(blocked_ratio),
             "avg_confidence": avg_confidence,
             "avg_expected_net": avg_expected_net,
+            "long_signal_count": int(long_signal_count),
+            "long_wrong_count": int(long_wrong_count),
+            "long_wrong_ratio": long_wrong_ratio,
+            "long_wrong_streak": int(long_wrong_streak),
             "alarm": alarm,
             "reasons": reasons,
         }
@@ -918,7 +979,57 @@ def resolve_degradation_monitoring_policy(config: Mapping[str, Any] | None) -> D
         "max_blocked_ratio": max(min(float(cfg.get("max_blocked_ratio") or 0.85), 1.0), 0.0),
         "min_expected_net": float(cfg.get("min_expected_net") or 0.0),
         "min_confidence": max(min(float(cfg.get("min_confidence") or 0.0), 1.0), 0.0),
+        "min_directional_samples": max(int(cfg.get("min_directional_samples") or 3), 1),
+        "max_long_wrong_ratio": max(min(float(cfg.get("max_long_wrong_ratio") or 0.65), 1.0), 0.0),
+        "max_long_wrong_streak": max(int(cfg.get("max_long_wrong_streak") or 3), 1),
     }
+
+
+def apply_prompt_trust_degradation(
+    prompt_ready_summary: Dict[str, Any],
+    degradation_monitoring: Mapping[str, Any],
+) -> Dict[str, Any]:
+    by_horizon = degradation_monitoring.get("by_horizon") if isinstance(degradation_monitoring, Mapping) else None
+    if not isinstance(by_horizon, Mapping):
+        return prompt_ready_summary
+
+    outlook = prompt_ready_summary.get("market_outlook_strategy")
+    operator = prompt_ready_summary.get("operator_summary_compact")
+    analysis = prompt_ready_summary.get("analysis_summary")
+    if not isinstance(outlook, dict) or not isinstance(operator, dict) or not isinstance(analysis, dict):
+        return prompt_ready_summary
+
+    preferred_horizon = outlook.get("preferred_horizon")
+    selected_direction = str(outlook.get("selected_direction") or "Neutral")
+    metrics = by_horizon.get(preferred_horizon) if preferred_horizon in by_horizon else None
+    if selected_direction != "Long" or not isinstance(metrics, Mapping):
+        return prompt_ready_summary
+
+    reasons = {str(reason) for reason in (metrics.get("reasons") or [])}
+    if "recent_long_miss_rate_high" not in reasons and "recent_long_miss_streak" not in reasons:
+        return prompt_ready_summary
+
+    outlook["selected_direction"] = "Neutral"
+    outlook["confidence_level"] = "Low"
+    outlook["tradeable"] = False
+    outlook["execution_state"] = "degraded_trust_hold"
+    outlook["pending_trade_action"] = "hold"
+
+    operator["market_bias"] = "Neutral"
+    operator["recommended_operator_action"] = "hold"
+    operator["primary_blocker"] = "recent_long_miss_streak"
+    caution_flags = list(operator.get("caution_flags") or [])
+    caution_flags.append("recent_long_miss_streak")
+    operator["caution_flags"] = sorted(set(str(flag) for flag in caution_flags))
+
+    blocking_factors = list(analysis.get("blocking_factors") or [])
+    blocking_factors.append("recent_long_miss_streak")
+    analysis["blocking_factors"] = sorted(set(str(factor) for factor in blocking_factors))
+    rationale = str(analysis.get("rationale") or "")
+    suffix = " Recent long-biased calls have been failing in the latest history window, so the operator view is downgraded to neutral until 1h/4h confirmation proves the regime has turned."
+    if suffix.strip() not in rationale:
+        analysis["rationale"] = rationale + suffix
+    return prompt_ready_summary
 
 
 def build_runtime_prompt_ready_summary(
@@ -967,19 +1078,7 @@ def write_prediction_summary(
     latest_prediction_path.parent.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
     execution_prior_summary = build_execution_prior_summary(summary)
-    prompt_ready_summary = build_prompt_ready_summary_fn(summary)
     blocked_trade_analytics = build_blocked_trade_analytics_fn(summary)
-    json_payload = {
-        "generated_at": generated_at,
-        "predictions": summary,
-        "execution_prior_summary": execution_prior_summary,
-        "blocked_trade_analytics": blocked_trade_analytics,
-        "prompt_ready_summary": prompt_ready_summary,
-    }
-    latest_prediction_path.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
-    print_fn(json.dumps(json_payload, indent=2))
-
-    history_entry = dict(json_payload)
     history: list[Dict[str, object]] = []
     if history_prediction_path.exists():
         try:
@@ -988,11 +1087,31 @@ def write_prediction_summary(
                 history = []
         except json.JSONDecodeError:
             history = []
-    history.append(history_entry)
+    history.append(
+        {
+            "generated_at": generated_at,
+            "predictions": summary,
+            "execution_prior_summary": execution_prior_summary,
+            "blocked_trade_analytics": blocked_trade_analytics,
+        }
+    )
+    degradation_monitoring = build_degradation_monitoring_fn(history, degradation_policy)
+    prompt_ready_summary = apply_prompt_trust_degradation(
+        build_prompt_ready_summary_fn(summary),
+        degradation_monitoring,
+    )
+    json_payload = {
+        "generated_at": generated_at,
+        "predictions": summary,
+        "execution_prior_summary": execution_prior_summary,
+        "blocked_trade_analytics": blocked_trade_analytics,
+        "prompt_ready_summary": prompt_ready_summary,
+        "degradation_monitoring": degradation_monitoring,
+    }
+    latest_prediction_path.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
+    print_fn(json.dumps(json_payload, indent=2))
+
+    history[-1] = dict(json_payload)
     history_prediction_path.parent.mkdir(parents=True, exist_ok=True)
     history_prediction_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
-    json_payload["degradation_monitoring"] = build_degradation_monitoring_fn(history, degradation_policy)
-    history[-1]["degradation_monitoring"] = json_payload["degradation_monitoring"]
-    history_prediction_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
-    latest_prediction_path.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
     return json_payload

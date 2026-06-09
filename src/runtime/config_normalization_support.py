@@ -509,6 +509,7 @@ def normalize_execution_policy_block(
             "coherence_weighting",
             "dynamic_rr_floor",
             "volatility_expansion_stop",
+            "long_confirmation",
         }:
             if not isinstance(raw_value, Mapping):
                 raise ValueError(f"{key} in execution_policy must be a mapping")
@@ -527,9 +528,9 @@ def normalize_degradation_monitoring_block(value: Mapping[str, Any], *, stderr_w
         key = str(raw_key).replace("-", "_")
         if key == "enabled":
             normalized[key] = bool(raw_value)
-        elif key in {"lookback_snapshots", "min_snapshots"}:
+        elif key in {"lookback_snapshots", "min_snapshots", "min_directional_samples", "max_long_wrong_streak"}:
             normalized[key] = int(raw_value) if raw_value is not None else None
-        elif key in {"min_ready_ratio", "max_blocked_ratio", "min_expected_net", "min_confidence"}:
+        elif key in {"min_ready_ratio", "max_blocked_ratio", "min_expected_net", "min_confidence", "max_long_wrong_ratio"}:
             normalized[key] = float(raw_value) if raw_value is not None else None
         else:
             stderr_write(f"Warning: Unknown degradation_monitoring config key '{raw_key}' ignored.\n")

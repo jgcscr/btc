@@ -348,6 +348,9 @@ execution_policy:
   short_term_min_mid_ratio: 0.8
   short_term_min_support_ratio: 0.8
   require_bias_alignment: true
+  long_confirmation:
+    enabled: true
+    required_horizons: [1, 4]
   immediate_entry_min_support_ratio: 0.8
   pullback_entry_min_support_ratio: 0.5
   immediate_entry_min_mid_ratio: 1.0

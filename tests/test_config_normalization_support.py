@@ -54,6 +54,7 @@ def _normalize(name, value):
             "write_artifacts",
             "hours",
             "p_up_min",
+            "degradation_monitoring",
             "feature_coverage_policy",
             "confluence_policy",
             "direction_output_policy",
@@ -118,12 +119,14 @@ def test_normalize_execution_policy_preserves_horizon_lists_and_nested_mappings(
             "enabled": True,
             "bias_horizons": [4, 8],
             "execution_horizons": [1, "4"],
+            "long_confirmation": {"enabled": True, "required_horizons": [1, 4]},
         },
     )
 
     assert normalized["enabled"] is True
     assert normalized["bias_horizons"] == [4.0, 8.0]
     assert normalized["execution_horizons"] == [1.0, 4.0]
+    assert normalized["long_confirmation"] == {"enabled": True, "required_horizons": [1, 4]}
 
 
 def test_normalize_execution_policy_rejects_invalid_sequence_type() -> None:
@@ -152,6 +155,54 @@ def test_normalize_confluence_policy_parses_horizon_lists_and_maps() -> None:
     assert normalized["short_horizons"] == [1.0, 4.0]
     assert normalized["mid_horizons"] == [8.0, 12.0]
     assert normalized["min_support_ratio_by_horizon"] == {"4": 1.0}
+
+
+def test_normalize_trade_decision_policy_preserves_nested_veto_blocks() -> None:
+    normalized = _normalize(
+        "trade_decision_policy",
+        {
+            "enabled": True,
+            "threshold": 0.55,
+            "midband_veto": {
+                "enabled": True,
+                "p_up_low": 0.56,
+                "p_up_high": 0.59,
+                "regime_states": ["chop", "neutral"],
+            },
+            "derivatives_shadow_adjustment": {
+                "enabled": True,
+                "mode": "futures_basis_crowding_penalty",
+                "horizons": "1h,4h,8h,12h",
+                "regime_states": ["chop", "neutral"],
+                "min_abs_basis_bps": 12.0,
+                "max_abs_ret_pred": 0.01,
+                "strength": 0.4,
+            },
+        },
+    )
+
+
+def test_normalize_degradation_monitoring_preserves_directional_degrade_keys() -> None:
+    normalized = _normalize(
+        "degradation_monitoring",
+        {
+            "enabled": True,
+            "lookback_snapshots": 30,
+            "min_snapshots": 10,
+            "min_directional_samples": 3,
+            "max_long_wrong_ratio": 0.65,
+            "max_long_wrong_streak": 3,
+        },
+    )
+
+    assert normalized == {
+        "enabled": True,
+        "lookback_snapshots": 30,
+        "min_snapshots": 10,
+        "min_directional_samples": 3,
+        "max_long_wrong_ratio": 0.65,
+        "max_long_wrong_streak": 3,
+    }
 
 
 def test_normalize_trade_decision_policy_preserves_nested_veto_blocks() -> None:
