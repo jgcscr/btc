@@ -72,6 +72,22 @@ Exact fresh research commands used successfully:
   --write-artifacts
 ```
 
+Current agent-safe command for fresh multi-timeframe analysis:
+
+```bash
+/workspaces/btc/.venv/bin/python -m src.scripts.run_research_refresh \
+  --config configs/run_refresh_and_predict.research_safe.yaml \
+  --targets 0.25,1,4,8,12 \
+  --write-artifacts
+```
+
+Current operator note:
+
+- on this workspace state, `configs/run_refresh_and_predict.default.yaml` can fail during post-prediction execution-policy handling with `compute_atr_like_price_distance() missing 1 required keyword-only argument: 'min_residual_std'`
+- the failure occurs after fresh market data ingestion and model inference starts, so a failed default-profile run may leave a new run directory under `artifacts/runtime_runs/` without refreshing top-level `latest` artifacts
+- when you need a reliable end-to-end fresh snapshot for agent analysis, prefer `configs/run_refresh_and_predict.research_safe.yaml`; the current checked-in safe profile omits the failing long-confirmation branch and completed successfully with fresh `artifacts/predictions/latest.json` and `artifacts/monitoring/trade_ready_summary.json`
+- if a default-profile run fails, read `artifacts/runtime_runs/<run-id>/summary.json` first to confirm whether the failure happened before or after prediction payload writing
+
 ### Live Inference
 
 Recommended live-style command:
@@ -290,7 +306,7 @@ The important runtime configs are:
 - `configs/run_refresh_and_predict.default.yaml`: trusted research and comparison baseline; now ignores stale `funding`, `macro`, and `onchain` sources plus approved derived zero-impute columns in the feature coverage gate so fresh spot-driven research refreshes do not fail on auxiliary lag alone
 - `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`: approved constrained live-style profile; its feature coverage gate ignores stale `funding`, `macro`, and `onchain` sources so it can continue when those auxiliary bundles lag behind fresh spot data
 - `configs/run_refresh_and_predict.live_conservative.yaml`: backward-compatible legacy-equivalent alias
-- `configs/run_refresh_and_predict.research_safe.yaml`: research fallback profile that keeps the same baseline modeling stack as `default` but downgrades feature coverage violations from hard-fail to warning
+- `configs/run_refresh_and_predict.research_safe.yaml`: research fallback profile that keeps the same baseline modeling stack as `default`, downgrades feature coverage violations from hard-fail to warning, and is the currently documented agent-safe profile for fresh 15m/1h/4h/8h/12h refreshes when the default research profile trips the execution-policy long-confirmation bug above
 - `configs/run_refresh_and_predict.shadow_simplified.yaml`: cadence daily refresh profile
 - `configs/run_refresh_and_predict.shadow_derivatives_candidate.yaml`: derivatives-first shadow package with the retuned direction ensemble, derivatives-aware regime artifacts, and shadow-only derivatives crowding penalty
 - `configs/run_refresh_and_predict.shadow_derivatives_mfe_relaxed_candidate.yaml`: shadow-only derivative candidate that relaxes MFE headroom gating without changing live configs
@@ -298,6 +314,7 @@ The important runtime configs are:
 - `configs/run_refresh_and_predict.shadow_direction_enhanced_relaxed_chop.yaml`: shadow comparison left-hand profile
 - `configs/run_refresh_and_predict.shadow_chop_suppression.yaml`: shadow comparison right-hand profile
 - `configs/run_refresh_and_predict.shadow_strict_abstention.yaml`: additional shadow-only diagnostic profile
+- `configs/run_refresh_and_predict.shadow_downtrend_remediation_candidate.yaml`: shadow-only profile that keeps the default stack but swaps in the latest downtrend-remediation calibration candidate for longitudinal comparison before any promotion decision
 
 Current wrapper-emitted live-style sizing caps from `configs/run_refresh_and_predict.live_conservative_binance_only.yaml`:
 
@@ -317,6 +334,7 @@ Current config note:
 Current execution note:
 
 - `scripts/run_cadence.sh` now delegates to the Python entrypoint `src.scripts.run_cadence`, which owns the cadence orchestration logic used by local shell execution
+- `src.scripts.run_cadence shadow` now runs both the existing shadow profile comparison and a second baseline-vs-downtrend-remediation-candidate comparison, writing the latter under `artifacts/analysis/downtrend_bias_remediation/`
 
 The shell wrapper supports four cadences:
 
